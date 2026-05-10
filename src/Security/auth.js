@@ -1,0 +1,859 @@
+/*
+ * Benjamin Orellana - 2026/05/10 - Auth JWT para usuarios internos y alumnos del sistema PREMIUM.
+ */
+
+import dotenv from 'dotenv';
+import jwt from 'jsonwebtoken';
+import bcrypt from 'bcryptjs';
+import { Op } from 'sequelize';
+
+import UsuariosModel from '../Models/Usuario/MD_TB_Usuarios.js';
+import UsuariosRolesModel from '../Models/Usuario/MD_TB_UsuariosRoles.js';
+import UsuariosSedesModel from '../Models/Usuario/MD_TB_UsuariosSedes.js';
+import SedesModel from '../Models/Sede/MD_TB_Sedes.js';
+import AlumnosModel from '../Models/Alumno/MD_TB_Alumnos.js';
+
+if (process.env.NODE_ENV !== 'production') {
+  dotenv.config();
+}
+
+const JWT_SECRET = process.env.JWT_SECRET || 'PREMIUM_SECRET_DESA_10_05_2026';
+const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '8h';
+
+const ESTADOS_USUARIO_PERMITIDOS = ['activo'];
+const ESTADOS_ALUMNO_LOGIN_PERMITIDOS = [
+  'pendiente_validacion',
+  'activo',
+  'pendiente_pago',
+  'congelado',
+  'prueba_clase_inicial'
+];
+
+const ESTADOS_ALUMNO_OPERATIVO_PERMITIDOS = [
+  'activo',
+  'pendiente_pago',
+  'prueba_clase_inicial'
+];
+
+const ROLES_INTERNOS = [
+  'SUPER_ADMIN',
+  'DIRECCION',
+  'FRONT_COMERCIAL',
+  'COORD_SEDE',
+  'PROFESOR'
+];
+
+const ROLES_GLOBAL_ACCESS = ['SUPER_ADMIN', 'DIRECCION'];
+
+const normalizarTexto = (valor) => {
+  if (valor === undefined || valor === null) return null;
+
+  const texto = String(valor).trim();
+
+  return texto.length > 0 ? texto : null;
+};
+
+const normalizarEmail = (valor) => {
+  const texto = normalizarTexto(valor);
+
+  return texto ? texto.toLowerCase() : null;
+};
+
+const normalizarTelefono = (valor) => {
+  const texto = normalizarTexto(valor);
+
+  if (!texto) return null;
+
+  const normalizado = texto.replace(/\D/g, '');
+
+  return normalizado || null;
+};
+
+const obtenerTokenDesdeRequest = (req) => {
+  const authHeader = req.headers.authorization || '';
+
+  if (authHeader.startsWith('Bearer ')) {
+    return authHeader.split(' ')[1];
+  }
+
+  return req.headers['x-access-token'] || null;
+};
+
+const obtenerIpRequest = (req) => {
+  return (
+    req.headers['x-forwarded-for'] ||
+    req.socket?.remoteAddress ||
+    req.ip ||
+    null
+  );
+};
+
+const buscarRolPorId = async (rolId) => {
+  if (!rolId) return null;
+
+  return UsuariosRolesModel.findByPk(rolId);
+};
+
+const buscarSedesUsuario = async (usuarioId) => {
+  const asignaciones = await UsuariosSedesModel.findAll({
+    where: {
+      usuario_id: usuarioId,
+      activo: 1,
+      puede_operar: 1
+    },
+    order: [
+      ['es_sede_principal', 'DESC'],
+      ['id', 'ASC']
+    ]
+  });
+
+  if (!asignaciones.length) return [];
+
+  const sedeIds = asignaciones.map((item) => item.sede_id);
+
+  const sedes = await SedesModel.findAll({
+    where: {
+      id: {
+        [Op.in]: sedeIds
+      }
+    },
+    attributes: [
+      'id',
+      'nombre',
+      'codigo',
+      'domicilio',
+      'localidad',
+      'provincia',
+      'telefono',
+      'email',
+      'activo'
+    ]
+  });
+
+  const sedesPorId = new Map(
+    sedes.map((sede) => {
+      const sedePlano =
+        typeof sede.toJSON === 'function' ? sede.toJSON() : sede;
+
+      return [Number(sedePlano.id), sedePlano];
+    })
+  );
+
+  return asignaciones
+    .map((asignacion) => {
+      const asignacionPlano =
+        typeof asignacion.toJSON === 'function'
+          ? asignacion.toJSON()
+          : asignacion;
+
+      const sede = sedesPorId.get(Number(asignacionPlano.sede_id));
+
+      if (!sede) return null;
+
+      return {
+        ...sede,
+        asignacion: {
+          id: asignacionPlano.id,
+          rol_id: asignacionPlano.rol_id,
+          es_sede_principal: Boolean(asignacionPlano.es_sede_principal),
+          puede_operar: Boolean(asignacionPlano.puede_operar),
+          puede_ver_reportes: Boolean(asignacionPlano.puede_ver_reportes),
+          puede_ver_finanzas: Boolean(asignacionPlano.puede_ver_finanzas),
+          activo: Boolean(asignacionPlano.activo)
+        }
+      };
+    })
+    .filter(Boolean);
+};
+
+const construirUsuarioSeguro = async (usuario, ultimoLoginOverride = null) => {
+  if (!usuario) return null;
+
+  const usuarioPlano =
+    typeof usuario.toJSON === 'function' ? usuario.toJSON() : usuario;
+
+  const rol = await buscarRolPorId(usuarioPlano.rol_id);
+  const rolPlano = rol && typeof rol.toJSON === 'function' ? rol.toJSON() : rol;
+
+  const sedes = await buscarSedesUsuario(usuarioPlano.id);
+
+  return {
+    id: usuarioPlano.id,
+    rol_id: usuarioPlano.rol_id,
+    sede_principal_id: usuarioPlano.sede_principal_id,
+    nombre: usuarioPlano.nombre,
+    apellido: usuarioPlano.apellido,
+    email: usuarioPlano.email,
+    telefono: usuarioPlano.telefono,
+    estado: usuarioPlano.estado,
+    ultimo_login: ultimoLoginOverride || usuarioPlano.ultimo_login,
+    created_at: usuarioPlano.created_at,
+    updated_at: usuarioPlano.updated_at,
+    rol: rolPlano
+      ? {
+          id: rolPlano.id,
+          nombre: rolPlano.nombre,
+          codigo: rolPlano.codigo
+        }
+      : null,
+    rol_codigo: rolPlano?.codigo || null,
+    sedes
+  };
+};
+
+const construirAlumnoSeguro = async (alumno, usuario = null) => {
+  if (!alumno) return null;
+
+  const alumnoPlano =
+    typeof alumno.toJSON === 'function' ? alumno.toJSON() : alumno;
+
+  const usuarioSeguro = usuario ? await construirUsuarioSeguro(usuario) : null;
+
+  return {
+    id: alumnoPlano.id,
+    usuario_app_id: alumnoPlano.usuario_app_id,
+    sede_id: alumnoPlano.sede_id,
+    nombre: alumnoPlano.nombre,
+    apellido: alumnoPlano.apellido,
+    dni: alumnoPlano.dni,
+    fecha_nacimiento: alumnoPlano.fecha_nacimiento,
+    telefono: alumnoPlano.telefono,
+    email: alumnoPlano.email,
+    domicilio: alumnoPlano.domicilio,
+    localidad: alumnoPlano.localidad,
+    provincia: alumnoPlano.provincia,
+    fecha_inicio: alumnoPlano.fecha_inicio,
+    estado: alumnoPlano.estado,
+    ultima_asistencia: alumnoPlano.ultima_asistencia,
+    dias_sin_actividad: alumnoPlano.dias_sin_actividad,
+    created_at: alumnoPlano.created_at,
+    updated_at: alumnoPlano.updated_at,
+    usuario: usuarioSeguro
+  };
+};
+
+const construirPayloadUsuario = async (usuario) => {
+  const rol = await buscarRolPorId(usuario.rol_id);
+
+  return {
+    id: usuario.id,
+    usuario_id: usuario.id,
+    rol_id: usuario.rol_id,
+    rol_codigo: rol?.codigo || null,
+    sede_principal_id: usuario.sede_principal_id || null,
+    tipo_auth: 'USUARIO'
+  };
+};
+
+const construirPayloadAlumno = (usuario, alumno) => ({
+  id: usuario.id,
+  usuario_id: usuario.id,
+  alumno_id: alumno.id,
+  sede_id: alumno.sede_id || null,
+  tipo_auth: 'ALUMNO'
+});
+
+const buscarUsuarioPorIdentificador = async (identificadorBase) => {
+  const emailLogin = normalizarEmail(identificadorBase);
+  const telefonoLogin = normalizarTelefono(identificadorBase);
+
+  const condiciones = [];
+
+  if (emailLogin) {
+    condiciones.push({
+      email: emailLogin
+    });
+  }
+
+  if (identificadorBase) {
+    condiciones.push({
+      telefono: identificadorBase
+    });
+  }
+
+  if (telefonoLogin) {
+    condiciones.push({
+      telefono: telefonoLogin
+    });
+  }
+
+  if (condiciones.length === 0) return null;
+
+  return UsuariosModel.findOne({
+    where: {
+      [Op.or]: condiciones
+    }
+  });
+};
+
+const validarPassword = async (passwordPlano, passwordHash) => {
+  if (!passwordPlano || !passwordHash) return false;
+
+  return bcrypt.compare(String(passwordPlano), passwordHash);
+};
+
+/*
+ * Benjamin Orellana - 2026/05/10 - Login de usuarios internos PREMIUM.
+ */
+export const loginUsuario = async (req, res) => {
+  try {
+    const { identificador, email, telefono, password } = req.body;
+
+    const identificadorBase = normalizarTexto(
+      identificador || email || telefono
+    );
+
+    if (!identificadorBase || !password) {
+      return res.status(400).json({
+        ok: false,
+        message: 'Debe ingresar email o teléfono y contraseña.'
+      });
+    }
+
+    const usuario = await buscarUsuarioPorIdentificador(identificadorBase);
+
+    if (!usuario) {
+      return res.status(401).json({
+        ok: false,
+        message: 'Credenciales inválidas.'
+      });
+    }
+
+    if (!ESTADOS_USUARIO_PERMITIDOS.includes(usuario.estado)) {
+      return res.status(403).json({
+        ok: false,
+        message: `El usuario se encuentra ${String(usuario.estado).toLowerCase()}.`
+      });
+    }
+
+    const rol = await buscarRolPorId(usuario.rol_id);
+
+    if (!rol || !ROLES_INTERNOS.includes(rol.codigo)) {
+      return res.status(403).json({
+        ok: false,
+        message: 'El usuario no tiene permisos para ingresar al panel interno.'
+      });
+    }
+
+    const passwordValida = await validarPassword(
+      password,
+      usuario.password_hash
+    );
+
+    if (!passwordValida) {
+      return res.status(401).json({
+        ok: false,
+        message: 'Credenciales inválidas.'
+      });
+    }
+
+    const fechaUltimoLogin = new Date();
+
+    await usuario.update({
+      ultimo_login: fechaUltimoLogin
+    });
+
+    const payload = await construirPayloadUsuario(usuario);
+
+    const token = jwt.sign(payload, JWT_SECRET, {
+      expiresIn: JWT_EXPIRES_IN
+    });
+
+    const usuarioRespuesta = await construirUsuarioSeguro(
+      usuario,
+      fechaUltimoLogin
+    );
+
+    return res.status(200).json({
+      ok: true,
+      message: 'Login correcto.',
+      token,
+      token_type: 'Bearer',
+      expires_in: JWT_EXPIRES_IN,
+      tipo_auth: 'USUARIO',
+      usuario: usuarioRespuesta
+    });
+  } catch (error) {
+    console.error('Error loginUsuario PREMIUM:', error);
+
+    return res.status(500).json({
+      ok: false,
+      message: 'Error al iniciar sesión.'
+    });
+  }
+};
+
+/*
+ * Benjamin Orellana - 2026/05/10 - Login de alumnos PREMIUM mediante usuario_app_id.
+ */
+export const loginAlumno = async (req, res) => {
+  try {
+    const { identificador, email, telefono, dni, password } = req.body;
+
+    const identificadorBase = normalizarTexto(
+      identificador || email || telefono || dni
+    );
+
+    if (!identificadorBase || !password) {
+      return res.status(400).json({
+        ok: false,
+        message: 'Debe ingresar email, teléfono o DNI y contraseña.'
+      });
+    }
+
+    let usuario = await buscarUsuarioPorIdentificador(identificadorBase);
+
+    let alumno = null;
+
+    if (usuario) {
+      alumno = await AlumnosModel.findOne({
+        where: {
+          usuario_app_id: usuario.id
+        }
+      });
+    }
+
+    if (!alumno) {
+      alumno = await AlumnosModel.findOne({
+        where: {
+          [Op.or]: [
+            { email: normalizarEmail(identificadorBase) },
+            { telefono: identificadorBase },
+            { telefono: normalizarTelefono(identificadorBase) },
+            { dni: identificadorBase }
+          ]
+        }
+      });
+
+      if (alumno?.usuario_app_id) {
+        usuario = await UsuariosModel.findByPk(alumno.usuario_app_id);
+      }
+    }
+
+    if (!usuario || !alumno) {
+      return res.status(401).json({
+        ok: false,
+        message: 'Credenciales inválidas.'
+      });
+    }
+
+    if (!ESTADOS_USUARIO_PERMITIDOS.includes(usuario.estado)) {
+      return res.status(403).json({
+        ok: false,
+        message: `El usuario del alumno se encuentra ${String(usuario.estado).toLowerCase()}.`
+      });
+    }
+
+    const rol = await buscarRolPorId(usuario.rol_id);
+
+    if (!rol || rol.codigo !== 'ALUMNO') {
+      return res.status(403).json({
+        ok: false,
+        message: 'El usuario no corresponde a un acceso de alumno.'
+      });
+    }
+
+    if (!ESTADOS_ALUMNO_LOGIN_PERMITIDOS.includes(alumno.estado)) {
+      return res.status(403).json({
+        ok: false,
+        message: `El alumno se encuentra ${String(alumno.estado).toLowerCase()}.`
+      });
+    }
+
+    const passwordValida = await validarPassword(
+      password,
+      usuario.password_hash
+    );
+
+    if (!passwordValida) {
+      return res.status(401).json({
+        ok: false,
+        message: 'Credenciales inválidas.'
+      });
+    }
+
+    const fechaUltimoLogin = new Date();
+
+    await usuario.update({
+      ultimo_login: fechaUltimoLogin
+    });
+
+    const payload = construirPayloadAlumno(usuario, alumno);
+
+    const token = jwt.sign(payload, JWT_SECRET, {
+      expiresIn: JWT_EXPIRES_IN
+    });
+
+    const alumnoRespuesta = await construirAlumnoSeguro(alumno, {
+      ...usuario.toJSON(),
+      ultimo_login: fechaUltimoLogin
+    });
+
+    return res.status(200).json({
+      ok: true,
+      message: 'Login de alumno correcto.',
+      token,
+      token_type: 'Bearer',
+      expires_in: JWT_EXPIRES_IN,
+      tipo_auth: 'ALUMNO',
+      alumno: alumnoRespuesta
+    });
+  } catch (error) {
+    console.error('Error loginAlumno PREMIUM:', error);
+
+    return res.status(500).json({
+      ok: false,
+      message: 'Error al iniciar sesión como alumno.'
+    });
+  }
+};
+
+/*
+ * Benjamin Orellana - 2026/05/10 - Middleware para validar token de usuario interno.
+ */
+export const authenticateToken = async (req, res, next) => {
+  try {
+    const token = obtenerTokenDesdeRequest(req);
+
+    if (!token) {
+      return res.status(401).json({
+        ok: false,
+        message: 'Token no proporcionado.'
+      });
+    }
+
+    const decoded = jwt.verify(token, JWT_SECRET);
+
+    if (decoded.tipo_auth !== 'USUARIO') {
+      return res.status(403).json({
+        ok: false,
+        message: 'El token no corresponde a un usuario interno.'
+      });
+    }
+
+    const usuario = await UsuariosModel.findByPk(
+      decoded.usuario_id || decoded.id,
+      {
+        attributes: {
+          exclude: ['password_hash']
+        }
+      }
+    );
+
+    if (!usuario) {
+      return res.status(401).json({
+        ok: false,
+        message: 'Usuario del token no encontrado.'
+      });
+    }
+
+    if (!ESTADOS_USUARIO_PERMITIDOS.includes(usuario.estado)) {
+      return res.status(403).json({
+        ok: false,
+        message: `El usuario se encuentra ${String(usuario.estado).toLowerCase()}.`
+      });
+    }
+
+    req.user = await construirUsuarioSeguro(usuario);
+    req.authTipo = 'USUARIO';
+
+    return next();
+  } catch (error) {
+    console.error('Error authenticateToken PREMIUM:', error);
+
+    if (error.name === 'TokenExpiredError') {
+      return res.status(401).json({
+        ok: false,
+        message: 'Token expirado.'
+      });
+    }
+
+    if (error.name === 'JsonWebTokenError') {
+      return res.status(401).json({
+        ok: false,
+        message: 'Token inválido.'
+      });
+    }
+
+    return res.status(500).json({
+      ok: false,
+      message: 'Error al validar autenticación.'
+    });
+  }
+};
+
+/*
+ * Benjamin Orellana - 2026/05/10 - Middleware para validar token de alumno.
+ */
+export const authenticateAlumnoToken = async (req, res, next) => {
+  try {
+    const token = obtenerTokenDesdeRequest(req);
+
+    if (!token) {
+      return res.status(401).json({
+        ok: false,
+        message: 'Token no proporcionado.'
+      });
+    }
+
+    const decoded = jwt.verify(token, JWT_SECRET);
+
+    if (decoded.tipo_auth !== 'ALUMNO') {
+      return res.status(403).json({
+        ok: false,
+        message: 'El token no corresponde a un alumno.'
+      });
+    }
+
+    const usuario = await UsuariosModel.findByPk(
+      decoded.usuario_id || decoded.id,
+      {
+        attributes: {
+          exclude: ['password_hash']
+        }
+      }
+    );
+
+    if (!usuario) {
+      return res.status(401).json({
+        ok: false,
+        message: 'Usuario del alumno no encontrado.'
+      });
+    }
+
+    if (!ESTADOS_USUARIO_PERMITIDOS.includes(usuario.estado)) {
+      return res.status(403).json({
+        ok: false,
+        message: `El usuario del alumno se encuentra ${String(usuario.estado).toLowerCase()}.`
+      });
+    }
+
+    const alumno = await AlumnosModel.findOne({
+      where: {
+        id: decoded.alumno_id,
+        usuario_app_id: usuario.id
+      }
+    });
+
+    if (!alumno) {
+      return res.status(401).json({
+        ok: false,
+        message: 'Alumno del token no encontrado.'
+      });
+    }
+
+    if (!ESTADOS_ALUMNO_LOGIN_PERMITIDOS.includes(alumno.estado)) {
+      return res.status(403).json({
+        ok: false,
+        message: `El alumno se encuentra ${String(alumno.estado).toLowerCase()}.`
+      });
+    }
+
+    req.user = await construirUsuarioSeguro(usuario);
+    req.alumno = await construirAlumnoSeguro(alumno, usuario);
+    req.authTipo = 'ALUMNO';
+
+    return next();
+  } catch (error) {
+    console.error('Error authenticateAlumnoToken PREMIUM:', error);
+
+    if (error.name === 'TokenExpiredError') {
+      return res.status(401).json({
+        ok: false,
+        message: 'Token expirado.'
+      });
+    }
+
+    if (error.name === 'JsonWebTokenError') {
+      return res.status(401).json({
+        ok: false,
+        message: 'Token inválido.'
+      });
+    }
+
+    return res.status(500).json({
+      ok: false,
+      message: 'Error al validar autenticación del alumno.'
+    });
+  }
+};
+
+/*
+ * Benjamin Orellana - 2026/05/10 - Middleware para exigir rol interno.
+ */
+export const requireRolGlobal = (rolesPermitidos = []) => {
+  return (req, res, next) => {
+    if (!req.user) {
+      return res.status(401).json({
+        ok: false,
+        message: 'Usuario no autenticado.'
+      });
+    }
+
+    if (!Array.isArray(rolesPermitidos) || rolesPermitidos.length === 0) {
+      return next();
+    }
+
+    if (!rolesPermitidos.includes(req.user.rol_codigo)) {
+      return res.status(403).json({
+        ok: false,
+        message: 'No tiene permisos para realizar esta acción.'
+      });
+    }
+
+    return next();
+  };
+};
+
+/*
+ * Benjamin Orellana - 2026/05/10 - Middleware para validar acceso del usuario a una sede.
+ */
+export const requireSedeAccess = (req, res, next) => {
+  try {
+    if (!req.user) {
+      return res.status(401).json({
+        ok: false,
+        message: 'Usuario no autenticado.'
+      });
+    }
+
+    if (ROLES_GLOBAL_ACCESS.includes(req.user.rol_codigo)) {
+      return next();
+    }
+
+    const sedeId = Number(
+      req.params.sede_id ||
+        req.params.sedeId ||
+        req.query.sede_id ||
+        req.body.sede_id
+    );
+
+    if (!sedeId) {
+      return res.status(400).json({
+        ok: false,
+        message: 'Debe indicar una sede para validar el acceso.'
+      });
+    }
+
+    const tieneAcceso =
+      Array.isArray(req.user.sedes) &&
+      req.user.sedes.some((sede) => {
+        return (
+          Number(sede.id) === sedeId &&
+          Boolean(sede.asignacion?.activo) &&
+          Boolean(sede.asignacion?.puede_operar)
+        );
+      });
+
+    if (!tieneAcceso) {
+      return res.status(403).json({
+        ok: false,
+        message: 'No tiene acceso a la sede indicada.'
+      });
+    }
+
+    return next();
+  } catch (error) {
+    console.error('Error requireSedeAccess PREMIUM:', error);
+
+    return res.status(500).json({
+      ok: false,
+      message: 'Error al validar acceso a sede.'
+    });
+  }
+};
+
+/*
+ * Benjamin Orellana - 2026/05/10 - Middleware para exigir alumno autenticado.
+ */
+export const requireAlumnoAuth = (req, res, next) => {
+  if (!req.alumno) {
+    return res.status(401).json({
+      ok: false,
+      message: 'Alumno no autenticado.'
+    });
+  }
+
+  return next();
+};
+
+/*
+ * Benjamin Orellana - 2026/05/10 - Middleware para exigir alumno operativo.
+ */
+export const requireAlumnoActivo = (req, res, next) => {
+  if (!req.alumno) {
+    return res.status(401).json({
+      ok: false,
+      message: 'Alumno no autenticado.'
+    });
+  }
+
+  if (!ESTADOS_ALUMNO_OPERATIVO_PERMITIDOS.includes(req.alumno.estado)) {
+    return res.status(403).json({
+      ok: false,
+      message: 'El alumno no se encuentra habilitado para realizar esta acción.'
+    });
+  }
+
+  return next();
+};
+
+/*
+ * Benjamin Orellana - 2026/05/10 - Middleware opcional para exigir permiso financiero por sede.
+ */
+export const requireFinanzasSede = (req, res, next) => {
+  if (!req.user) {
+    return res.status(401).json({
+      ok: false,
+      message: 'Usuario no autenticado.'
+    });
+  }
+
+  if (ROLES_GLOBAL_ACCESS.includes(req.user.rol_codigo)) {
+    return next();
+  }
+
+  const sedeId = Number(
+    req.params.sede_id ||
+      req.params.sedeId ||
+      req.query.sede_id ||
+      req.body.sede_id
+  );
+
+  if (!sedeId) {
+    return res.status(400).json({
+      ok: false,
+      message: 'Debe indicar una sede para validar permisos financieros.'
+    });
+  }
+
+  const sedeAsignada = Array.isArray(req.user.sedes)
+    ? req.user.sedes.find((sede) => Number(sede.id) === sedeId)
+    : null;
+
+  if (!sedeAsignada?.asignacion?.puede_ver_finanzas) {
+    return res.status(403).json({
+      ok: false,
+      message: 'No tiene permisos financieros para la sede indicada.'
+    });
+  }
+
+  return next();
+};
+
+/*
+ * Benjamin Orellana - 2026/05/10 - Hash helper para crear passwords desde seeds o controladores.
+ */
+export const hashPassword = async (password) => {
+  if (!password) return null;
+
+  return bcrypt.hash(String(password), 10);
+};
+
+/*
+ * Benjamin Orellana - 2026/05/10 - Helper público para inspección controlada del origen de request.
+ */
+export const getAuthRequestInfo = (req) => ({
+  ip: obtenerIpRequest(req),
+  user_agent: req.headers['user-agent'] || null
+});

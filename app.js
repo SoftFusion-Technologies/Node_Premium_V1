@@ -99,7 +99,9 @@ app.get(
   }
 );
 
-// Benjamin Orellana - 2026/05/10 - Ruta protegida para validar acceso del usuario a una sede.
+/*
+ * Benjamin Orellana - 2026/05/26 - Ruta protegida para validar acceso del usuario a una sede existente.
+ */
 app.get(
   '/protected-sede/:sede_id',
   authenticateToken,
@@ -109,6 +111,7 @@ app.get(
       ok: true,
       message: 'Acceso permitido a la sede indicada.',
       sede_id: req.params.sede_id,
+      sede: req.sede,
       user: req.user
     });
   }

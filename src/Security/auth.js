@@ -706,19 +706,15 @@ export const requireRolGlobal = (rolesPermitidos = []) => {
 };
 
 /*
- * Benjamin Orellana - 2026/05/10 - Middleware para validar acceso del usuario a una sede.
+ * Benjamin Orellana - 2026/05/26 - Middleware para validar existencia de sede y acceso del usuario a una sede.
  */
-export const requireSedeAccess = (req, res, next) => {
+export const requireSedeAccess = async (req, res, next) => {
   try {
     if (!req.user) {
       return res.status(401).json({
         ok: false,
         message: 'Usuario no autenticado.'
       });
-    }
-
-    if (ROLES_GLOBAL_ACCESS.includes(req.user.rol_codigo)) {
-      return next();
     }
 
     const sedeId = Number(
@@ -728,20 +724,40 @@ export const requireSedeAccess = (req, res, next) => {
         req.body.sede_id
     );
 
-    if (!sedeId) {
+    if (!sedeId || Number.isNaN(sedeId) || sedeId <= 0) {
       return res.status(400).json({
         ok: false,
-        message: 'Debe indicar una sede para validar el acceso.'
+        message: 'Debe indicar una sede válida para validar el acceso.'
       });
+    }
+
+    const sede = await SedesModel.findOne({
+      where: {
+        id: sedeId,
+        activo: 1
+      }
+    });
+
+    if (!sede) {
+      return res.status(404).json({
+        ok: false,
+        message: 'La sede indicada no existe o se encuentra inactiva.'
+      });
+    }
+
+    req.sede = typeof sede.toJSON === 'function' ? sede.toJSON() : sede;
+
+    if (ROLES_GLOBAL_ACCESS.includes(req.user.rol_codigo)) {
+      return next();
     }
 
     const tieneAcceso =
       Array.isArray(req.user.sedes) &&
-      req.user.sedes.some((sede) => {
+      req.user.sedes.some((sedeUsuario) => {
         return (
-          Number(sede.id) === sedeId &&
-          Boolean(sede.asignacion?.activo) &&
-          Boolean(sede.asignacion?.puede_operar)
+          Number(sedeUsuario.id) === sedeId &&
+          Boolean(sedeUsuario.asignacion?.activo) &&
+          Boolean(sedeUsuario.asignacion?.puede_operar)
         );
       });
 

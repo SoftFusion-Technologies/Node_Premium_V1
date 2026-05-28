@@ -27,7 +27,11 @@
 import express from 'express';
 
 // Benjamin Orellana - 2026/05/10 - Importa middlewares de seguridad para proteger rutas PREMIUM.
-import { authenticateToken, requireRolGlobal } from '../Security/auth.js';
+import {
+  authenticateToken,
+  authenticateAlumnoToken,
+  requireRolGlobal
+} from '../Security/auth.js';
 
 // Benjamin Orellana - 2026/05/10 - Importa controlador de sedes PREMIUM.
 import {
@@ -216,11 +220,7 @@ import {
 /*
  * Benjamin Orellana - 2026/05/10 - Obtiene el perfil del usuario autenticado.
  */
-router.get(
-  '/usuarios/perfil',
-  authenticateToken,
-  OBR_UsuarioPerfil_CTS
-);
+router.get('/usuarios/perfil', authenticateToken, OBR_UsuarioPerfil_CTS);
 
 /*
  * Benjamin Orellana - 2026/05/10 - Permite al usuario autenticado cambiar su propia contraseña.
@@ -602,6 +602,543 @@ router.delete(
   authenticateToken,
   requireRolGlobal(['SUPER_ADMIN', 'DIRECCION']),
   DR_PermisoRol_CTS
+);
+
+// Benjamin Orellana - 2026/05/26 - Importa controlador principal de alumnos PREMIUM.
+import {
+  OBR_Alumnos_CTS,
+  OBR_AlumnoPorId_CTS,
+  OBR_AlumnoPerfil_CTS,
+  CR_Alumnos_CTS,
+  UR_Alumnos_CTS,
+  UR_EstadoAlumnos_CTS,
+  UR_BajaAlumnos_CTS,
+  UR_CongelarAlumnos_CTS,
+  UR_ReactivarAlumnos_CTS,
+  UR_HabilitarAccesoAlumno_CTS,
+  DR_Alumnos_CTS
+} from '../Controllers/Alumno/CTS_TB_Alumnos.js';
+
+/*
+ * =========================================================
+ * ALUMNOS
+ * =========================================================
+ */
+
+/*
+ * Benjamin Orellana - 2026/05/26 - Obtiene perfil del alumno autenticado desde portal/app.
+ */
+router.get('/alumnos/perfil', authenticateAlumnoToken, OBR_AlumnoPerfil_CTS);
+
+/*
+ * Benjamin Orellana - 2026/05/26 - Lista alumnos con filtros, búsqueda y paginación.
+ */
+router.get(
+  '/alumnos',
+  authenticateToken,
+  requireRolGlobal([
+    'SUPER_ADMIN',
+    'DIRECCION',
+    'FRONT_COMERCIAL',
+    'COORD_SEDE',
+    'PROFESOR'
+  ]),
+  OBR_Alumnos_CTS
+);
+
+/*
+ * Benjamin Orellana - 2026/05/26 - Obtiene un alumno por ID.
+ */
+router.get(
+  '/alumnos/:id',
+  authenticateToken,
+  requireRolGlobal([
+    'SUPER_ADMIN',
+    'DIRECCION',
+    'FRONT_COMERCIAL',
+    'COORD_SEDE',
+    'PROFESOR'
+  ]),
+  OBR_AlumnoPorId_CTS
+);
+
+/*
+ * Benjamin Orellana - 2026/05/26 - Crea un alumno desde el panel interno.
+ */
+router.post(
+  '/alumnos',
+  authenticateToken,
+  requireRolGlobal([
+    'SUPER_ADMIN',
+    'DIRECCION',
+    'FRONT_COMERCIAL',
+    'COORD_SEDE'
+  ]),
+  CR_Alumnos_CTS
+);
+
+/*
+ * Benjamin Orellana - 2026/05/26 - Actualiza datos principales de un alumno.
+ */
+router.put(
+  '/alumnos/:id',
+  authenticateToken,
+  requireRolGlobal([
+    'SUPER_ADMIN',
+    'DIRECCION',
+    'FRONT_COMERCIAL',
+    'COORD_SEDE'
+  ]),
+  UR_Alumnos_CTS
+);
+
+/*
+ * Benjamin Orellana - 2026/05/26 - Cambia estado operativo de un alumno.
+ */
+router.patch(
+  '/alumnos/:id/estado',
+  authenticateToken,
+  requireRolGlobal([
+    'SUPER_ADMIN',
+    'DIRECCION',
+    'FRONT_COMERCIAL',
+    'COORD_SEDE'
+  ]),
+  UR_EstadoAlumnos_CTS
+);
+
+/*
+ * Benjamin Orellana - 2026/05/26 - Registra baja de un alumno.
+ */
+router.patch(
+  '/alumnos/:id/baja',
+  authenticateToken,
+  requireRolGlobal([
+    'SUPER_ADMIN',
+    'DIRECCION',
+    'FRONT_COMERCIAL',
+    'COORD_SEDE'
+  ]),
+  UR_BajaAlumnos_CTS
+);
+
+/*
+ * Benjamin Orellana - 2026/05/26 - Congela alumno.
+ */
+router.patch(
+  '/alumnos/:id/congelar',
+  authenticateToken,
+  requireRolGlobal([
+    'SUPER_ADMIN',
+    'DIRECCION',
+    'FRONT_COMERCIAL',
+    'COORD_SEDE'
+  ]),
+  UR_CongelarAlumnos_CTS
+);
+
+/*
+ * Benjamin Orellana - 2026/05/26 - Reactiva alumno.
+ */
+router.patch(
+  '/alumnos/:id/reactivar',
+  authenticateToken,
+  requireRolGlobal([
+    'SUPER_ADMIN',
+    'DIRECCION',
+    'FRONT_COMERCIAL',
+    'COORD_SEDE'
+  ]),
+  UR_ReactivarAlumnos_CTS
+);
+
+/*
+ * Benjamin Orellana - 2026/05/26 - Habilita acceso web/app para alumno.
+ */
+router.patch(
+  '/alumnos/:id/habilitar-acceso',
+  authenticateToken,
+  requireRolGlobal([
+    'SUPER_ADMIN',
+    'DIRECCION',
+    'FRONT_COMERCIAL',
+    'COORD_SEDE'
+  ]),
+  UR_HabilitarAccesoAlumno_CTS
+);
+
+/*
+ * Benjamin Orellana - 2026/05/26 - Marca alumno como inactivo sin eliminarlo físicamente.
+ */
+router.delete(
+  '/alumnos/:id',
+  authenticateToken,
+  requireRolGlobal([
+    'SUPER_ADMIN',
+    'DIRECCION',
+    'FRONT_COMERCIAL',
+    'COORD_SEDE'
+  ]),
+  DR_Alumnos_CTS
+);
+
+// Benjamin Orellana - 2026/05/26 - Importa controlador de contactos de emergencia de alumnos PREMIUM.
+import {
+  OBR_AlumnosContactosEmergencia_CTS,
+  OBR_ContactosEmergenciaPorAlumno_CTS,
+  OBR_MisContactosEmergencia_CTS,
+  OBR_ContactoEmergenciaPorId_CTS,
+  CR_AlumnosContactosEmergencia_CTS,
+  CR_MiContactoEmergencia_CTS,
+  UR_AlumnosContactosEmergencia_CTS,
+  UR_MiContactoEmergencia_CTS,
+  UR_PrincipalContactoEmergencia_CTS,
+  UR_MiPrincipalContactoEmergencia_CTS,
+  DR_AlumnosContactosEmergencia_CTS,
+  DR_MiContactoEmergencia_CTS
+} from '../Controllers/Alumno/CTS_TB_AlumnosContactosEmergencia.js';
+
+/*
+ * =========================================================
+ * ALUMNOS CONTACTOS DE EMERGENCIA
+ * =========================================================
+ */
+
+/*
+ * Benjamin Orellana - 2026/05/26 - Lista contactos de emergencia desde panel interno.
+ */
+router.get(
+  '/alumnos-contactos-emergencia',
+  authenticateToken,
+  requireRolGlobal([
+    'SUPER_ADMIN',
+    'DIRECCION',
+    'FRONT_COMERCIAL',
+    'COORD_SEDE',
+    'PROFESOR'
+  ]),
+  OBR_AlumnosContactosEmergencia_CTS
+);
+
+/*
+ * Benjamin Orellana - 2026/05/26 - Lista contactos de emergencia del alumno autenticado.
+ */
+router.get(
+  '/alumnos/perfil/contactos-emergencia',
+  authenticateAlumnoToken,
+  OBR_MisContactosEmergencia_CTS
+);
+
+/*
+ * Benjamin Orellana - 2026/05/26 - Lista contactos de emergencia de un alumno.
+ */
+router.get(
+  '/alumnos/:alumno_id/contactos-emergencia',
+  authenticateToken,
+  requireRolGlobal([
+    'SUPER_ADMIN',
+    'DIRECCION',
+    'FRONT_COMERCIAL',
+    'COORD_SEDE',
+    'PROFESOR'
+  ]),
+  OBR_ContactosEmergenciaPorAlumno_CTS
+);
+
+/*
+ * Benjamin Orellana - 2026/05/26 - Obtiene un contacto de emergencia por ID.
+ */
+router.get(
+  '/alumnos-contactos-emergencia/:id',
+  authenticateToken,
+  requireRolGlobal([
+    'SUPER_ADMIN',
+    'DIRECCION',
+    'FRONT_COMERCIAL',
+    'COORD_SEDE',
+    'PROFESOR'
+  ]),
+  OBR_ContactoEmergenciaPorId_CTS
+);
+
+/*
+ * Benjamin Orellana - 2026/05/26 - Crea contacto de emergencia desde panel interno.
+ */
+router.post(
+  '/alumnos/:alumno_id/contactos-emergencia',
+  authenticateToken,
+  requireRolGlobal([
+    'SUPER_ADMIN',
+    'DIRECCION',
+    'FRONT_COMERCIAL',
+    'COORD_SEDE'
+  ]),
+  CR_AlumnosContactosEmergencia_CTS
+);
+
+/*
+ * Benjamin Orellana - 2026/05/26 - Crea contacto de emergencia desde portal alumno.
+ */
+router.post(
+  '/alumnos/perfil/contactos-emergencia',
+  authenticateAlumnoToken,
+  CR_MiContactoEmergencia_CTS
+);
+
+/*
+ * Benjamin Orellana - 2026/05/26 - Actualiza contacto de emergencia desde panel interno.
+ */
+router.put(
+  '/alumnos-contactos-emergencia/:id',
+  authenticateToken,
+  requireRolGlobal([
+    'SUPER_ADMIN',
+    'DIRECCION',
+    'FRONT_COMERCIAL',
+    'COORD_SEDE'
+  ]),
+  UR_AlumnosContactosEmergencia_CTS
+);
+
+/*
+ * Benjamin Orellana - 2026/05/26 - Actualiza contacto de emergencia desde portal alumno.
+ */
+router.put(
+  '/alumnos/perfil/contactos-emergencia/:id',
+  authenticateAlumnoToken,
+  UR_MiContactoEmergencia_CTS
+);
+
+/*
+ * Benjamin Orellana - 2026/05/26 - Marca contacto principal desde panel interno.
+ */
+router.patch(
+  '/alumnos-contactos-emergencia/:id/principal',
+  authenticateToken,
+  requireRolGlobal([
+    'SUPER_ADMIN',
+    'DIRECCION',
+    'FRONT_COMERCIAL',
+    'COORD_SEDE'
+  ]),
+  UR_PrincipalContactoEmergencia_CTS
+);
+
+/*
+ * Benjamin Orellana - 2026/05/26 - Marca contacto principal desde portal alumno.
+ */
+router.patch(
+  '/alumnos/perfil/contactos-emergencia/:id/principal',
+  authenticateAlumnoToken,
+  UR_MiPrincipalContactoEmergencia_CTS
+);
+
+/*
+ * Benjamin Orellana - 2026/05/26 - Elimina contacto de emergencia desde panel interno.
+ */
+router.delete(
+  '/alumnos-contactos-emergencia/:id',
+  authenticateToken,
+  requireRolGlobal([
+    'SUPER_ADMIN',
+    'DIRECCION',
+    'FRONT_COMERCIAL',
+    'COORD_SEDE'
+  ]),
+  DR_AlumnosContactosEmergencia_CTS
+);
+
+/*
+ * Benjamin Orellana - 2026/05/26 - Elimina contacto de emergencia desde portal alumno.
+ */
+router.delete(
+  '/alumnos/perfil/contactos-emergencia/:id',
+  authenticateAlumnoToken,
+  DR_MiContactoEmergencia_CTS
+);
+
+// Benjamin Orellana - 2026/05/26 - Importa controlador de anamnesis de alumnos PREMIUM.
+import {
+  OBR_AlumnosAnamnesis_CTS,
+  OBR_AnamnesisPorAlumno_CTS,
+  OBR_AnamnesisActualPorAlumno_CTS,
+  OBR_AnamnesisPorId_CTS,
+  OBR_MisAnamnesis_CTS,
+  OBR_MiAnamnesisActual_CTS,
+  CR_AlumnosAnamnesis_CTS,
+  CR_MiAnamnesis_CTS,
+  UR_AlumnosAnamnesis_CTS,
+  UR_MiAnamnesis_CTS,
+  UR_RevisarAlumnosAnamnesis_CTS,
+  DR_AlumnosAnamnesis_CTS
+} from '../Controllers/Alumno/CTS_TB_AlumnosAnamnesis.js';
+
+/*
+ * =========================================================
+ * ALUMNOS ANAMNESIS
+ * =========================================================
+ */
+
+/*
+ * Benjamin Orellana - 2026/05/26 - Lista anamnesis desde panel interno.
+ */
+router.get(
+  '/alumnos-anamnesis',
+  authenticateToken,
+  requireRolGlobal([
+    'SUPER_ADMIN',
+    'DIRECCION',
+    'FRONT_COMERCIAL',
+    'COORD_SEDE',
+    'PROFESOR'
+  ]),
+  OBR_AlumnosAnamnesis_CTS
+);
+
+/*
+ * Benjamin Orellana - 2026/05/26 - Lista mis anamnesis desde portal alumno.
+ */
+router.get(
+  '/alumnos/perfil/anamnesis',
+  authenticateAlumnoToken,
+  OBR_MisAnamnesis_CTS
+);
+
+/*
+ * Benjamin Orellana - 2026/05/26 - Obtiene mi última anamnesis desde portal alumno.
+ */
+router.get(
+  '/alumnos/perfil/anamnesis/actual',
+  authenticateAlumnoToken,
+  OBR_MiAnamnesisActual_CTS
+);
+
+/*
+ * Benjamin Orellana - 2026/05/26 - Lista anamnesis de un alumno.
+ */
+router.get(
+  '/alumnos/:alumno_id/anamnesis',
+  authenticateToken,
+  requireRolGlobal([
+    'SUPER_ADMIN',
+    'DIRECCION',
+    'FRONT_COMERCIAL',
+    'COORD_SEDE',
+    'PROFESOR'
+  ]),
+  OBR_AnamnesisPorAlumno_CTS
+);
+
+/*
+ * Benjamin Orellana - 2026/05/26 - Obtiene la última anamnesis de un alumno.
+ */
+router.get(
+  '/alumnos/:alumno_id/anamnesis/actual',
+  authenticateToken,
+  requireRolGlobal([
+    'SUPER_ADMIN',
+    'DIRECCION',
+    'FRONT_COMERCIAL',
+    'COORD_SEDE',
+    'PROFESOR'
+  ]),
+  OBR_AnamnesisActualPorAlumno_CTS
+);
+
+/*
+ * Benjamin Orellana - 2026/05/26 - Obtiene anamnesis por ID.
+ */
+router.get(
+  '/alumnos-anamnesis/:id',
+  authenticateToken,
+  requireRolGlobal([
+    'SUPER_ADMIN',
+    'DIRECCION',
+    'FRONT_COMERCIAL',
+    'COORD_SEDE',
+    'PROFESOR'
+  ]),
+  OBR_AnamnesisPorId_CTS
+);
+
+/*
+ * Benjamin Orellana - 2026/05/26 - Crea anamnesis desde panel interno.
+ */
+router.post(
+  '/alumnos/:alumno_id/anamnesis',
+  authenticateToken,
+  requireRolGlobal([
+    'SUPER_ADMIN',
+    'DIRECCION',
+    'FRONT_COMERCIAL',
+    'COORD_SEDE'
+  ]),
+  CR_AlumnosAnamnesis_CTS
+);
+
+/*
+ * Benjamin Orellana - 2026/05/26 - Crea anamnesis desde portal alumno.
+ */
+router.post(
+  '/alumnos/perfil/anamnesis',
+  authenticateAlumnoToken,
+  CR_MiAnamnesis_CTS
+);
+
+/*
+ * Benjamin Orellana - 2026/05/26 - Actualiza anamnesis desde panel interno.
+ */
+router.put(
+  '/alumnos-anamnesis/:id',
+  authenticateToken,
+  requireRolGlobal([
+    'SUPER_ADMIN',
+    'DIRECCION',
+    'FRONT_COMERCIAL',
+    'COORD_SEDE',
+    'PROFESOR'
+  ]),
+  UR_AlumnosAnamnesis_CTS
+);
+
+/*
+ * Benjamin Orellana - 2026/05/26 - Actualiza anamnesis propia desde portal alumno.
+ */
+router.put(
+  '/alumnos/perfil/anamnesis/:id',
+  authenticateAlumnoToken,
+  UR_MiAnamnesis_CTS
+);
+
+/*
+ * Benjamin Orellana - 2026/05/26 - Revisa anamnesis desde panel interno/profesor.
+ */
+router.patch(
+  '/alumnos-anamnesis/:id/revisar',
+  authenticateToken,
+  requireRolGlobal([
+    'SUPER_ADMIN',
+    'DIRECCION',
+    'FRONT_COMERCIAL',
+    'COORD_SEDE',
+    'PROFESOR'
+  ]),
+  UR_RevisarAlumnosAnamnesis_CTS
+);
+
+/*
+ * Benjamin Orellana - 2026/05/26 - Elimina anamnesis desde panel interno.
+ */
+router.delete(
+  '/alumnos-anamnesis/:id',
+  authenticateToken,
+  requireRolGlobal([
+    'SUPER_ADMIN',
+    'DIRECCION',
+    'FRONT_COMERCIAL',
+    'COORD_SEDE'
+  ]),
+  DR_AlumnosAnamnesis_CTS
 );
 
 export default router;

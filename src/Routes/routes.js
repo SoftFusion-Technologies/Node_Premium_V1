@@ -1141,4 +1141,540 @@ router.delete(
   DR_AlumnosAnamnesis_CTS
 );
 
+import {
+  OBR_Planes_CTS,
+  OBR_PlanPorId_CTS,
+  CR_Planes_CTS,
+  UR_Planes_CTS,
+  UR_EstadoPlanes_CTS,
+  DR_Planes_CTS,
+  ER_Planes_CTS
+} from '../Controllers/Plan/CTS_TB_Planes.js';
+
+/*
+ * =========================================================
+ * PLANES
+ * =========================================================
+ */
+
+router.get(
+  '/planes',
+  authenticateToken,
+  OBR_Planes_CTS
+);
+
+router.get(
+  '/planes/:id',
+  authenticateToken,
+  OBR_PlanPorId_CTS
+);
+
+router.post(
+  '/planes',
+  authenticateToken,
+  CR_Planes_CTS
+);
+
+router.put(
+  '/planes/:id',
+  authenticateToken,
+  UR_Planes_CTS
+);
+
+router.patch(
+  '/planes/:id/estado',
+  authenticateToken,
+  UR_EstadoPlanes_CTS
+);
+
+router.put(
+  '/planes/:id/desactivar',
+  authenticateToken,
+  DR_Planes_CTS
+);
+
+router.delete(
+  '/planes/:id',
+  authenticateToken,
+  ER_Planes_CTS
+);
+
+import {
+  OBR_PlanesPrecios_CTS,
+  OBR_PlanPrecioPorId_CTS,
+  OBR_PreciosPorPlan_CTS,
+  OBR_PrecioVigentePlan_CTS,
+  CR_PlanesPrecios_CTS,
+  CR_PlanesPreciosMasivoPorSedes_CTS,
+  UR_PlanesPrecios_CTS,
+  UR_EstadoPlanesPrecios_CTS,
+  DR_PlanesPrecios_CTS,
+  ER_PlanesPrecios_CTS
+} from '../Controllers/Plan/CTS_TB_PlanesPrecios.js';
+
+/*
+ * =========================================================
+ * PLANES PRECIOS
+ * =========================================================
+ */
+
+router.get(
+  '/planes-precios',
+  authenticateToken,
+  OBR_PlanesPrecios_CTS
+);
+
+router.get(
+  '/planes-precios/:id',
+  authenticateToken,
+  OBR_PlanPrecioPorId_CTS
+);
+
+router.get(
+  '/planes/:plan_id/precios',
+  authenticateToken,
+  OBR_PreciosPorPlan_CTS
+);
+
+router.get(
+  '/planes/:plan_id/precio-vigente',
+  authenticateToken,
+  OBR_PrecioVigentePlan_CTS
+);
+
+router.post(
+  '/planes-precios',
+  authenticateToken,
+  CR_PlanesPrecios_CTS
+);
+
+// Benjamin Orellana - 2026/05/30 - Crea precios masivos de un plan por sede.
+router.post(
+  '/planes/:plan_id/precios/sedes',
+  authenticateToken,
+  CR_PlanesPreciosMasivoPorSedes_CTS
+);
+
+router.put(
+  '/planes-precios/:id',
+  authenticateToken,
+  UR_PlanesPrecios_CTS
+);
+
+router.patch(
+  '/planes-precios/:id/estado',
+  authenticateToken,
+  UR_EstadoPlanesPrecios_CTS
+);
+
+router.put(
+  '/planes-precios/:id/desactivar',
+  authenticateToken,
+  DR_PlanesPrecios_CTS
+);
+
+router.delete(
+  '/planes-precios/:id',
+  authenticateToken,
+  ER_PlanesPrecios_CTS
+);
+
+import {
+  OBR_AlumnosMembresias_CTS,
+  OBR_MembresiaPorId_CTS,
+  OBR_MembresiasPorAlumno_CTS,
+  OBR_MembresiaActivaAlumno_CTS,
+  CR_AlumnosMembresias_CTS,
+  UR_AlumnosMembresias_CTS,
+  UR_EstadoMembresia_CTS,
+  UR_CongelarMembresia_CTS,
+  UR_ReactivarMembresia_CTS,
+  DR_AlumnosMembresias_CTS,
+  ER_AlumnosMembresias_CTS
+} from '../Controllers/Alumno/CTS_TB_AlumnosMembresias.js';
+
+/*
+ * =========================================================
+ * ALUMNOS MEMBRESÍAS
+ * =========================================================
+ */
+
+router.get(
+  '/alumnos-membresias',
+  authenticateToken,
+  OBR_AlumnosMembresias_CTS
+);
+
+router.get(
+  '/alumnos-membresias/:id',
+  authenticateToken,
+  OBR_MembresiaPorId_CTS
+);
+
+router.get(
+  '/alumnos/:alumno_id/membresias',
+  authenticateToken,
+  OBR_MembresiasPorAlumno_CTS
+);
+
+router.get(
+  '/alumnos/:alumno_id/membresia-activa',
+  authenticateToken,
+  OBR_MembresiaActivaAlumno_CTS
+);
+
+router.post(
+  '/alumnos-membresias',
+  authenticateToken,
+  CR_AlumnosMembresias_CTS
+);
+
+router.put(
+  '/alumnos-membresias/:id',
+  authenticateToken,
+  UR_AlumnosMembresias_CTS
+);
+
+router.patch(
+  '/alumnos-membresias/:id/estado',
+  authenticateToken,
+  UR_EstadoMembresia_CTS
+);
+
+router.put(
+  '/alumnos-membresias/:id/congelar',
+  authenticateToken,
+  UR_CongelarMembresia_CTS
+);
+
+router.put(
+  '/alumnos-membresias/:id/reactivar',
+  authenticateToken,
+  UR_ReactivarMembresia_CTS
+);
+
+// Benjamin Orellana - 2026/05/29 - Baja lógica de membresía, cambia estado a cancelada.
+router.put(
+  '/alumnos-membresias/:id/desactivar',
+  authenticateToken,
+  DR_AlumnosMembresias_CTS
+);
+
+// Benjamin Orellana - 2026/05/29 - Eliminación física de membresía.
+router.delete(
+  '/alumnos-membresias/:id',
+  authenticateToken,
+  ER_AlumnosMembresias_CTS
+);
+
+import {
+  OBR_PagosMediosPago_CTS,
+  OBR_MedioPagoPorId_CTS,
+  OBR_MediosPagoActivos_CTS,
+  CR_PagosMediosPago_CTS,
+  UR_PagosMediosPago_CTS,
+  UR_EstadoMedioPago_CTS,
+  DR_PagosMediosPago_CTS,
+  ER_PagosMediosPago_CTS
+} from '../Controllers/Pago/CTS_TB_PagosMediosPago.js';
+
+/*
+ * =========================================================
+ * PAGOS MEDIOS DE PAGO
+ * =========================================================
+ */
+
+router.get(
+  '/pagos-medios-pago',
+  authenticateToken,
+  OBR_PagosMediosPago_CTS
+);
+
+router.get(
+  '/pagos-medios-pago/activos',
+  authenticateToken,
+  OBR_MediosPagoActivos_CTS
+);
+
+router.get(
+  '/pagos-medios-pago/:id',
+  authenticateToken,
+  OBR_MedioPagoPorId_CTS
+);
+
+router.post(
+  '/pagos-medios-pago',
+  authenticateToken,
+  CR_PagosMediosPago_CTS
+);
+
+router.put(
+  '/pagos-medios-pago/:id',
+  authenticateToken,
+  UR_PagosMediosPago_CTS
+);
+
+router.patch(
+  '/pagos-medios-pago/:id/estado',
+  authenticateToken,
+  UR_EstadoMedioPago_CTS
+);
+
+// Benjamin Orellana - 2026/05/29 - Baja lógica del medio de pago, mantiene el registro en la tabla.
+router.put(
+  '/pagos-medios-pago/:id/desactivar',
+  authenticateToken,
+  DR_PagosMediosPago_CTS
+);
+
+// Benjamin Orellana - 2026/05/29 - Eliminación física del medio de pago.
+router.delete(
+  '/pagos-medios-pago/:id',
+  authenticateToken,
+  ER_PagosMediosPago_CTS
+);
+
+import {
+  OBR_Pagos_CTS,
+  OBR_PagoPorId_CTS,
+  OBR_PagosPorAlumno_CTS,
+  OBR_PagosPorMensualidad_CTS,
+  OBR_HistorialPagosAlumno_CTS,
+  CR_Pagos_CTS,
+  UR_Pagos_CTS,
+  UR_ConfirmarPago_CTS,
+  UR_RechazarPago_CTS,
+  UR_AnularPago_CTS,
+  DR_Pagos_CTS,
+  ER_Pagos_CTS
+} from '../Controllers/Pago/CTS_TB_Pagos.js';
+
+/*
+ * =========================================================
+ * PAGOS
+ * =========================================================
+ */
+
+router.get(
+  '/pagos',
+  authenticateToken,
+  OBR_Pagos_CTS
+);
+
+router.get(
+  '/pagos/:id',
+  authenticateToken,
+  OBR_PagoPorId_CTS
+);
+
+router.get(
+  '/alumnos/:alumno_id/pagos',
+  authenticateToken,
+  OBR_PagosPorAlumno_CTS
+);
+
+router.get(
+  '/alumnos/:alumno_id/pagos-historial',
+  authenticateToken,
+  OBR_HistorialPagosAlumno_CTS
+);
+
+router.get(
+  '/pagos-mensualidades/:mensualidad_id/pagos',
+  authenticateToken,
+  OBR_PagosPorMensualidad_CTS
+);
+
+router.post(
+  '/pagos',
+  authenticateToken,
+  CR_Pagos_CTS
+);
+
+router.put(
+  '/pagos/:id',
+  authenticateToken,
+  UR_Pagos_CTS
+);
+
+router.put(
+  '/pagos/:id/confirmar',
+  authenticateToken,
+  UR_ConfirmarPago_CTS
+);
+
+router.put(
+  '/pagos/:id/rechazar',
+  authenticateToken,
+  UR_RechazarPago_CTS
+);
+
+router.put(
+  '/pagos/:id/anular',
+  authenticateToken,
+  UR_AnularPago_CTS
+);
+
+// Benjamin Orellana - 2026/05/30 - Baja lógica del pago, cambia estado a anulado.
+router.put(
+  '/pagos/:id/desactivar',
+  authenticateToken,
+  DR_Pagos_CTS
+);
+
+// Benjamin Orellana - 2026/05/30 - Eliminación física del pago.
+router.delete(
+  '/pagos/:id',
+  authenticateToken,
+  ER_Pagos_CTS
+);
+
+import {
+  OBR_FinanzasMovimientos_CTS,
+  OBR_FinanzaMovimientoPorId_CTS,
+  OBR_FinanzasMovimientosPorPago_CTS,
+  OBR_ResumenFinanciero_CTS,
+  OBR_ReporteCobrosPorSede_CTS,
+  CR_FinanzasMovimientos_CTS,
+  UR_FinanzasMovimientos_CTS,
+  UR_EstadoFinanzaMovimiento_CTS,
+  DR_FinanzasMovimientos_CTS,
+  ER_FinanzasMovimientos_CTS
+} from '../Controllers/Finanzas/CTS_TB_FinanzasMovimientos.js';
+
+/*
+ * =========================================================
+ * FINANZAS MOVIMIENTOS
+ * =========================================================
+ */
+
+router.get(
+  '/finanzas-movimientos',
+  authenticateToken,
+  OBR_FinanzasMovimientos_CTS
+);
+
+router.get(
+  '/finanzas-movimientos/resumen',
+  authenticateToken,
+  OBR_ResumenFinanciero_CTS
+);
+
+router.get(
+  '/finanzas-movimientos/reporte-cobros-sede',
+  authenticateToken,
+  OBR_ReporteCobrosPorSede_CTS
+);
+
+router.get(
+  '/pagos/:pago_id/finanzas-movimientos',
+  authenticateToken,
+  OBR_FinanzasMovimientosPorPago_CTS
+);
+
+router.get(
+  '/finanzas-movimientos/:id',
+  authenticateToken,
+  OBR_FinanzaMovimientoPorId_CTS
+);
+
+router.post(
+  '/finanzas-movimientos',
+  authenticateToken,
+  CR_FinanzasMovimientos_CTS
+);
+
+router.put(
+  '/finanzas-movimientos/:id',
+  authenticateToken,
+  UR_FinanzasMovimientos_CTS
+);
+
+router.patch(
+  '/finanzas-movimientos/:id/estado',
+  authenticateToken,
+  UR_EstadoFinanzaMovimiento_CTS
+);
+
+// Benjamin Orellana - 2026/05/30 - Baja lógica del movimiento financiero, cambia estado a anulado.
+router.put(
+  '/finanzas-movimientos/:id/desactivar',
+  authenticateToken,
+  DR_FinanzasMovimientos_CTS
+);
+
+// Benjamin Orellana - 2026/05/30 - Eliminación física del movimiento financiero.
+router.delete(
+  '/finanzas-movimientos/:id',
+  authenticateToken,
+  ER_FinanzasMovimientos_CTS
+);
+
+import {
+  OBR_PagosMetodosRecurrentes_CTS,
+  OBR_MetodoRecurrentePorId_CTS,
+  OBR_MetodosRecurrentesPorAlumno_CTS,
+  CR_PagosMetodosRecurrentes_CTS,
+  UR_PagosMetodosRecurrentes_CTS,
+  UR_EstadoMetodoRecurrente_CTS,
+  DR_PagosMetodosRecurrentes_CTS,
+  ER_PagosMetodosRecurrentes_CTS
+} from '../Controllers/Pago/CTS_TB_PagosMetodosRecurrentes.js';
+
+/*
+ * =========================================================
+ * PAGOS MÉTODOS RECURRENTES
+ * =========================================================
+ */
+
+router.get(
+  '/pagos-metodos-recurrentes',
+  authenticateToken,
+  OBR_PagosMetodosRecurrentes_CTS
+);
+
+router.get(
+  '/alumnos/:alumno_id/metodos-recurrentes',
+  authenticateToken,
+  OBR_MetodosRecurrentesPorAlumno_CTS
+);
+
+router.get(
+  '/pagos-metodos-recurrentes/:id',
+  authenticateToken,
+  OBR_MetodoRecurrentePorId_CTS
+);
+
+router.post(
+  '/pagos-metodos-recurrentes',
+  authenticateToken,
+  CR_PagosMetodosRecurrentes_CTS
+);
+
+router.put(
+  '/pagos-metodos-recurrentes/:id',
+  authenticateToken,
+  UR_PagosMetodosRecurrentes_CTS
+);
+
+router.patch(
+  '/pagos-metodos-recurrentes/:id/estado',
+  authenticateToken,
+  UR_EstadoMetodoRecurrente_CTS
+);
+
+// Benjamin Orellana - 2026/05/30 - Baja lógica del método recurrente, cambia estado a eliminado.
+router.put(
+  '/pagos-metodos-recurrentes/:id/desactivar',
+  authenticateToken,
+  DR_PagosMetodosRecurrentes_CTS
+);
+
+// Benjamin Orellana - 2026/05/30 - Eliminación física del método recurrente.
+router.delete(
+  '/pagos-metodos-recurrentes/:id',
+  authenticateToken,
+  ER_PagosMetodosRecurrentes_CTS
+);
+
 export default router;

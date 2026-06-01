@@ -37,6 +37,7 @@ import {
 import {
   OBRSedes_CTS,
   OBRSedesActivas_CTS,
+  OBRSedesPublicas_CTS,
   OBRSedePorId_CTS,
   CRSede_CTS,
   URSede_CTS,
@@ -72,6 +73,11 @@ router.get('/sedes', authenticateToken, OBRSedes_CTS);
  * Benjamin Orellana - 2026/05/10 - Lista sedes activas para selects operativos.
  */
 router.get('/sedes/activas', authenticateToken, OBRSedesActivas_CTS);
+
+/*
+ * Benjamin Orellana - 2026/06/01 - Endpoint público para obtener ID y nombre de sedes activas.
+ */
+router.get('/sedes-publicas', OBRSedesPublicas_CTS);
 
 /*
  * Benjamin Orellana - 2026/05/10 - Obtiene una sede por ID.
@@ -1144,6 +1150,7 @@ router.delete(
 import {
   OBR_Planes_CTS,
   OBR_PlanPorId_CTS,
+  OBR_PlanesPublicos_CTS,
   CR_Planes_CTS,
   UR_Planes_CTS,
   UR_EstadoPlanes_CTS,
@@ -1167,6 +1174,12 @@ router.get(
   '/planes/:id',
   authenticateToken,
   OBR_PlanPorId_CTS
+);
+
+// Benjamin Orellana - 2026/06/01 - Endpoint público para obtener ID y nombre de planes activos.
+router.get(
+  '/planes-publicos',
+  OBR_PlanesPublicos_CTS
 );
 
 router.post(

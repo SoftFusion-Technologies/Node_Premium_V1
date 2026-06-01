@@ -271,6 +271,33 @@ export const OBR_PlanPorId_CTS = async (req, res) => {
   }
 };
 
+// Benjamin Orellana - 2026/06/01 - Lista pública de planes activos para formularios externos.
+export const OBR_PlanesPublicos_CTS = async (req, res) => {
+  try {
+    const planes = await PlanesModel.findAll({
+      attributes: ['id', 'nombre'],
+      where: {
+        activo: 1
+      },
+      order: [['id', 'ASC']]
+    });
+
+    return res.status(200).json({
+      ok: true,
+      message: 'Planes públicos obtenidos correctamente.',
+      data: planes
+    });
+  } catch (error) {
+    console.error('Error en OBR_PlanesPublicos_CTS:', error);
+
+    return responderError(
+      res,
+      500,
+      'Error interno al obtener los planes públicos.'
+    );
+  }
+};
+
 // Benjamin Orellana - 2026/05/29 - Crea un nuevo plan.
 export const CR_Planes_CTS = async (req, res) => {
   const transaction = await db.transaction();

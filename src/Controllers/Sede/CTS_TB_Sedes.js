@@ -235,6 +235,34 @@ export const OBRSedesActivas_CTS = async (req, res) => {
 };
 
 /*
+ * Benjamin Orellana - 2026/06/01 - Lista pública de sedes activas para formularios externos.
+ */
+export const OBRSedesPublicas_CTS = async (req, res) => {
+  try {
+    const sedes = await SedesModel.findAll({
+      attributes: ['id', 'nombre'],
+      where: {
+        activo: 1
+      },
+      order: [['nombre', 'ASC']]
+    });
+
+    return res.status(200).json({
+      ok: true,
+      message: 'Sedes públicas obtenidas correctamente.',
+      data: sedes
+    });
+  } catch (error) {
+    console.error('Error OBRSedesPublicas_CTS:', error);
+
+    return res.status(500).json({
+      ok: false,
+      message: 'Error al obtener las sedes públicas.'
+    });
+  }
+};
+
+/*
  * Benjamin Orellana - 2026/05/10 - Obtiene una sede por ID.
  */
 export const OBRSedePorId_CTS = async (req, res) => {

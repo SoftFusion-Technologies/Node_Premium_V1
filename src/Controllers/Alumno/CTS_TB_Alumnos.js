@@ -163,10 +163,13 @@ const obtenerSedesPermitidasUsuario = (user) => {
     .filter(Boolean);
 };
 
+/*
+ * Benjamin Orellana - 2026/06/03 - Permite a roles globales operar alumnos aunque no tengan sede asignada.
+ */
 const usuarioPuedeOperarSede = (user, sedeId) => {
-  if (!sedeId) return false;
-
   if (usuarioEsGlobal(user)) return true;
+
+  if (!sedeId) return false;
 
   const sedesPermitidas = obtenerSedesPermitidasUsuario(user);
 

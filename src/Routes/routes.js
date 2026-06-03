@@ -67,7 +67,7 @@ router.get('/api/status', (req, res) => {
 /*
  * Benjamin Orellana - 2026/05/10 - Lista sedes con filtros y paginación.
  */
-router.get('/sedes', authenticateToken, OBRSedes_CTS);
+router.get('/sedes', OBRSedes_CTS);
 
 /*
  * Benjamin Orellana - 2026/05/10 - Lista sedes activas para selects operativos.
@@ -613,9 +613,10 @@ router.delete(
 // Benjamin Orellana - 2026/05/26 - Importa controlador principal de alumnos PREMIUM.
 import {
   OBR_Alumnos_CTS,
-  OBR_AlumnoPorId_CTS,
+  OBR_AlumnoPorDni_CTS,
   OBR_AlumnoPerfil_CTS,
   CR_Alumnos_CTS,
+  CR_Alumnos_Publico_CTS,
   UR_Alumnos_CTS,
   UR_EstadoAlumnos_CTS,
   UR_BajaAlumnos_CTS,
@@ -653,10 +654,10 @@ router.get(
 );
 
 /*
- * Benjamin Orellana - 2026/05/26 - Obtiene un alumno por ID.
+ * Benjamin Orellana - 2026/05/26 - Obtiene un alumno por DNI.
  */
 router.get(
-  '/alumnos/:id',
+  '/alumnos/:dni',
   authenticateToken,
   requireRolGlobal([
     'SUPER_ADMIN',
@@ -665,7 +666,7 @@ router.get(
     'COORD_SEDE',
     'PROFESOR'
   ]),
-  OBR_AlumnoPorId_CTS
+  OBR_AlumnoPorDni_CTS
 );
 
 /*
@@ -682,6 +683,11 @@ router.post(
   ]),
   CR_Alumnos_CTS
 );
+
+/*
+ * Sergio Manrique - 2026/06/01 - Crea un alumno desde el panel externo .
+ */
+router.post('/alumnos/registro-publico', CR_Alumnos_Publico_CTS);
 
 /*
  * Benjamin Orellana - 2026/05/26 - Actualiza datos principales de un alumno.

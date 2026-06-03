@@ -67,7 +67,7 @@ router.get('/api/status', (req, res) => {
 /*
  * Benjamin Orellana - 2026/05/10 - Lista sedes con filtros y paginación.
  */
-router.get('/sedes', OBRSedes_CTS);
+router.get('/sedes', authenticateToken, OBRSedes_CTS);
 
 /*
  * Benjamin Orellana - 2026/05/10 - Lista sedes activas para selects operativos.
@@ -1170,53 +1170,22 @@ import {
  * =========================================================
  */
 
-router.get(
-  '/planes',
-  authenticateToken,
-  OBR_Planes_CTS
-);
+router.get('/planes', authenticateToken, OBR_Planes_CTS);
 
-router.get(
-  '/planes/:id',
-  authenticateToken,
-  OBR_PlanPorId_CTS
-);
+router.get('/planes/:id', authenticateToken, OBR_PlanPorId_CTS);
 
 // Benjamin Orellana - 2026/06/01 - Endpoint público para obtener ID y nombre de planes activos.
-router.get(
-  '/planes-publicos',
-  OBR_PlanesPublicos_CTS
-);
+router.get('/planes-publicos', OBR_PlanesPublicos_CTS);
 
-router.post(
-  '/planes',
-  authenticateToken,
-  CR_Planes_CTS
-);
+router.post('/planes', authenticateToken, CR_Planes_CTS);
 
-router.put(
-  '/planes/:id',
-  authenticateToken,
-  UR_Planes_CTS
-);
+router.put('/planes/:id', authenticateToken, UR_Planes_CTS);
 
-router.patch(
-  '/planes/:id/estado',
-  authenticateToken,
-  UR_EstadoPlanes_CTS
-);
+router.patch('/planes/:id/estado', authenticateToken, UR_EstadoPlanes_CTS);
 
-router.put(
-  '/planes/:id/desactivar',
-  authenticateToken,
-  DR_Planes_CTS
-);
+router.put('/planes/:id/desactivar', authenticateToken, DR_Planes_CTS);
 
-router.delete(
-  '/planes/:id',
-  authenticateToken,
-  ER_Planes_CTS
-);
+router.delete('/planes/:id', authenticateToken, ER_Planes_CTS);
 
 import {
   OBR_PlanesPrecios_CTS,
@@ -1237,17 +1206,9 @@ import {
  * =========================================================
  */
 
-router.get(
-  '/planes-precios',
-  authenticateToken,
-  OBR_PlanesPrecios_CTS
-);
+router.get('/planes-precios', authenticateToken, OBR_PlanesPrecios_CTS);
 
-router.get(
-  '/planes-precios/:id',
-  authenticateToken,
-  OBR_PlanPrecioPorId_CTS
-);
+router.get('/planes-precios/:id', authenticateToken, OBR_PlanPrecioPorId_CTS);
 
 router.get(
   '/planes/:plan_id/precios',
@@ -1261,11 +1222,7 @@ router.get(
   OBR_PrecioVigentePlan_CTS
 );
 
-router.post(
-  '/planes-precios',
-  authenticateToken,
-  CR_PlanesPrecios_CTS
-);
+router.post('/planes-precios', authenticateToken, CR_PlanesPrecios_CTS);
 
 // Benjamin Orellana - 2026/05/30 - Crea precios masivos de un plan por sede.
 router.post(
@@ -1274,11 +1231,7 @@ router.post(
   CR_PlanesPreciosMasivoPorSedes_CTS
 );
 
-router.put(
-  '/planes-precios/:id',
-  authenticateToken,
-  UR_PlanesPrecios_CTS
-);
+router.put('/planes-precios/:id', authenticateToken, UR_PlanesPrecios_CTS);
 
 router.patch(
   '/planes-precios/:id/estado',
@@ -1292,11 +1245,7 @@ router.put(
   DR_PlanesPrecios_CTS
 );
 
-router.delete(
-  '/planes-precios/:id',
-  authenticateToken,
-  ER_PlanesPrecios_CTS
-);
+router.delete('/planes-precios/:id', authenticateToken, ER_PlanesPrecios_CTS);
 
 import {
   OBR_AlumnosMembresias_CTS,
@@ -1318,11 +1267,7 @@ import {
  * =========================================================
  */
 
-router.get(
-  '/alumnos-membresias',
-  authenticateToken,
-  OBR_AlumnosMembresias_CTS
-);
+router.get('/alumnos-membresias', authenticateToken, OBR_AlumnosMembresias_CTS);
 
 router.get(
   '/alumnos-membresias/:id',
@@ -1342,11 +1287,7 @@ router.get(
   OBR_MembresiaActivaAlumno_CTS
 );
 
-router.post(
-  '/alumnos-membresias',
-  authenticateToken,
-  CR_AlumnosMembresias_CTS
-);
+router.post('/alumnos-membresias', authenticateToken, CR_AlumnosMembresias_CTS);
 
 router.put(
   '/alumnos-membresias/:id',
@@ -1403,11 +1344,7 @@ import {
  * =========================================================
  */
 
-router.get(
-  '/pagos-medios-pago',
-  authenticateToken,
-  OBR_PagosMediosPago_CTS
-);
+router.get('/pagos-medios-pago', authenticateToken, OBR_PagosMediosPago_CTS);
 
 router.get(
   '/pagos-medios-pago/activos',
@@ -1415,23 +1352,11 @@ router.get(
   OBR_MediosPagoActivos_CTS
 );
 
-router.get(
-  '/pagos-medios-pago/:id',
-  authenticateToken,
-  OBR_MedioPagoPorId_CTS
-);
+router.get('/pagos-medios-pago/:id', authenticateToken, OBR_MedioPagoPorId_CTS);
 
-router.post(
-  '/pagos-medios-pago',
-  authenticateToken,
-  CR_PagosMediosPago_CTS
-);
+router.post('/pagos-medios-pago', authenticateToken, CR_PagosMediosPago_CTS);
 
-router.put(
-  '/pagos-medios-pago/:id',
-  authenticateToken,
-  UR_PagosMediosPago_CTS
-);
+router.put('/pagos-medios-pago/:id', authenticateToken, UR_PagosMediosPago_CTS);
 
 router.patch(
   '/pagos-medios-pago/:id/estado',
@@ -1474,17 +1399,9 @@ import {
  * =========================================================
  */
 
-router.get(
-  '/pagos',
-  authenticateToken,
-  OBR_Pagos_CTS
-);
+router.get('/pagos', authenticateToken, OBR_Pagos_CTS);
 
-router.get(
-  '/pagos/:id',
-  authenticateToken,
-  OBR_PagoPorId_CTS
-);
+router.get('/pagos/:id', authenticateToken, OBR_PagoPorId_CTS);
 
 router.get(
   '/alumnos/:alumno_id/pagos',
@@ -1504,49 +1421,21 @@ router.get(
   OBR_PagosPorMensualidad_CTS
 );
 
-router.post(
-  '/pagos',
-  authenticateToken,
-  CR_Pagos_CTS
-);
+router.post('/pagos', authenticateToken, CR_Pagos_CTS);
 
-router.put(
-  '/pagos/:id',
-  authenticateToken,
-  UR_Pagos_CTS
-);
+router.put('/pagos/:id', authenticateToken, UR_Pagos_CTS);
 
-router.put(
-  '/pagos/:id/confirmar',
-  authenticateToken,
-  UR_ConfirmarPago_CTS
-);
+router.put('/pagos/:id/confirmar', authenticateToken, UR_ConfirmarPago_CTS);
 
-router.put(
-  '/pagos/:id/rechazar',
-  authenticateToken,
-  UR_RechazarPago_CTS
-);
+router.put('/pagos/:id/rechazar', authenticateToken, UR_RechazarPago_CTS);
 
-router.put(
-  '/pagos/:id/anular',
-  authenticateToken,
-  UR_AnularPago_CTS
-);
+router.put('/pagos/:id/anular', authenticateToken, UR_AnularPago_CTS);
 
 // Benjamin Orellana - 2026/05/30 - Baja lógica del pago, cambia estado a anulado.
-router.put(
-  '/pagos/:id/desactivar',
-  authenticateToken,
-  DR_Pagos_CTS
-);
+router.put('/pagos/:id/desactivar', authenticateToken, DR_Pagos_CTS);
 
 // Benjamin Orellana - 2026/05/30 - Eliminación física del pago.
-router.delete(
-  '/pagos/:id',
-  authenticateToken,
-  ER_Pagos_CTS
-);
+router.delete('/pagos/:id', authenticateToken, ER_Pagos_CTS);
 
 import {
   OBR_FinanzasMovimientos_CTS,

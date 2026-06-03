@@ -436,6 +436,7 @@ export const OBR_Usuarios_CTS = async (req, res) => {
       q,
       rol_id,
       rol_codigo,
+      excluir_rol_codigo,
       estado,
       sede_id,
       page = 1,
@@ -484,6 +485,36 @@ export const OBR_Usuarios_CTS = async (req, res) => {
       }
 
       where.rol_id = rol.id;
+    }
+
+    /*
+     * Benjamin Orellana - 2026/06/01 - Permite excluir roles específicos del listado interno de usuarios.
+     */
+    if (excluir_rol_codigo) {
+      const codigosExcluidos = String(excluir_rol_codigo)
+        .split(',')
+        .map((item) => item.trim().toUpperCase())
+        .filter(Boolean);
+
+      if (codigosExcluidos.length > 0) {
+        const rolesExcluidos = await UsuariosRolesModel.findAll({
+          where: {
+            codigo: {
+              [Op.in]: codigosExcluidos
+            }
+          },
+          attributes: ['id']
+        });
+
+        const rolesExcluidosIds = rolesExcluidos.map((rol) => rol.id);
+
+        if (rolesExcluidosIds.length > 0) {
+          where.rol_id = {
+            ...(typeof where.rol_id === 'object' ? where.rol_id : {}),
+            [Op.notIn]: rolesExcluidosIds
+          };
+        }
+      }
     }
 
     if (sede_id) {

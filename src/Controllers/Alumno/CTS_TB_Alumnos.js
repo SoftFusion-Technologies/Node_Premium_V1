@@ -228,7 +228,8 @@ const construirAlumnoRespuesta = async (alumno, transaction = null) => {
     usuarioValidacion,
     contactosEmergencia,
     membresias,
-    membresiaActiva
+    membresiaActiva,
+    anamnesis
   ] = await Promise.all([
     alumnoPlano.sede_id
       ? SedesModel.findByPk(alumnoPlano.sede_id, { transaction })
@@ -313,6 +314,11 @@ const construirAlumnoRespuesta = async (alumno, transaction = null) => {
         ['id', 'DESC']
       ],
       transaction
+    }),
+      AlumnosAnamnesisModel.findOne({
+      where: { alumno_id: alumnoPlano.id },
+      order: [['id', 'DESC']],
+      transaction
     })
   ]);
 
@@ -330,7 +336,8 @@ const construirAlumnoRespuesta = async (alumno, transaction = null) => {
       : null,
     contactos_emergencia: contactosEmergencia,
     membresias,
-    membresia_actual: membresiaActiva
+    membresia_actual: membresiaActiva,
+    anamnesis,     
   };
 };
 

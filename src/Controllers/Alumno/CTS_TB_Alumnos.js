@@ -7,6 +7,11 @@ import { Op } from 'sequelize';
 import db from '../../DataBase/db.js';
 
 import AlumnosModel from '../../Models/Alumno/MD_TB_Alumnos.js';
+import AlumnosMembresiasModel from '../../Models/Alumno/MD_TB_AlumnosMembresias.js';
+import AlumnosContactosEmergenciaModel from "../../Models/Alumno/MD_TB_AlumnosContactosEmergencia.js";
+import AlumnosAnamnesisModel from '../../Models/Alumno/MD_TB_AlumnosAnamnesis.js';
+import PlanesModel from '../../Models/Plan/MD_TB_Planes.js';
+import PlanesPreciosModel from '../../Models/Plan/MD_TB_PlanesPrecios.js';
 import SedesModel from '../../Models/Sede/MD_TB_Sedes.js';
 import UsuariosModel from '../../Models/Usuario/MD_TB_Usuarios.js';
 import UsuariosRolesModel from '../../Models/Usuario/MD_TB_UsuariosRoles.js';
@@ -77,6 +82,34 @@ const normalizarFecha = (value) => {
   const texto = normalizarTexto(value);
 
   return texto || null;
+};
+
+const esFechaDateOnlyValida = (value) => {
+  if (!value || typeof value !== 'string') return false;
+
+  const regexFecha = /^\d{4}-\d{2}-\d{2}$/;
+
+  if (!regexFecha.test(value)) return false;
+
+  const fecha = new Date(`${value}T00:00:00`);
+
+  return !Number.isNaN(fecha.getTime());
+};
+
+const obtenerFechaActualDateOnly = () => {
+  return new Date().toISOString().slice(0, 10);
+};
+
+const sumarDiasDateOnly = (fechaDateOnly, dias) => {
+  const fechaBase = new Date(`${fechaDateOnly}T00:00:00Z`);
+
+  if (Number.isNaN(fechaBase.getTime())) {
+    return null;
+  }
+
+  fechaBase.setUTCDate(fechaBase.getUTCDate() + Number(dias));
+
+  return fechaBase.toISOString().slice(0, 10);
 };
 
 const normalizarTinyint = (value, defaultValue = 0) => {
@@ -179,23 +212,105 @@ const buscarRolAlumno = async () => {
   });
 };
 
-const construirAlumnoRespuesta = async (alumno) => {
+const construirAlumnoRespuesta = async (alumno, transaction = null) => {
   if (!alumno) return null;
 
   const alumnoPlano =
     typeof alumno.toJSON === 'function' ? alumno.toJSON() : { ...alumno };
 
-  const [sede, usuarioApp, usuarioAlta, usuarioValidacion] = await Promise.all([
-    alumnoPlano.sede_id ? SedesModel.findByPk(alumnoPlano.sede_id) : null,
+  const [
+    sede,
+    usuarioApp,
+    usuarioAlta,
+    usuarioValidacion,
+    contactosEmergencia,
+    membresias,
+    membresiaActiva
+  ] = await Promise.all([
+    alumnoPlano.sede_id
+      ? SedesModel.findByPk(alumnoPlano.sede_id, { transaction })
+      : null,
     alumnoPlano.usuario_app_id
-      ? UsuariosModel.findByPk(alumnoPlano.usuario_app_id)
+      ? UsuariosModel.findByPk(alumnoPlano.usuario_app_id, { transaction })
       : null,
     alumnoPlano.usuario_alta_id
-      ? UsuariosModel.findByPk(alumnoPlano.usuario_alta_id)
+      ? UsuariosModel.findByPk(alumnoPlano.usuario_alta_id, { transaction })
       : null,
     alumnoPlano.usuario_validacion_id
-      ? UsuariosModel.findByPk(alumnoPlano.usuario_validacion_id)
-      : null
+      ? UsuariosModel.findByPk(alumnoPlano.usuario_validacion_id, { transaction })
+      : null,
+    AlumnosContactosEmergenciaModel.findAll({
+      where: {
+        alumno_id: alumnoPlano.id
+      },
+      order: [
+        ['principal', 'DESC'],
+        ['id', 'ASC']
+      ],
+      transaction
+    }),
+    AlumnosMembresiasModel.findAll({
+      where: {
+        alumno_id: alumnoPlano.id
+      },
+      include: [
+        {
+          model: PlanesModel,
+          as: 'plan',
+          attributes: [
+            'id',
+            'nombre',
+            'codigo',
+            'clases_por_mes',
+            'cantidad_clases_periodo',
+            'periodo',
+            'duracion_dias',
+            'activo'
+          ]
+        },
+        {
+          model: SedesModel,
+          as: 'sede',
+          attributes: ['id', 'nombre', 'codigo', 'activo']
+        }
+      ],
+      order: [
+        ['fecha_inicio', 'DESC'],
+        ['id', 'DESC']
+      ],
+      transaction
+    }),
+    AlumnosMembresiasModel.findOne({
+      where: {
+        alumno_id: alumnoPlano.id
+      },
+      include: [
+        {
+          model: PlanesModel,
+          as: 'plan',
+          attributes: [
+            'id',
+            'nombre',
+            'codigo',
+            'clases_por_mes',
+            'cantidad_clases_periodo',
+            'periodo',
+            'duracion_dias',
+            'activo'
+          ]
+        },
+        {
+          model: SedesModel,
+          as: 'sede',
+          attributes: ['id', 'nombre', 'codigo', 'activo']
+        }
+      ],
+      order: [
+        ['fecha_inicio', 'DESC'],
+        ['id', 'DESC']
+      ],
+      transaction
+    })
   ]);
 
   return {
@@ -209,7 +324,10 @@ const construirAlumnoRespuesta = async (alumno) => {
     usuario_alta: usuarioAlta ? eliminarPasswordHash(usuarioAlta) : null,
     usuario_validacion: usuarioValidacion
       ? eliminarPasswordHash(usuarioValidacion)
-      : null
+      : null,
+    contactos_emergencia: contactosEmergencia,
+    membresias,
+    membresia_actual: membresiaActiva
   };
 };
 
@@ -478,6 +596,250 @@ const buscarAlumnoPorIdConPermiso = async (id, user) => {
   };
 };
 
+const buscarPlanActivo = async (planId, transaction = null) => {
+  if (!planId) return null;
+
+  return PlanesModel.findOne({
+    where: {
+      id: planId,
+      activo: 1
+    },
+    transaction
+  });
+};
+
+const buscarPrecioVigentePlan = async ({
+  planId,
+  sedeId,
+  fechaConsulta,
+  transaction = null
+}) => {
+  const whereBase = {
+    plan_id: planId,
+    activo: 1,
+    fecha_desde: {
+      [Op.lte]: fechaConsulta
+    },
+    [Op.or]: [
+      {
+        fecha_hasta: null
+      },
+      {
+        fecha_hasta: {
+          [Op.gte]: fechaConsulta
+        }
+      }
+    ]
+  };
+
+  if (sedeId) {
+    const precioSede = await PlanesPreciosModel.findOne({
+      where: {
+        ...whereBase,
+        sede_id: sedeId
+      },
+      order: [
+        ['fecha_desde', 'DESC'],
+        ['id', 'DESC']
+      ],
+      transaction
+    });
+
+    if (precioSede) return precioSede;
+  }
+
+  return PlanesPreciosModel.findOne({
+    where: {
+      ...whereBase,
+      sede_id: null
+    },
+    order: [
+      ['fecha_desde', 'DESC'],
+      ['id', 'DESC']
+    ],
+    transaction
+  });
+};
+
+const construirFechaVencimientoMembresia = (fechaInicio, duracionDias) => {
+  if (!fechaInicio || !duracionDias || Number(duracionDias) <= 0) {
+    return null;
+  }
+
+  return sumarDiasDateOnly(fechaInicio, Number(duracionDias) - 1);
+};
+
+const construirPayloadContactoEmergenciaPublico = (body = {}) => {
+  return {
+    nombre: normalizarTexto(body.contacto_emergencia_nombre),
+    parentesco: normalizarTexto(body.contacto_emergencia_parentesco),
+    telefono: normalizarTelefono(body.contacto_emergencia_telefono),
+    email: normalizarEmail(body.contacto_emergencia_email),
+    principal: normalizarTinyint(body.contacto_emergencia_principal, 1)
+  };
+};
+
+const normalizarContactosEmergenciaPublico = (body = {}) => {
+  if (Array.isArray(body.contactos_emergencia)) {
+    return body.contactos_emergencia.map((contacto, index) => ({
+      nombre: normalizarTexto(contacto?.nombre),
+      parentesco: normalizarTexto(contacto?.parentesco),
+      telefono: normalizarTelefono(contacto?.telefono),
+      email: normalizarEmail(contacto?.email),
+      principal: normalizarTinyint(contacto?.principal, index === 0 ? 1 : 0)
+    }));
+  }
+
+  const contactoUnico = construirPayloadContactoEmergenciaPublico(body);
+
+  if (
+    contactoUnico.nombre ||
+    contactoUnico.parentesco ||
+    contactoUnico.telefono ||
+    contactoUnico.email
+  ) {
+    return [contactoUnico];
+  }
+
+  return [];
+};
+
+const validarContactosEmergenciaPublico = (contactos = []) => {
+  const errores = [];
+
+  if (!contactos.length) {
+    errores.push('Debe enviar al menos un contacto de emergencia.');
+    return errores;
+  }
+
+  contactos.forEach((contacto, index) => {
+    const numeroContacto = index + 1;
+
+    if (!contacto.nombre) {
+      errores.push(
+        `El nombre del contacto de emergencia ${numeroContacto} es obligatorio.`
+      );
+    }
+
+    if (!contacto.telefono) {
+      errores.push(
+        `El teléfono del contacto de emergencia ${numeroContacto} es obligatorio.`
+      );
+    }
+
+    if (contacto.nombre && contacto.nombre.length > 120) {
+      errores.push(
+        `El nombre del contacto de emergencia ${numeroContacto} no puede superar los 120 caracteres.`
+      );
+    }
+
+    if (contacto.parentesco && contacto.parentesco.length > 80) {
+      errores.push(
+        `El parentesco del contacto de emergencia ${numeroContacto} no puede superar los 80 caracteres.`
+      );
+    }
+
+    if (contacto.telefono && contacto.telefono.length > 50) {
+      errores.push(
+        `El teléfono del contacto de emergencia ${numeroContacto} no puede superar los 50 caracteres.`
+      );
+    }
+
+    if (contacto.email && contacto.email.length > 150) {
+      errores.push(
+        `El email del contacto de emergencia ${numeroContacto} no puede superar los 150 caracteres.`
+      );
+    }
+  });
+
+  const principalAsignado = contactos.some((contacto) => contacto.principal === 1);
+
+  if (!principalAsignado && contactos.length > 0) {
+    contactos[0].principal = 1;
+  }
+
+  return errores;
+};
+
+const normalizarPrincipalContactosEmergenciaPublico = (contactos = []) => {
+  if (!contactos.length) return contactos;
+
+  const principalIndex = contactos.findIndex((contacto) => contacto.principal === 1);
+  const indexPrincipalFinal = principalIndex >= 0 ? principalIndex : 0;
+
+  return contactos.map((contacto, index) => ({
+    ...contacto,
+    principal: index === indexPrincipalFinal ? 1 : 0
+  }));
+};
+
+const construirPayloadMembresiaPublica = ({
+  alumnoId,
+  plan,
+  sedeId,
+  fechaInicio,
+  precioVigente
+}) => {
+  const precioLista = precioVigente ? Number(precioVigente.precio || 0) : 0;
+  const clasesIncluidas = Number(
+    plan.cantidad_clases_periodo ?? plan.clases_por_mes ?? 0
+  );
+  const fechaVencimiento = construirFechaVencimientoMembresia(
+    fechaInicio,
+    plan.duracion_dias
+  );
+
+  return {
+    alumno_id: alumnoId,
+    plan_id: plan.id,
+    sede_id: sedeId,
+    fecha_inicio: fechaInicio,
+    fecha_vencimiento: fechaVencimiento,
+    estado: 'pendiente_pago',
+    precio_lista: precioLista.toFixed(2),
+    descuento_valor: '0.00',
+    descuento_porcentaje: '0.00',
+    precio_final: precioLista.toFixed(2),
+    clases_incluidas: clasesIncluidas,
+    clases_usadas: 0,
+    clases_disponibles: clasesIncluidas,
+    origen_alta: 'web',
+    observaciones: null
+  };
+};
+
+const buscarAlumnoPorDniConPermiso = async (dni, user) => {
+  const alumno = await AlumnosModel.findOne({
+    where: {
+      dni
+    }
+  });
+
+  if (!alumno) {
+    return {
+      ok: false,
+      status: 404,
+      message: 'Alumno no encontrado.'
+    };
+  }
+
+  const alumnoPlano =
+    typeof alumno.toJSON === 'function' ? alumno.toJSON() : alumno;
+
+  if (!usuarioPuedeOperarSede(user, alumnoPlano.sede_id)) {
+    return {
+      ok: false,
+      status: 403,
+      message: 'No tiene acceso al alumno indicado.'
+    };
+  }
+
+  return {
+    ok: true,
+    alumno
+  };
+};
+
 /*
  * Benjamin Orellana - 2026/05/26 - Lista alumnos con filtros, búsqueda, sede, estado y paginación.
  */
@@ -503,6 +865,7 @@ export const OBR_Alumnos_CTS = async (req, res) => {
 
     const where = {};
 
+    // Filtro por sede según permisos del usuario
     const scope = aplicarScopeSedesAlumnos(where, req.user, sede_id);
 
     if (!scope.ok) {
@@ -511,6 +874,14 @@ export const OBR_Alumnos_CTS = async (req, res) => {
         message: scope.message
       });
     }
+
+    // Totales de la sede sin filtros de búsqueda
+    const whereEstadisticas = { ...where };
+
+    const [totalSede, activosSede] = await Promise.all([
+      AlumnosModel.count({ where: whereEstadisticas }),
+      AlumnosModel.count({ where: { ...whereEstadisticas, estado: 'activo' } })
+    ]);
 
     if (estado) {
       if (!ESTADOS_ALUMNO_VALIDOS.includes(estado)) {
@@ -540,31 +911,11 @@ export const OBR_Alumnos_CTS = async (req, res) => {
 
     if (search) {
       where[Op.or] = [
-        {
-          nombre: {
-            [Op.like]: `%${search}%`
-          }
-        },
-        {
-          apellido: {
-            [Op.like]: `%${search}%`
-          }
-        },
-        {
-          dni: {
-            [Op.like]: `%${search}%`
-          }
-        },
-        {
-          email: {
-            [Op.like]: `%${search}%`
-          }
-        },
-        {
-          telefono: {
-            [Op.like]: `%${search}%`
-          }
-        }
+        { nombre: { [Op.like]: `%${search}%` } },
+        { apellido: { [Op.like]: `%${search}%` } },
+        { dni: { [Op.like]: `%${search}%` } },
+        { email: { [Op.like]: `%${search}%` } },
+        { telefono: { [Op.like]: `%${search}%` } }
       ];
     }
 
@@ -605,6 +956,12 @@ export const OBR_Alumnos_CTS = async (req, res) => {
     return res.status(200).json({
       ok: true,
       message: 'Alumnos obtenidos correctamente.',
+      estadisticas: {
+        total: totalSede,
+        activos: activosSede,
+        cant_anamnesis_permanente: 0,
+        cant_morosos: 0
+      },
       total: count,
       page: pageNumber,
       limit: limitNumber,
@@ -624,7 +981,7 @@ export const OBR_Alumnos_CTS = async (req, res) => {
 /*
  * Benjamin Orellana - 2026/05/26 - Obtiene un alumno por ID.
  */
-export const OBR_AlumnoPorId_CTS = async (req, res) => {
+export const OBR_AlumnoPorDni_CTS = async (req, res) => {
   try {
     if (!validarRolLecturaAlumnos(req.user)) {
       return res.status(403).json({
@@ -633,9 +990,13 @@ export const OBR_AlumnoPorId_CTS = async (req, res) => {
       });
     }
 
-    const { id } = req.params;
+    console.log('params:', req.params);
 
-    const result = await buscarAlumnoPorIdConPermiso(id, req.user);
+    const { dni } = req.params;
+
+    console.log('dni:', dni);
+
+    const result = await buscarAlumnoPorDniConPermiso(dni, req.user);
 
     if (!result.ok) {
       return res.status(result.status).json({
@@ -652,7 +1013,7 @@ export const OBR_AlumnoPorId_CTS = async (req, res) => {
       data
     });
   } catch (error) {
-    console.error('Error OBR_AlumnoPorId_CTS:', error);
+    console.error('Error OBR_AlumnoPorDni_CTS:', error);
 
     return res.status(500).json({
       ok: false,
@@ -784,9 +1145,9 @@ export const CR_Alumnos_CTS = async (req, res) => {
       transaction
     });
 
-    await transaction.commit();
+    const data = await construirAlumnoRespuesta(nuevoAlumno, transaction);
 
-    const data = await construirAlumnoRespuesta(nuevoAlumno);
+    await transaction.commit();
 
     return res.status(201).json({
       ok: true,
@@ -801,6 +1162,207 @@ export const CR_Alumnos_CTS = async (req, res) => {
     return res.status(500).json({
       ok: false,
       message: 'Error al crear el alumno.'
+    });
+  }
+};
+
+export const CR_Alumnos_Publico_CTS = async (req, res) => {
+  const transaction = await db.transaction();
+
+  try {
+    const contactosEmergencia = normalizarPrincipalContactosEmergenciaPublico(
+      normalizarContactosEmergenciaPublico(req.body)
+    );
+
+    const {
+      nombre,
+      apellido,
+      dni,
+      fecha_nacimiento,
+      telefono,
+      email,
+      domicilio,
+      sede_id,
+      plan_id,
+      fecha_inicio
+    } = req.body;
+
+    if (
+      !nombre ||
+      !apellido ||
+      !dni ||
+      !sede_id ||
+      !plan_id
+    ) {
+      await transaction.rollback();
+
+      return res.status(400).json({
+        ok: false,
+        message: 'Faltan datos obligatorios para el registro.'
+      });
+    }
+
+    const erroresContacto = validarContactosEmergenciaPublico(
+      contactosEmergencia
+    );
+
+    if (erroresContacto.length > 0) {
+      await transaction.rollback();
+
+      return res.status(400).json({
+        ok: false,
+        message: 'Datos inválidos para el contacto de emergencia.',
+        errors: erroresContacto
+      });
+    }
+
+    if (fecha_inicio && !esFechaDateOnlyValida(fecha_inicio)) {
+      await transaction.rollback();
+
+      return res.status(400).json({
+        ok: false,
+        message: 'La fecha de inicio debe tener formato YYYY-MM-DD.'
+      });
+    }
+
+    const fechaInicioNormalizada = fecha_inicio || obtenerFechaActualDateOnly();
+
+    const sede = await SedesModel.findOne({
+      where: {
+        id: Number(sede_id),
+        activo: 1
+      },
+      transaction
+    });
+
+    if (!sede) {
+      await transaction.rollback();
+
+      return res.status(400).json({
+        ok: false,
+        message: 'La sede indicada no existe o está inactiva.'
+      });
+    }
+
+    const plan = await buscarPlanActivo(Number(plan_id), transaction);
+
+    if (!plan) {
+      await transaction.rollback();
+
+      return res.status(400).json({
+        ok: false,
+        message: 'El plan indicado no existe o está inactivo.'
+      });
+    }
+
+    if (!plan.duracion_dias || Number(plan.duracion_dias) <= 0) {
+      await transaction.rollback();
+
+      return res.status(400).json({
+        ok: false,
+        message: 'El plan indicado no tiene una duración válida.'
+      });
+    }
+
+    const existeDni = await verificarDniDuplicado(dni);
+
+    if (existeDni) {
+      await transaction.rollback();
+
+      return res.status(409).json({
+        ok: false,
+        message: 'Ya existe un alumno registrado con ese DNI.'
+      });
+    }
+
+    const payloadAlumno = buildAlumnoPayloadCreate(
+      {
+        nombre,
+        apellido,
+        dni,
+        fecha_nacimiento,
+        telefono,
+        email,
+        domicilio,
+        sede_id,
+        fecha_inicio: fechaInicioNormalizada,
+        origen_registro: 'externo'
+      },
+      null
+    );
+
+    payloadAlumno.estado = 'activo';
+    payloadAlumno.usuario_validacion_id = null;
+
+    const erroresAlumno = validarPayloadAlumno(payloadAlumno, 'create');
+
+    if (erroresAlumno.length > 0) {
+      await transaction.rollback();
+
+      return res.status(400).json({
+        ok: false,
+        message: 'Datos inválidos para el registro.',
+        errors: erroresAlumno
+      });
+    }
+
+    const nuevoAlumno = await AlumnosModel.create(payloadAlumno, {
+      transaction
+    });
+
+    const precioVigente = await buscarPrecioVigentePlan({
+      planId: Number(plan.id),
+      sedeId: Number(sede.id),
+      fechaConsulta: fechaInicioNormalizada,
+      transaction
+    });
+
+    const contactosCreados = await AlumnosContactosEmergenciaModel.bulkCreate(
+      contactosEmergencia.map((contacto) => ({
+        alumno_id: nuevoAlumno.id,
+        ...contacto,
+      })),
+      {
+        transaction
+      }
+    );
+
+    const payloadMembresia = construirPayloadMembresiaPublica({
+      alumnoId: nuevoAlumno.id,
+      plan,
+      sedeId: Number(sede.id),
+      fechaInicio: fechaInicioNormalizada,
+      precioVigente
+    });
+
+    const nuevaMembresia = await AlumnosMembresiasModel.create(
+      payloadMembresia,
+      {
+        transaction
+      }
+    );
+
+    const data = await construirAlumnoRespuesta(nuevoAlumno, transaction);
+
+    await transaction.commit();
+
+    return res.status(201).json({
+      ok: true,
+      message: '¡Te registraste correctamente!',
+      data,
+      contactos_emergencia: contactosCreados,
+      membresia: nuevaMembresia
+    });
+
+  } catch (error) {
+    if (transaction && !transaction.finished) {
+      await transaction.rollback();
+    }
+
+    console.error('Error en registro público:', error);
+    return res.status(500).json({
+      ok: false,
+      message: 'Error al procesar el registro.'
     });
   }
 };

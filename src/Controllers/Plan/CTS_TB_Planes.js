@@ -47,6 +47,20 @@ const esEnteroValido = (valor) => {
   return Number.isInteger(numero) && numero >= 0;
 };
 
+// Benjamin Orellana - 2026/06/05 - Obtiene la fecha actual en formato DATE (YYYY-MM-DD)
+const obtenerFechaActualDateOnly = () => {
+  return new Date().toISOString().slice(0, 10);
+};
+
+// Benjamin Orellana - 2026/06/05 - Convierte valor a número o retorna null
+const toNumberOrNull = (value) => {
+  if (value === undefined || value === null || value === '') return null;
+
+  const numberValue = Number(value);
+
+  return Number.isNaN(numberValue) ? null : numberValue;
+};
+
 // Benjamin Orellana - 2026/05/29 - Arma respuesta estándar de error.
 const responderError = (res, status, message, data = null) => {
   return res.status(status).json({
@@ -653,5 +667,94 @@ export const ER_Planes_CTS = async (req, res) => {
       500,
       'Error interno al eliminar físicamente el plan.'
     );
+  }
+};
+/*
+ * Benjamin Orellana - 2026/06/05 - Lista planes con filtro opcional por sede
+ * Si no envía sede_id: devuelve TODOS los planes
+ * Si envía sede_id: devuelve solo planes que tienen precio vigente en esa sede
+ */
+export const OBR_PlanesConPrecios_CTS = async (req, res) => {
+  try {
+    const { sede_id, fecha_consulta = obtenerFechaActualDateOnly() } = req.query;
+
+    console.log('=== [OBR_PlanesConPrecios_CTS] sede_id:', sede_id);
+    console.log('=== [OBR_PlanesConPrecios_CTS] fecha_consulta:', fecha_consulta);
+
+    // CASO 1: Sin sede_id - devuelve TODOS los planes activos
+    if (!sede_id) {
+      console.log('=== [OBR_PlanesConPrecios_CTS] Devolviendo TODOS los planes');
+      
+      const planes = await PlanesModel.findAll({
+        where: {
+          activo: 1
+        },
+        order: [['id', 'ASC']]
+      });
+
+      return res.status(200).json({
+        ok: true,
+        message: 'Planes obtenidos correctamente.',
+        total: planes.length,
+        data: planes
+      });
+    }
+
+    // CASO 2: Con sede_id - devuelve SOLO planes con precio vigente en esa sede
+    const sedeIdNum = toNumberOrNull(sede_id);
+
+    if (!sedeIdNum) {
+      return res.status(400).json({
+        ok: false,
+        message: 'El parámetro sede_id debe ser un número válido.'
+      });
+    }
+
+    console.log('=== [OBR_PlanesConPrecios] Buscando planes con precio vigente para sede:', sedeIdNum);
+
+    // Buscar planes que tienen precio vigente en esa sede
+    const planes = await PlanesModel.findAll({
+      where: {
+        activo: 1
+      },
+      include: [
+        {
+          model: PlanesPreciosModel,
+          as: 'precios',
+          where: {
+            sede_id: sedeIdNum,
+            activo: 1,
+            fecha_desde: {
+              [Op.lte]: fecha_consulta  // fecha_desde <= fecha_consulta
+            },
+            [Op.or]: [
+              { fecha_hasta: null },  // Sin fecha fin (vigente indefinidamente)
+              { fecha_hasta: { [Op.gte]: fecha_consulta } }  // O fecha_hasta >= fecha_consulta
+            ]
+          },
+          attributes: ['id', 'precio', 'moneda', 'fecha_desde', 'fecha_hasta', 'activo'],
+          required: true  // INNER JOIN - solo planes con precio vigente
+        }
+      ],
+      order: [['id', 'ASC']]
+    });
+
+    console.log('=== [OBR_PlanesConPrecios] Planes encontrados:', planes.length);
+
+    return res.status(200).json({
+      ok: true,
+      message: 'Planes obtenidos correctamente.',
+      total: planes.length,
+      sede_id: sedeIdNum,
+      fecha_consulta: fecha_consulta,
+      data: planes
+    });
+  } catch (error) {
+    console.error('=== [OBR_PlanesConPrecios] ERROR ===', error);
+
+    return res.status(500).json({
+      ok: false,
+      message: 'Error al obtener los planes.'
+    });
   }
 };

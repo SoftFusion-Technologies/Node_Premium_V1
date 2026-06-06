@@ -8,6 +8,7 @@ import db from '../../DataBase/db.js';
 import AlumnosModel from '../../Models/Alumno/MD_TB_Alumnos.js';
 import AlumnosAnamnesisModel from '../../Models/Alumno/MD_TB_AlumnosAnamnesis.js';
 import UsuariosModel from '../../Models/Usuario/MD_TB_Usuarios.js';
+import AlumnosAnamnesisHistorialModel from '../../Models/Alumno/MD_TB_AlumnosAnamnesisHistorial.js';
 
 const ROLES_GLOBALES = ['SUPER_ADMIN', 'DIRECCION'];
 
@@ -228,6 +229,46 @@ const construirAnamnesisRespuesta = async (anamnesis) => {
       ? eliminarPasswordHash(usuarioRegistro)
       : null
   };
+};
+
+const archivarAnamnesis = async (
+  anamnesis,
+  { usuarioModificacionId = null, origenModificacion = 'administracion', transaction }
+) => {
+  const snap =
+    typeof anamnesis.toJSON === 'function' ? anamnesis.toJSON() : { ...anamnesis };
+
+  await AlumnosAnamnesisHistorialModel.create(
+    {
+      anamnesis_id:              snap.id,
+      alumno_id:                 snap.alumno_id,
+      usuario_modificacion_id:   usuarioModificacionId,
+      origen_modificacion:       origenModificacion,
+      origen_carga:              snap.origen_carga,
+      objetivo_principal:        snap.objetivo_principal,
+      experiencia_previa:        snap.experiencia_previa,
+      lesiones_actuales:         snap.lesiones_actuales,
+      lesiones_pasadas:          snap.lesiones_pasadas,
+      cirugias:                  snap.cirugias,
+      dolores_frecuentes:        snap.dolores_frecuentes,
+      enfermedades_relevantes:   snap.enfermedades_relevantes,
+      medicacion:                snap.medicacion,
+      actividad_fisica_actual:   snap.actividad_fisica_actual,
+      disponibilidad_semanal:    snap.disponibilidad_semanal,
+      nivel_condicion_fisica:    snap.nivel_condicion_fisica,
+      observaciones_adicionales: snap.observaciones_adicionales,
+      observaciones_profesor:    snap.observaciones_profesor,
+      declara_aptitud:           snap.declara_aptitud,
+      acepta_responsabilidad:    snap.acepta_responsabilidad,
+      acepta_terminos_salud:     snap.acepta_terminos_salud,
+      fecha_aceptacion:          snap.fecha_aceptacion,
+      estado_revision:           snap.estado_revision,
+      original_created_at:       snap.created_at,
+      original_updated_at:       snap.updated_at,
+      archivado_at:              new Date()
+    },
+    { transaction }
+  );
 };
 
 const setIfPresent = (payload, body, key, normalizer = normalizarTexto) => {
@@ -987,9 +1028,17 @@ export const UR_AlumnosAnamnesis_CTS = async (req, res) => {
       });
     }
 
-    await result.anamnesis.update(payload, {
-      transaction
-    });
+    // Archiva el estado actual ANTES de pisarlo.
+    // Se omite si el cliente indicó que es solo un cambio de estado administrativo.
+    if (!req.body.skip_archivo) {
+      await archivarAnamnesis(result.anamnesis, {
+        usuarioModificacionId: req.user?.id ?? null,
+        origenModificacion:    normalizarEnum(req.body.origen_carga) || 'administracion',
+        transaction
+      });
+    }
+
+    await result.anamnesis.update(payload, { transaction });
 
     await transaction.commit();
 
@@ -1054,14 +1103,16 @@ export const UR_MiAnamnesis_CTS = async (req, res) => {
       });
     }
 
+    // El alumno siempre genera archivo: cualquier cambio suyo es contenido clínico.
+    await archivarAnamnesis(result.anamnesis, {
+      usuarioModificacionId: req.alumno?.usuario_app_id ?? null,
+      origenModificacion:    'alumno',
+      transaction
+    });
+
     await result.anamnesis.update(
-      {
-        ...payload,
-        estado_revision: 'pendiente'
-      },
-      {
-        transaction
-      }
+      { ...payload, estado_revision: 'pendiente' },
+      { transaction }
     );
 
     await transaction.commit();
@@ -1127,6 +1178,17 @@ export const UR_RevisarAlumnosAnamnesis_CTS = async (req, res) => {
       });
     }
 
+    // Archiva el estado actual ANTES de pisarlo.
+    // Se omite si el cliente indicó que es solo un cambio de estado administrativo
+    // (ej: marcar requiere_atencion sin modificar contenido clínico).
+    if (!req.body.skip_archivo) {
+      await archivarAnamnesis(result.anamnesis, {
+        usuarioModificacionId: req.user?.id ?? null,
+        origenModificacion:    req.user?.rol_codigo === 'PROFESOR' ? 'profesor' : 'administracion',
+        transaction
+      });
+    }
+
     await result.anamnesis.update(
       {
         estado_revision: estadoRevision,
@@ -1134,9 +1196,7 @@ export const UR_RevisarAlumnosAnamnesis_CTS = async (req, res) => {
           normalizarTexto(req.body.observaciones_profesor) ||
           result.anamnesis.observaciones_profesor
       },
-      {
-        transaction
-      }
+      { transaction }
     );
 
     await transaction.commit();

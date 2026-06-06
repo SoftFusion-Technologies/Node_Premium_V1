@@ -1154,9 +1154,72 @@ router.delete(
 );
 
 import {
+  GR_HistorialAnamnesis_CTS,
+  GR_HistorialAnamnesisAlumno_CTS,
+  GR_DetalleHistorialAnamnesis_CTS
+} from '../Controllers/Alumno/CTS_TB_AlumnosAnamnesisHistorial.js';
+
+
+
+/*
+ * =========================================================
+ * ALUMNOS ANAMNESIS HISTORIAL
+ * =========================================================
+ */
+
+/*
+ * Sergio Manrique - 2026/06/03 - Lista todo el historial de anamnesis de un alumno.
+ */
+router.get(
+  '/alumnos/:alumno_id/anamnesis/historial',
+  authenticateToken,
+  requireRolGlobal([
+    'SUPER_ADMIN',
+    'DIRECCION',
+    'FRONT_COMERCIAL',
+    'COORD_SEDE',
+    'PROFESOR'
+  ]),
+  GR_HistorialAnamnesisAlumno_CTS
+);
+
+/*
+ * Sergio Manrique - 2026/06/03 - Lista versiones históricas de una anamnesis específica.
+ */
+router.get(
+  '/alumnos-anamnesis/:anamnesis_id/historial',
+  authenticateToken,
+  requireRolGlobal([
+    'SUPER_ADMIN',
+    'DIRECCION',
+    'FRONT_COMERCIAL',
+    'COORD_SEDE',
+    'PROFESOR'
+  ]),
+  GR_HistorialAnamnesis_CTS
+);
+
+/*
+ * Sergio Manrique - 2026/06/03 - Obtiene el detalle de una versión histórica por ID.
+ */
+router.get(
+  '/alumnos-anamnesis/historial/:id',
+  authenticateToken,
+  requireRolGlobal([
+    'SUPER_ADMIN',
+    'DIRECCION',
+    'FRONT_COMERCIAL',
+    'COORD_SEDE',
+    'PROFESOR'
+  ]),
+  GR_DetalleHistorialAnamnesis_CTS
+);
+
+import {
   OBR_Planes_CTS,
   OBR_PlanPorId_CTS,
   OBR_PlanesPublicos_CTS,
+  OBR_PlanesConPrecios_CTS,
   CR_Planes_CTS,
   UR_Planes_CTS,
   UR_EstadoPlanes_CTS,
@@ -1176,6 +1239,8 @@ router.get('/planes/:id', authenticateToken, OBR_PlanPorId_CTS);
 
 // Benjamin Orellana - 2026/06/01 - Endpoint público para obtener ID y nombre de planes activos.
 router.get('/planes-publicos', OBR_PlanesPublicos_CTS);
+
+router.get('/planes-con-precios',authenticateToken, OBR_PlanesConPrecios_CTS);
 
 router.post('/planes', authenticateToken, CR_Planes_CTS);
 

@@ -315,7 +315,7 @@ const construirAlumnoRespuesta = async (alumno, transaction = null) => {
       ],
       transaction
     }),
-      AlumnosAnamnesisModel.findOne({
+    AlumnosAnamnesisModel.findOne({
       where: { alumno_id: alumnoPlano.id },
       order: [['id', 'DESC']],
       transaction
@@ -337,7 +337,7 @@ const construirAlumnoRespuesta = async (alumno, transaction = null) => {
     contactos_emergencia: contactosEmergencia,
     membresias,
     membresia_actual: membresiaActiva,
-    anamnesis,     
+    anamnesis,
   };
 };
 
@@ -473,33 +473,22 @@ const validarPayloadAlumno = (payload = {}, modo = 'create') => {
 const verificarDniDuplicado = async (dni, alumnoIdExcluir = null) => {
   if (!dni) return null;
 
-  const where = {
-    dni
-  };
+  const where = { dni };
 
   if (alumnoIdExcluir) {
-    where.id = {
-      [Op.ne]: alumnoIdExcluir
-    };
+    where.id = { [Op.ne]: alumnoIdExcluir };
   }
 
   return AlumnosModel.findOne({ where });
 };
 
-const verificarUsuarioAppDisponible = async (
-  usuarioAppId,
-  alumnoIdExcluir = null
-) => {
+const verificarUsuarioAppDisponible = async (usuarioAppId, alumnoIdExcluir = null) => {
   if (!usuarioAppId) return null;
 
-  const where = {
-    usuario_app_id: usuarioAppId
-  };
+  const where = { usuario_app_id: usuarioAppId };
 
   if (alumnoIdExcluir) {
-    where.id = {
-      [Op.ne]: alumnoIdExcluir
-    };
+    where.id = { [Op.ne]: alumnoIdExcluir };
   }
 
   return AlumnosModel.findOne({ where });
@@ -508,37 +497,22 @@ const verificarUsuarioAppDisponible = async (
 const verificarUsuarioLoginDuplicado = async ({ email, telefono }) => {
   const condiciones = [];
 
-  if (email) {
-    condiciones.push({ email });
-  }
-
-  if (telefono) {
-    condiciones.push({ telefono });
-  }
-
+  if (email) condiciones.push({ email });
+  if (telefono) condiciones.push({ telefono });
   if (!condiciones.length) return null;
 
   return UsuariosModel.findOne({
-    where: {
-      [Op.or]: condiciones
-    }
+    where: { [Op.or]: condiciones }
   });
 };
 
-const aplicarScopeSedesAlumnos = (
-  where = {},
-  user = null,
-  sedeIdQuery = null
-) => {
+const aplicarScopeSedesAlumnos = (where = {}, user = null, sedeIdQuery = null) => {
   if (usuarioEsGlobal(user)) {
     if (sedeIdQuery) {
       where.sede_id = Number(sedeIdQuery);
     }
 
-    return {
-      ok: true,
-      where
-    };
+    return { ok: true, where };
   }
 
   const sedesPermitidas = obtenerSedesPermitidasUsuario(user);
@@ -562,96 +536,55 @@ const aplicarScopeSedesAlumnos = (
 
     where.sede_id = Number(sedeIdQuery);
 
-    return {
-      ok: true,
-      where
-    };
+    return { ok: true, where };
   }
 
-  where.sede_id = {
-    [Op.in]: sedesPermitidas
-  };
+  where.sede_id = { [Op.in]: sedesPermitidas };
 
-  return {
-    ok: true,
-    where
-  };
+  return { ok: true, where };
 };
 
 const buscarAlumnoPorIdConPermiso = async (id, user) => {
   const alumno = await AlumnosModel.findByPk(id);
 
   if (!alumno) {
-    return {
-      ok: false,
-      status: 404,
-      message: 'Alumno no encontrado.'
-    };
+    return { ok: false, status: 404, message: 'Alumno no encontrado.' };
   }
 
   const alumnoPlano =
     typeof alumno.toJSON === 'function' ? alumno.toJSON() : alumno;
 
   if (!usuarioPuedeOperarSede(user, alumnoPlano.sede_id)) {
-    return {
-      ok: false,
-      status: 403,
-      message: 'No tiene acceso al alumno indicado.'
-    };
+    return { ok: false, status: 403, message: 'No tiene acceso al alumno indicado.' };
   }
 
-  return {
-    ok: true,
-    alumno
-  };
+  return { ok: true, alumno };
 };
 
 const buscarPlanActivo = async (planId, transaction = null) => {
   if (!planId) return null;
 
   return PlanesModel.findOne({
-    where: {
-      id: planId,
-      activo: 1
-    },
+    where: { id: planId, activo: 1 },
     transaction
   });
 };
 
-const buscarPrecioVigentePlan = async ({
-  planId,
-  sedeId,
-  fechaConsulta,
-  transaction = null
-}) => {
+const buscarPrecioVigentePlan = async ({ planId, sedeId, fechaConsulta, transaction = null }) => {
   const whereBase = {
     plan_id: planId,
     activo: 1,
-    fecha_desde: {
-      [Op.lte]: fechaConsulta
-    },
+    fecha_desde: { [Op.lte]: fechaConsulta },
     [Op.or]: [
-      {
-        fecha_hasta: null
-      },
-      {
-        fecha_hasta: {
-          [Op.gte]: fechaConsulta
-        }
-      }
+      { fecha_hasta: null },
+      { fecha_hasta: { [Op.gte]: fechaConsulta } }
     ]
   };
 
   if (sedeId) {
     const precioSede = await PlanesPreciosModel.findOne({
-      where: {
-        ...whereBase,
-        sede_id: sedeId
-      },
-      order: [
-        ['fecha_desde', 'DESC'],
-        ['id', 'DESC']
-      ],
+      where: { ...whereBase, sede_id: sedeId },
+      order: [['fecha_desde', 'DESC'], ['id', 'DESC']],
       transaction
     });
 
@@ -659,14 +592,8 @@ const buscarPrecioVigentePlan = async ({
   }
 
   return PlanesPreciosModel.findOne({
-    where: {
-      ...whereBase,
-      sede_id: null
-    },
-    order: [
-      ['fecha_desde', 'DESC'],
-      ['id', 'DESC']
-    ],
+    where: { ...whereBase, sede_id: null },
+    order: [['fecha_desde', 'DESC'], ['id', 'DESC']],
     transaction
   });
 };
@@ -726,39 +653,27 @@ const validarContactosEmergenciaPublico = (contactos = []) => {
     const numeroContacto = index + 1;
 
     if (!contacto.nombre) {
-      errores.push(
-        `El nombre del contacto de emergencia ${numeroContacto} es obligatorio.`
-      );
+      errores.push(`El nombre del contacto de emergencia ${numeroContacto} es obligatorio.`);
     }
 
     if (!contacto.telefono) {
-      errores.push(
-        `El teléfono del contacto de emergencia ${numeroContacto} es obligatorio.`
-      );
+      errores.push(`El teléfono del contacto de emergencia ${numeroContacto} es obligatorio.`);
     }
 
     if (contacto.nombre && contacto.nombre.length > 120) {
-      errores.push(
-        `El nombre del contacto de emergencia ${numeroContacto} no puede superar los 120 caracteres.`
-      );
+      errores.push(`El nombre del contacto de emergencia ${numeroContacto} no puede superar los 120 caracteres.`);
     }
 
     if (contacto.parentesco && contacto.parentesco.length > 80) {
-      errores.push(
-        `El parentesco del contacto de emergencia ${numeroContacto} no puede superar los 80 caracteres.`
-      );
+      errores.push(`El parentesco del contacto de emergencia ${numeroContacto} no puede superar los 80 caracteres.`);
     }
 
     if (contacto.telefono && contacto.telefono.length > 50) {
-      errores.push(
-        `El teléfono del contacto de emergencia ${numeroContacto} no puede superar los 50 caracteres.`
-      );
+      errores.push(`El teléfono del contacto de emergencia ${numeroContacto} no puede superar los 50 caracteres.`);
     }
 
     if (contacto.email && contacto.email.length > 150) {
-      errores.push(
-        `El email del contacto de emergencia ${numeroContacto} no puede superar los 150 caracteres.`
-      );
+      errores.push(`El email del contacto de emergencia ${numeroContacto} no puede superar los 150 caracteres.`);
     }
   });
 
@@ -783,21 +698,10 @@ const normalizarPrincipalContactosEmergenciaPublico = (contactos = []) => {
   }));
 };
 
-const construirPayloadMembresiaPublica = ({
-  alumnoId,
-  plan,
-  sedeId,
-  fechaInicio,
-  precioVigente
-}) => {
+const construirPayloadMembresiaPublica = ({ alumnoId, plan, sedeId, fechaInicio, precioVigente }) => {
   const precioLista = precioVigente ? Number(precioVigente.precio || 0) : 0;
-  const clasesIncluidas = Number(
-    plan.cantidad_clases_periodo ?? plan.clases_por_mes ?? 0
-  );
-  const fechaVencimiento = construirFechaVencimientoMembresia(
-    fechaInicio,
-    plan.duracion_dias
-  );
+  const clasesIncluidas = Number(plan.cantidad_clases_periodo ?? plan.clases_por_mes ?? 0);
+  const fechaVencimiento = construirFechaVencimientoMembresia(fechaInicio, plan.duracion_dias);
 
   return {
     alumno_id: alumnoId,
@@ -819,35 +723,20 @@ const construirPayloadMembresiaPublica = ({
 };
 
 const buscarAlumnoPorDniConPermiso = async (dni, user) => {
-  const alumno = await AlumnosModel.findOne({
-    where: {
-      dni
-    }
-  });
+  const alumno = await AlumnosModel.findOne({ where: { dni } });
 
   if (!alumno) {
-    return {
-      ok: false,
-      status: 404,
-      message: 'Alumno no encontrado.'
-    };
+    return { ok: false, status: 404, message: 'Alumno no encontrado.' };
   }
 
   const alumnoPlano =
     typeof alumno.toJSON === 'function' ? alumno.toJSON() : alumno;
 
   if (!usuarioPuedeOperarSede(user, alumnoPlano.sede_id)) {
-    return {
-      ok: false,
-      status: 403,
-      message: 'No tiene acceso al alumno indicado.'
-    };
+    return { ok: false, status: 403, message: 'No tiene acceso al alumno indicado.' };
   }
 
-  return {
-    ok: true,
-    alumno
-  };
+  return { ok: true, alumno };
 };
 
 /*
@@ -875,7 +764,6 @@ export const OBR_Alumnos_CTS = async (req, res) => {
 
     const where = {};
 
-    // Filtro por sede según permisos del usuario
     const scope = aplicarScopeSedesAlumnos(where, req.user, sede_id);
 
     if (!scope.ok) {
@@ -885,7 +773,6 @@ export const OBR_Alumnos_CTS = async (req, res) => {
       });
     }
 
-    // Totales de la sede sin filtros de búsqueda
     const whereEstadisticas = { ...where };
 
     const [totalSede, activosSede] = await Promise.all([
@@ -934,23 +821,12 @@ export const OBR_Alumnos_CTS = async (req, res) => {
     const offset = (pageNumber - 1) * limitNumber;
 
     const allowedOrderFields = [
-      'id',
-      'nombre',
-      'apellido',
-      'dni',
-      'estado',
-      'fecha_inicio',
-      'ultima_asistencia',
-      'created_at',
-      'updated_at'
+      'id', 'nombre', 'apellido', 'dni', 'estado',
+      'fecha_inicio', 'ultima_asistencia', 'created_at', 'updated_at'
     ];
 
-    const safeOrderBy = allowedOrderFields.includes(orderBy)
-      ? orderBy
-      : 'created_at';
-
-    const safeOrderDirection =
-      String(orderDirection).toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
+    const safeOrderBy = allowedOrderFields.includes(orderBy) ? orderBy : 'created_at';
+    const safeOrderDirection = String(orderDirection).toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
 
     const { rows, count } = await AlumnosModel.findAndCountAll({
       where,
@@ -959,9 +835,7 @@ export const OBR_Alumnos_CTS = async (req, res) => {
       order: [[safeOrderBy, safeOrderDirection]]
     });
 
-    const data = await Promise.all(
-      rows.map((alumno) => construirAlumnoRespuesta(alumno))
-    );
+    const data = await Promise.all(rows.map((alumno) => construirAlumnoRespuesta(alumno)));
 
     return res.status(200).json({
       ok: true,
@@ -989,7 +863,7 @@ export const OBR_Alumnos_CTS = async (req, res) => {
 };
 
 /*
- * Benjamin Orellana - 2026/05/26 - Obtiene un alumno por ID.
+ * Benjamin Orellana - 2026/05/26 - Obtiene un alumno por DNI.
  */
 export const OBR_AlumnoPorDni_CTS = async (req, res) => {
   try {
@@ -1000,11 +874,7 @@ export const OBR_AlumnoPorDni_CTS = async (req, res) => {
       });
     }
 
-    console.log('params:', req.params);
-
     const { dni } = req.params;
-
-    console.log('dni:', dni);
 
     const result = await buscarAlumnoPorDniConPermiso(dni, req.user);
 
@@ -1081,7 +951,14 @@ export const CR_Alumnos_CTS = async (req, res) => {
       });
     }
 
-    const payload = buildAlumnoPayloadCreate(req.body, req.user);
+    const bodyConIdsNormalizados = {
+      ...req.body,
+      sede_id: toNumberOrNull(req.body.sede_id),
+      plan_id: toNumberOrNull(req.body.plan_id),
+      usuario_app_id: toNumberOrNull(req.body.usuario_app_id)
+    };
+
+    const payload = buildAlumnoPayloadCreate(bodyConIdsNormalizados, req.user);
     const errores = validarPayloadAlumno(payload, 'create');
 
     if (!usuarioPuedeOperarSede(req.user, payload.sede_id)) {
@@ -1132,9 +1009,7 @@ export const CR_Alumnos_CTS = async (req, res) => {
         });
       }
 
-      const usuarioAsignado = await verificarUsuarioAppDisponible(
-        payload.usuario_app_id
-      );
+      const usuarioAsignado = await verificarUsuarioAppDisponible(payload.usuario_app_id);
 
       if (usuarioAsignado) {
         await transaction.rollback();
@@ -1147,13 +1022,73 @@ export const CR_Alumnos_CTS = async (req, res) => {
     }
 
     if (payload.estado === 'activo') {
-      payload.usuario_validacion_id =
-        req.user?.id || req.user?.usuario_id || null;
+      payload.usuario_validacion_id = req.user?.id || req.user?.usuario_id || null;
     }
 
-    const nuevoAlumno = await AlumnosModel.create(payload, {
-      transaction
-    });
+    const nuevoAlumno = await AlumnosModel.create(payload, { transaction });
+
+    if (bodyConIdsNormalizados.plan_id) {
+      const planId = bodyConIdsNormalizados.plan_id;
+
+      if (!planId) {
+        await transaction.rollback();
+
+        return res.status(400).json({
+          ok: false,
+          message: 'El plan_id debe ser un número válido.'
+        });
+      }
+
+      const plan = await PlanesModel.findOne({
+        where: { id: planId, activo: 1 }
+      });
+
+      if (!plan) {
+        await transaction.rollback();
+
+        return res.status(404).json({
+          ok: false,
+          message: 'El plan indicado no existe o está inactivo.'
+        });
+      }
+
+      const fechaInicio = normalizarFecha(bodyConIdsNormalizados.fecha_inicio) || obtenerFechaActualDateOnly();
+
+      if (!esFechaDateOnlyValida(fechaInicio)) {
+        await transaction.rollback();
+
+        return res.status(400).json({
+          ok: false,
+          message: 'La fecha de inicio debe ser válida (formato: YYYY-MM-DD).'
+        });
+      }
+
+      const precioVigente = await buscarPrecioVigentePlan({
+        planId,
+        sedeId: Number(payload.sede_id),
+        fechaConsulta: fechaInicio,
+        transaction
+      });
+
+      if (!precioVigente) {
+        await transaction.rollback();
+
+        return res.status(400).json({
+          ok: false,
+          message: 'No hay un precio vigente para este plan en la sede indicada.'
+        });
+      }
+
+      const payloadMembresia = construirPayloadMembresiaPublica({
+        alumnoId: nuevoAlumno.id,
+        plan,
+        sedeId: Number(payload.sede_id),
+        fechaInicio,
+        precioVigente
+      });
+
+      await AlumnosMembresiasModel.create(payloadMembresia, { transaction });
+    }
 
     const data = await construirAlumnoRespuesta(nuevoAlumno, transaction);
 
@@ -1197,13 +1132,7 @@ export const CR_Alumnos_Publico_CTS = async (req, res) => {
       fecha_inicio
     } = req.body;
 
-    if (
-      !nombre ||
-      !apellido ||
-      !dni ||
-      !sede_id ||
-      !plan_id
-    ) {
+    if (!nombre || !apellido || !dni || !sede_id || !plan_id) {
       await transaction.rollback();
 
       return res.status(400).json({
@@ -1212,9 +1141,7 @@ export const CR_Alumnos_Publico_CTS = async (req, res) => {
       });
     }
 
-    const erroresContacto = validarContactosEmergenciaPublico(
-      contactosEmergencia
-    );
+    const erroresContacto = validarContactosEmergenciaPublico(contactosEmergencia);
 
     if (erroresContacto.length > 0) {
       await transaction.rollback();
@@ -1238,10 +1165,7 @@ export const CR_Alumnos_Publico_CTS = async (req, res) => {
     const fechaInicioNormalizada = fecha_inicio || obtenerFechaActualDateOnly();
 
     const sede = await SedesModel.findOne({
-      where: {
-        id: Number(sede_id),
-        activo: 1
-      },
+      where: { id: Number(sede_id), activo: 1 },
       transaction
     });
 
@@ -1296,7 +1220,8 @@ export const CR_Alumnos_Publico_CTS = async (req, res) => {
         domicilio,
         sede_id,
         fecha_inicio: fechaInicioNormalizada,
-        origen_registro: 'externo'
+        origen_registro: 'externo',
+        estado: 'activo'
       },
       null
     );
@@ -1316,9 +1241,7 @@ export const CR_Alumnos_Publico_CTS = async (req, res) => {
       });
     }
 
-    const nuevoAlumno = await AlumnosModel.create(payloadAlumno, {
-      transaction
-    });
+    const nuevoAlumno = await AlumnosModel.create(payloadAlumno, { transaction });
 
     const precioVigente = await buscarPrecioVigentePlan({
       planId: Number(plan.id),
@@ -1330,11 +1253,9 @@ export const CR_Alumnos_Publico_CTS = async (req, res) => {
     const contactosCreados = await AlumnosContactosEmergenciaModel.bulkCreate(
       contactosEmergencia.map((contacto) => ({
         alumno_id: nuevoAlumno.id,
-        ...contacto,
+        ...contacto
       })),
-      {
-        transaction
-      }
+      { transaction }
     );
 
     const payloadMembresia = construirPayloadMembresiaPublica({
@@ -1345,12 +1266,7 @@ export const CR_Alumnos_Publico_CTS = async (req, res) => {
       precioVigente
     });
 
-    const nuevaMembresia = await AlumnosMembresiasModel.create(
-      payloadMembresia,
-      {
-        transaction
-      }
-    );
+    const nuevaMembresia = await AlumnosMembresiasModel.create(payloadMembresia, { transaction });
 
     const data = await construirAlumnoRespuesta(nuevoAlumno, transaction);
 
@@ -1363,13 +1279,13 @@ export const CR_Alumnos_Publico_CTS = async (req, res) => {
       contactos_emergencia: contactosCreados,
       membresia: nuevaMembresia
     });
-
   } catch (error) {
     if (transaction && !transaction.finished) {
       await transaction.rollback();
     }
 
-    console.error('Error en registro público:', error);
+    console.error('Error CR_Alumnos_Publico_CTS:', error);
+
     return res.status(500).json({
       ok: false,
       message: 'Error al procesar el registro.'
@@ -1450,9 +1366,38 @@ export const UR_Alumnos_CTS = async (req, res) => {
       }
     }
 
-    await alumno.update(payload, {
-      transaction
-    });
+    if (req.body.plan_id) {
+      const planId = toNumberOrNull(req.body.plan_id);
+
+      if (!planId) {
+        await transaction.rollback();
+
+        return res.status(400).json({
+          ok: false,
+          message: 'El plan_id debe ser un número válido.'
+        });
+      }
+
+      const planExiste = await PlanesModel.findOne({
+        where: { id: planId, activo: 1 }
+      });
+
+      if (!planExiste) {
+        await transaction.rollback();
+
+        return res.status(404).json({
+          ok: false,
+          message: 'El plan indicado no existe o está inactivo.'
+        });
+      }
+
+      await AlumnosMembresiasModel.update(
+        { plan_id: planId },
+        { where: { alumno_id: id }, transaction }
+      );
+    }
+
+    await alumno.update(payload, { transaction });
 
     await transaction.commit();
 
@@ -1507,13 +1452,10 @@ export const UR_EstadoAlumnos_CTS = async (req, res) => {
       });
     }
 
-    const payload = {
-      estado
-    };
+    const payload = { estado };
 
     if (estado === 'activo') {
-      payload.usuario_validacion_id =
-        req.user?.id || req.user?.usuario_id || null;
+      payload.usuario_validacion_id = req.user?.id || req.user?.usuario_id || null;
       payload.fecha_baja = null;
       payload.motivo_baja = null;
     }
@@ -1608,11 +1550,8 @@ export const UR_CongelarAlumnos_CTS = async (req, res) => {
 
     await result.alumno.update({
       estado: 'congelado',
-      fecha_congelamiento_desde:
-        req.body.fecha_congelamiento_desde || new Date(),
-      fecha_congelamiento_hasta: normalizarFecha(
-        req.body.fecha_congelamiento_hasta
-      ),
+      fecha_congelamiento_desde: req.body.fecha_congelamiento_desde || new Date(),
+      fecha_congelamiento_hasta: normalizarFecha(req.body.fecha_congelamiento_hasta),
       motivo_congelamiento: normalizarTexto(req.body.motivo_congelamiento)
     });
 
@@ -1737,9 +1676,7 @@ export const UR_HabilitarAccesoAlumno_CTS = async (req, res) => {
     }
 
     const email = normalizarEmail(req.body.email || alumnoPlano.email);
-    const telefono = normalizarTelefono(
-      req.body.telefono || alumnoPlano.telefono
-    );
+    const telefono = normalizarTelefono(req.body.telefono || alumnoPlano.telefono);
 
     if (!email && !telefono) {
       await transaction.rollback();
@@ -1761,10 +1698,7 @@ export const UR_HabilitarAccesoAlumno_CTS = async (req, res) => {
       });
     }
 
-    const usuarioDuplicado = await verificarUsuarioLoginDuplicado({
-      email,
-      telefono
-    });
+    const usuarioDuplicado = await verificarUsuarioLoginDuplicado({ email, telefono });
 
     if (usuarioDuplicado) {
       await transaction.rollback();
@@ -1788,9 +1722,7 @@ export const UR_HabilitarAccesoAlumno_CTS = async (req, res) => {
         password_hash: passwordHash,
         estado: 'activo'
       },
-      {
-        transaction
-      }
+      { transaction }
     );
 
     await alumno.update(
@@ -1799,9 +1731,7 @@ export const UR_HabilitarAccesoAlumno_CTS = async (req, res) => {
         email: email || alumnoPlano.email,
         telefono: telefono || alumnoPlano.telefono
       },
-      {
-        transaction
-      }
+      { transaction }
     );
 
     await transaction.commit();
@@ -1848,9 +1778,7 @@ export const DR_Alumnos_CTS = async (req, res) => {
       });
     }
 
-    await result.alumno.update({
-      estado: 'inactivo'
-    });
+    await result.alumno.update({ estado: 'inactivo' });
 
     const data = await construirAlumnoRespuesta(result.alumno);
 

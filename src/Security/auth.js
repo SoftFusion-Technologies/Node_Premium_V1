@@ -561,17 +561,22 @@ export const authenticateToken = async (req, res, next) => {
   } catch (error) {
     console.error('Error authenticateToken PREMIUM:', error);
 
+    // Benjamin Orellana - 2026/06/07 - Respuesta controlada para que el frontend detecte sesión expirada.
     if (error.name === 'TokenExpiredError') {
       return res.status(401).json({
         ok: false,
-        message: 'Token expirado.'
+        codigo: 'TOKEN_EXPIRED',
+        message: 'Tu sesión expiró. Iniciá sesión nuevamente.',
+        expiredAt: error.expiredAt || null
       });
     }
 
+    // Benjamin Orellana - 2026/06/07 - Respuesta controlada para token inválido.
     if (error.name === 'JsonWebTokenError') {
       return res.status(401).json({
         ok: false,
-        message: 'Token inválido.'
+        codigo: 'TOKEN_INVALID',
+        message: 'La sesión no es válida. Iniciá sesión nuevamente.'
       });
     }
 

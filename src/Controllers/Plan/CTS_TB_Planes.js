@@ -678,13 +678,9 @@ export const OBR_PlanesConPrecios_CTS = async (req, res) => {
   try {
     const { sede_id, fecha_consulta = obtenerFechaActualDateOnly() } = req.query;
 
-    console.log('=== [OBR_PlanesConPrecios_CTS] sede_id:', sede_id);
-    console.log('=== [OBR_PlanesConPrecios_CTS] fecha_consulta:', fecha_consulta);
 
     // CASO 1: Sin sede_id - devuelve TODOS los planes activos
     if (!sede_id) {
-      console.log('=== [OBR_PlanesConPrecios_CTS] Devolviendo TODOS los planes');
-      
       const planes = await PlanesModel.findAll({
         where: {
           activo: 1
@@ -709,8 +705,6 @@ export const OBR_PlanesConPrecios_CTS = async (req, res) => {
         message: 'El parámetro sede_id debe ser un número válido.'
       });
     }
-
-    console.log('=== [OBR_PlanesConPrecios] Buscando planes con precio vigente para sede:', sedeIdNum);
 
     // Buscar planes que tienen precio vigente en esa sede
     const planes = await PlanesModel.findAll({
@@ -738,8 +732,6 @@ export const OBR_PlanesConPrecios_CTS = async (req, res) => {
       ],
       order: [['id', 'ASC']]
     });
-
-    console.log('=== [OBR_PlanesConPrecios] Planes encontrados:', planes.length);
 
     return res.status(200).json({
       ok: true,

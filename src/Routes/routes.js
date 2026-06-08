@@ -1443,6 +1443,146 @@ router.delete(
   ER_PagosMediosPago_CTS
 );
 
+// Benjamin Orellana - 2026/06/07 - Importa controladores de mensualidades y deuda de alumnos PREMIUM.
+import {
+  OBR_PagosMensualidades_CTS,
+  OBR_MensualidadPorId_CTS,
+  OBR_MensualidadesPorAlumno_CTS,
+  OBR_MensualidadesPendientes_CTS,
+  OBR_MensualidadesVencidas_CTS,
+  OBR_AlumnosMorosos_CTS,
+  CR_PagosMensualidades_CTS,
+  CR_GenerarMensualidadDesdeMembresia_CTS,
+  UR_PagosMensualidades_CTS,
+  UR_EstadoMensualidad_CTS,
+  UR_MarcarMensualidadVencida_CTS,
+  DR_PagosMensualidades_CTS,
+  ER_PagosMensualidades_CTS
+} from '../Controllers/Pago/CTS_TB_PagosMensualidades.js';
+
+/*
+ * =========================================================
+ * PAGOS MENSUALIDADES
+ * =========================================================
+ */
+
+/*
+ * Benjamin Orellana - 2026/06/07 - Lista mensualidades con filtros y paginación.
+ */
+router.get(
+  '/pagos-mensualidades',
+  authenticateToken,
+  OBR_PagosMensualidades_CTS
+);
+
+/*
+ * Benjamin Orellana - 2026/06/07 - Lista mensualidades pendientes o parciales con saldo.
+ */
+router.get(
+  '/pagos-mensualidades/pendientes',
+  authenticateToken,
+  OBR_MensualidadesPendientes_CTS
+);
+
+/*
+ * Benjamin Orellana - 2026/06/07 - Lista mensualidades vencidas o con vencimiento superado.
+ */
+router.get(
+  '/pagos-mensualidades/vencidas',
+  authenticateToken,
+  OBR_MensualidadesVencidas_CTS
+);
+
+/*
+ * Benjamin Orellana - 2026/06/07 - Lista alumnos morosos según mensualidades vencidas con saldo.
+ */
+router.get(
+  '/pagos-mensualidades/morosos',
+  authenticateToken,
+  OBR_AlumnosMorosos_CTS
+);
+
+/*
+ * Benjamin Orellana - 2026/06/07 - Lista mensualidades de un alumno específico.
+ */
+router.get(
+  '/alumnos/:alumno_id/mensualidades',
+  authenticateToken,
+  OBR_MensualidadesPorAlumno_CTS
+);
+
+/*
+ * Benjamin Orellana - 2026/06/07 - Obtiene una mensualidad por ID.
+ */
+router.get(
+  '/pagos-mensualidades/:id',
+  authenticateToken,
+  OBR_MensualidadPorId_CTS
+);
+
+/*
+ * Benjamin Orellana - 2026/06/07 - Crea una mensualidad manual.
+ */
+router.post(
+  '/pagos-mensualidades',
+  authenticateToken,
+  CR_PagosMensualidades_CTS
+);
+
+/*
+ * Benjamin Orellana - 2026/06/07 - Genera una mensualidad desde una membresía existente.
+ */
+router.post(
+  '/pagos-mensualidades/generar-desde-membresia/:membresia_id',
+  authenticateToken,
+  CR_GenerarMensualidadDesdeMembresia_CTS
+);
+
+/*
+ * Benjamin Orellana - 2026/06/07 - Actualiza una mensualidad existente.
+ */
+router.put(
+  '/pagos-mensualidades/:id',
+  authenticateToken,
+  UR_PagosMensualidades_CTS
+);
+
+/*
+ * Benjamin Orellana - 2026/06/07 - Actualiza manualmente el estado de una mensualidad.
+ */
+router.patch(
+  '/pagos-mensualidades/:id/estado',
+  authenticateToken,
+  UR_EstadoMensualidad_CTS
+);
+
+/*
+ * Benjamin Orellana - 2026/06/07 - Marca una mensualidad como vencida.
+ */
+router.patch(
+  '/pagos-mensualidades/:id/vencida',
+  authenticateToken,
+  UR_MarcarMensualidadVencida_CTS
+);
+
+/*
+ * Benjamin Orellana - 2026/06/07 - Anula una mensualidad mediante baja lógica.
+ */
+router.put(
+  '/pagos-mensualidades/:id/anular',
+  authenticateToken,
+  DR_PagosMensualidades_CTS
+);
+
+/*
+ * Benjamin Orellana - 2026/06/07 - Elimina físicamente una mensualidad.
+ */
+router.delete(
+  '/pagos-mensualidades/:id',
+  authenticateToken,
+  ER_PagosMensualidades_CTS
+);
+
 import {
   OBR_Pagos_CTS,
   OBR_PagoPorId_CTS,

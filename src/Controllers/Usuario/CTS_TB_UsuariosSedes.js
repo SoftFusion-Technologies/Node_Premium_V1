@@ -874,7 +874,7 @@ export const UR_EstadoUsuariosSedes_CTS = async (req, res) => {
 };
 
 /*
- * Benjamin Orellana - 2026/05/10 - Desactiva una asignación usuario-sede sin eliminarla físicamente.
+ * Benjamin Orellana - 2026/06/07 - Elimina físicamente una asignación usuario-sede.
  */
 export const DR_UsuariosSedes_CTS = async (req, res) => {
   const transaction = await db.transaction();
@@ -895,38 +895,45 @@ export const DR_UsuariosSedes_CTS = async (req, res) => {
       });
     }
 
-    if (Number(asignacion.es_sede_principal) === 1) {
+    const asignacionPlano =
+      typeof asignacion.toJSON === 'function'
+        ? asignacion.toJSON()
+        : { ...asignacion };
+
+    /*
+     * Benjamin Orellana - 2026/06/07 - Si se elimina la sede principal, limpia la referencia principal del usuario.
+     */
+    if (Number(asignacionPlano.es_sede_principal) === 1) {
       await UsuariosModel.update(
         {
           sede_principal_id: null
         },
         {
           where: {
-            id: asignacion.usuario_id
+            id: asignacionPlano.usuario_id
           },
           transaction
         }
       );
     }
 
-    await asignacion.update(
-      {
-        activo: 0,
-        es_sede_principal: 0
-      },
-      {
-        transaction
-      }
-    );
+    /*
+     * Benjamin Orellana - 2026/06/07 - Elimina físicamente la asignación para que no vuelva a figurar en listados.
+     */
+    await asignacion.destroy({
+      transaction
+    });
 
     await transaction.commit();
 
-    const data = await construirAsignacionRespuesta(asignacion);
-
     return res.status(200).json({
       ok: true,
-      message: 'Asignación usuario-sede desactivada correctamente.',
-      data
+      message: 'Asignación usuario-sede eliminada correctamente.',
+      data: {
+        id: asignacionPlano.id,
+        usuario_id: asignacionPlano.usuario_id,
+        sede_id: asignacionPlano.sede_id
+      }
     });
   } catch (error) {
     await transaction.rollback();
@@ -935,7 +942,7 @@ export const DR_UsuariosSedes_CTS = async (req, res) => {
 
     return res.status(500).json({
       ok: false,
-      message: 'Error al desactivar la asignación usuario-sede.'
+      message: 'Error al eliminar la asignación usuario-sede.'
     });
   }
 };

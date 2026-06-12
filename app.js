@@ -1,6 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import path from 'path';
+
 // El Intercambio de Recursos de Origen Cruzado CORS
 // es un mecanismo que utiliza cabeceras HTTP adicionales para permitir que un user agent
 // obtenga permiso para acceder a recursos seleccionados desde un servidor, en un origen distinto al que pertenece.
@@ -19,11 +20,16 @@ import {
   loginUsuario,
   loginAlumno,
   authenticateToken,
-  authenticateAlumnoToken,
   requireRolGlobal,
   requireSedeAccess,
   requireAlumnoActivo
 } from './src/Security/auth.js';
+
+import {
+  loginAlumno as loginAlumnoNuevo,
+  cambiarPasswordAlumno,        // ← agregar
+  authenticateAlumnoToken       // ← agregar
+} from './src/Security/authAlumno.js';
 
 // Benjamin Orellana - 2026/05/10 - Importa relaciones Sequelize del módulo Usuario.
 import { initUsuarioRelaciones } from './src/Models/Usuario/relacionesUsuario.js';
@@ -64,8 +70,11 @@ app.get('/', (req, res) => {
 // Benjamin Orellana - 2026/05/10 - Login interno para usuarios administrativos, dirección, coordinación y profesores.
 app.post('/login', loginUsuario);
 
-// Benjamin Orellana - 2026/05/10 - Login externo para alumnos del portal/app PREMIUM.
-app.post('/alumnos/login', loginAlumno);
+// Sergio Manrique - 2026/06/10 - Login externo para alumnos del portal/app PREMIUM.
+app.post('/alumnos/login', loginAlumnoNuevo);
+
+// Sergio Gustavo Manrique - 2026/06/11 - Cambio de contraseña obligatorio primer acceso alumno.
+app.post('/alumnos/login/cambiar-password', authenticateAlumnoToken, cambiarPasswordAlumno);
 
 // Benjamin Orellana - 2026/05/10 - Ruta protegida de prueba para validar JWT de usuario interno.
 app.get('/protected', authenticateToken, (req, res) => {

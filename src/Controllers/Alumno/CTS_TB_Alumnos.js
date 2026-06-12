@@ -10,12 +10,14 @@ import AlumnosModel from '../../Models/Alumno/MD_TB_Alumnos.js';
 import AlumnosMembresiasModel from '../../Models/Alumno/MD_TB_AlumnosMembresias.js';
 import AlumnosContactosEmergenciaModel from "../../Models/Alumno/MD_TB_AlumnosContactosEmergencia.js";
 import AlumnosAnamnesisModel from '../../Models/Alumno/MD_TB_AlumnosAnamnesis.js';
+import AlumnosLoginModel from '../../Models/Alumno/MD_TB_AlumnosLogin.js';
 import PlanesModel from '../../Models/Plan/MD_TB_Planes.js';
 import PlanesPreciosModel from '../../Models/Plan/MD_TB_PlanesPrecios.js';
 import SedesModel from '../../Models/Sede/MD_TB_Sedes.js';
 import UsuariosModel from '../../Models/Usuario/MD_TB_Usuarios.js';
 import UsuariosRolesModel from '../../Models/Usuario/MD_TB_UsuariosRoles.js';
 import { hashPassword } from '../../Security/auth.js';
+import bcrypt from 'bcryptjs';
 
 const ESTADOS_ALUMNO_VALIDOS = [
   'pendiente_validacion',
@@ -169,7 +171,7 @@ const obtenerSedesPermitidasUsuario = (user) => {
 const usuarioPuedeOperarSede = (user, sedeId) => {
   if (usuarioEsGlobal(user)) return true;
 
-  if (!sedeId) return false;
+  if (!sedeId) return true; 
 
   const sedesPermitidas = obtenerSedesPermitidasUsuario(user);
 
@@ -920,10 +922,17 @@ export const OBR_AlumnoPerfil_CTS = async (req, res) => {
 
     const data = await construirAlumnoRespuesta(alumno);
 
+    // Sergio Gustavo Manrique - 2026/06/11 - Verifica pendientes del alumno
+    const pendientes = {
+      anamnesis: !data.anamnesis,
+      contactos: !data.contactos_emergencia?.length
+    };
+
     return res.status(200).json({
       ok: true,
       message: 'Perfil del alumno obtenido correctamente.',
-      data
+      data,
+      pendientes
     });
   } catch (error) {
     console.error('Error OBR_AlumnoPerfil_CTS:', error);
@@ -1111,188 +1120,91 @@ export const CR_Alumnos_CTS = async (req, res) => {
   }
 };
 
+ 
 export const CR_Alumnos_Publico_CTS = async (req, res) => {
   const transaction = await db.transaction();
-
+ 
   try {
-    const contactosEmergencia = normalizarPrincipalContactosEmergenciaPublico(
-      normalizarContactosEmergenciaPublico(req.body)
-    );
-
-    const {
-      nombre,
-      apellido,
-      dni,
-      fecha_nacimiento,
-      telefono,
-      email,
-      domicilio,
-      sede_id,
-      plan_id,
-      fecha_inicio
-    } = req.body;
-
-    if (!nombre || !apellido || !dni || !sede_id || !plan_id) {
+    const { nombre, apellido, dni, telefono, email = null } = req.body;
+ 
+    // Validación de campos obligatorios
+    if (!nombre || !apellido || !dni || !telefono) {
       await transaction.rollback();
-
       return res.status(400).json({
         ok: false,
-        message: 'Faltan datos obligatorios para el registro.'
+        message: 'Faltan datos obligatorios: nombre, apellido, dni, telefono.'
       });
     }
-
-    const erroresContacto = validarContactosEmergenciaPublico(contactosEmergencia);
-
-    if (erroresContacto.length > 0) {
-      await transaction.rollback();
-
-      return res.status(400).json({
-        ok: false,
-        message: 'Datos inválidos para el contacto de emergencia.',
-        errors: erroresContacto
-      });
-    }
-
-    if (fecha_inicio && !esFechaDateOnlyValida(fecha_inicio)) {
-      await transaction.rollback();
-
-      return res.status(400).json({
-        ok: false,
-        message: 'La fecha de inicio debe tener formato YYYY-MM-DD.'
-      });
-    }
-
-    const fechaInicioNormalizada = fecha_inicio || obtenerFechaActualDateOnly();
-
-    const sede = await SedesModel.findOne({
-      where: { id: Number(sede_id), activo: 1 },
-      transaction
-    });
-
-    if (!sede) {
-      await transaction.rollback();
-
-      return res.status(400).json({
-        ok: false,
-        message: 'La sede indicada no existe o está inactiva.'
-      });
-    }
-
-    const plan = await buscarPlanActivo(Number(plan_id), transaction);
-
-    if (!plan) {
-      await transaction.rollback();
-
-      return res.status(400).json({
-        ok: false,
-        message: 'El plan indicado no existe o está inactivo.'
-      });
-    }
-
-    if (!plan.duracion_dias || Number(plan.duracion_dias) <= 0) {
-      await transaction.rollback();
-
-      return res.status(400).json({
-        ok: false,
-        message: 'El plan indicado no tiene una duración válida.'
-      });
-    }
-
-    const existeDni = await verificarDniDuplicado(dni);
-
+ 
+    // Normalización
+    const dniLimpio      = dni.replace(/\D/g, '');
+    const telefonoLimpio = telefono.replace(/\D/g, '');
+    const emailLimpio    = email ? email.toLowerCase().trim() : null;
+ 
+    // Verificar duplicados en paralelo
+    const [existeDni, existeTelefono, existeEmail] = await Promise.all([
+      AlumnosModel.findOne({ where: { dni: dniLimpio } }),
+      AlumnosModel.findOne({ where: { telefono: telefonoLimpio } }),
+      emailLimpio
+        ? AlumnosModel.findOne({ where: { email: emailLimpio } })
+        : null
+    ]);
+ 
     if (existeDni) {
       await transaction.rollback();
-
-      return res.status(409).json({
-        ok: false,
-        message: 'Ya existe un alumno registrado con ese DNI.'
-      });
+      return res.status(409).json({ ok: false, message: 'Ya existe un alumno registrado con ese DNI.' });
     }
-
-    const payloadAlumno = buildAlumnoPayloadCreate(
-      {
-        nombre,
-        apellido,
-        dni,
-        fecha_nacimiento,
-        telefono,
-        email,
-        domicilio,
-        sede_id,
-        fecha_inicio: fechaInicioNormalizada,
-        origen_registro: 'externo',
-        estado: 'activo'
-      },
-      null
-    );
-
-    payloadAlumno.estado = 'activo';
-    payloadAlumno.usuario_validacion_id = null;
-
-    const erroresAlumno = validarPayloadAlumno(payloadAlumno, 'create');
-
-    if (erroresAlumno.length > 0) {
+ 
+    if (existeTelefono) {
       await transaction.rollback();
-
-      return res.status(400).json({
-        ok: false,
-        message: 'Datos inválidos para el registro.',
-        errors: erroresAlumno
-      });
+      return res.status(409).json({ ok: false, message: 'Ya existe un alumno registrado con ese teléfono.' });
     }
-
-    const nuevoAlumno = await AlumnosModel.create(payloadAlumno, { transaction });
-
-    const precioVigente = await buscarPrecioVigentePlan({
-      planId: Number(plan.id),
-      sedeId: Number(sede.id),
-      fechaConsulta: fechaInicioNormalizada,
-      transaction
-    });
-
-    const contactosCreados = await AlumnosContactosEmergenciaModel.bulkCreate(
-      contactosEmergencia.map((contacto) => ({
-        alumno_id: nuevoAlumno.id,
-        ...contacto
-      })),
-      { transaction }
-    );
-
-    const payloadMembresia = construirPayloadMembresiaPublica({
-      alumnoId: nuevoAlumno.id,
-      plan,
-      sedeId: Number(sede.id),
-      fechaInicio: fechaInicioNormalizada,
-      precioVigente
-    });
-
-    const nuevaMembresia = await AlumnosMembresiasModel.create(payloadMembresia, { transaction });
-
-    const data = await construirAlumnoRespuesta(nuevoAlumno, transaction);
-
+ 
+    if (existeEmail) {
+      await transaction.rollback();
+      return res.status(409).json({ ok: false, message: 'Ya existe un alumno registrado con ese email.' });
+    }
+ 
+    // Crear alumno
+    const nuevoAlumno = await AlumnosModel.create({
+      nombre,
+      apellido,
+      dni:      dniLimpio,
+      telefono: telefonoLimpio,
+      email:    emailLimpio,
+      origen_registro: 'externo',
+      estado:          'pendiente_validacion'
+    }, { transaction });
+ 
+    // Crear credenciales — contraseña inicial = DNI sin puntos
+    await AlumnosLoginModel.create({
+      alumno_id:                nuevoAlumno.id,
+      password_hash:            await bcrypt.hash(dniLimpio, 10),
+      requiere_cambio_password: 1,
+      estado:                   'activo'
+    }, { transaction });
+ 
     await transaction.commit();
-
+ 
     return res.status(201).json({
       ok: true,
-      message: '¡Te registraste correctamente!',
-      data,
-      contactos_emergencia: contactosCreados,
-      membresia: nuevaMembresia
+      message: '¡Te registraste correctamente! Podés iniciar sesión con tu DNI como contraseña.',
+      data: {
+        id:       nuevoAlumno.id,
+        nombre:   nuevoAlumno.nombre,
+        apellido: nuevoAlumno.apellido,
+        dni:      nuevoAlumno.dni,
+        telefono: nuevoAlumno.telefono,
+        email:    nuevoAlumno.email,
+        estado:   nuevoAlumno.estado
+      }
     });
   } catch (error) {
-    if (transaction && !transaction.finished) {
-      await transaction.rollback();
-    }
-
+    if (transaction && !transaction.finished) await transaction.rollback();
     console.error('Error CR_Alumnos_Publico_CTS:', error);
-
-    return res.status(500).json({
-      ok: false,
-      message: 'Error al procesar el registro.'
-    });
+    return res.status(500).json({ ok: false, message: 'Error al procesar el registro.' });
   }
 };
-
 /*
  * Benjamin Orellana - 2026/05/26 - Actualiza datos principales de un alumno.
  */
@@ -1475,6 +1387,60 @@ export const UR_EstadoAlumnos_CTS = async (req, res) => {
     return res.status(500).json({
       ok: false,
       message: 'Error al cambiar el estado del alumno.'
+    });
+  }
+};
+
+/*
+ * Sergio Gustavo Manrique - 2026/06/11
+ * PATCH /alumnos/perfil
+ * El alumno actualiza sus propios datos de contacto y domicilio.
+ * No puede cambiar DNI, sede, estado ni campos administrativos.
+ */
+export const UR_AlumnoPerfil_CTS = async (req, res) => {
+  try {
+    const alumnoId = req.alumno?.id || req.alumno?.alumno_id;
+
+    const alumno = await AlumnosModel.findByPk(alumnoId);
+
+    if (!alumno) {
+      return res.status(404).json({
+        ok: false,
+        message: 'Alumno no encontrado.'
+      });
+    }
+
+    // Solo campos que el alumno puede editar
+    const payload = {};
+    const campos = ['telefono', 'email', 'domicilio', 'localidad', 'provincia', 'fecha_nacimiento'];
+
+    campos.forEach((campo) => {
+      if (Object.prototype.hasOwnProperty.call(req.body, campo)) {
+        payload[campo] = normalizarTexto(req.body[campo]);
+      }
+    });
+
+    if (Object.keys(payload).length === 0) {
+      return res.status(400).json({
+        ok: false,
+        message: 'No se enviaron datos para actualizar.'
+      });
+    }
+
+    await alumno.update(payload);
+
+    const data = await construirAlumnoRespuesta(alumno);
+
+    return res.status(200).json({
+      ok: true,
+      message: 'Datos actualizados correctamente.',
+      data
+    });
+  } catch (error) {
+    console.error('Error UR_AlumnoPerfil_CTS:', error);
+    return res.status(500).json({
+      ok: false,
+      message: 'Error al actualizar los datos.'
     });
   }
 };

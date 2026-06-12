@@ -97,12 +97,15 @@ const obtenerSedesPermitidasUsuario = (user) => {
 };
 
 const usuarioPuedeOperarSede = (user, sedeId) => {
-  if (!sedeId) return false;
-
+  // 1. Admin puede con todo
   if (usuarioEsGlobal(user)) return true;
-
+  
+  // 2. Si el alumno NO tiene sede (null) → permitir
+  if (!sedeId) return true;
+  
+  // 3. Si tiene sede, solo permitir si es la misma que la del usuario
   const sedesPermitidas = obtenerSedesPermitidasUsuario(user);
-
+  
   return sedesPermitidas.includes(Number(sedeId));
 };
 

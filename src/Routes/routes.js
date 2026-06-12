@@ -29,9 +29,11 @@ import express from 'express';
 // Benjamin Orellana - 2026/05/10 - Importa middlewares de seguridad para proteger rutas PREMIUM.
 import {
   authenticateToken,
-  authenticateAlumnoToken,
+  authenticateAlumnoToken as authenticateAlumnoTokenViejo,
   requireRolGlobal
 } from '../Security/auth.js';
+
+import { authenticateAlumnoToken } from '../Security/authAlumno.js';
 
 // Benjamin Orellana - 2026/05/10 - Importa controlador de sedes PREMIUM.
 import {
@@ -619,6 +621,7 @@ import {
   CR_Alumnos_Publico_CTS,
   UR_Alumnos_CTS,
   UR_EstadoAlumnos_CTS,
+  UR_AlumnoPerfil_CTS,
   UR_BajaAlumnos_CTS,
   UR_CongelarAlumnos_CTS,
   UR_ReactivarAlumnos_CTS,
@@ -636,6 +639,8 @@ import {
  * Benjamin Orellana - 2026/05/26 - Obtiene perfil del alumno autenticado desde portal/app.
  */
 router.get('/alumnos/perfil', authenticateAlumnoToken, OBR_AlumnoPerfil_CTS);
+// Sergio Gustavo Manrique - 2026/06/11 - Actualiza datos personales del alumno autenticado
+router.patch('/alumnos/perfil', authenticateAlumnoToken, UR_AlumnoPerfil_CTS);
 
 /*
  * Benjamin Orellana - 2026/05/26 - Lista alumnos con filtros, búsqueda y paginación.
@@ -874,6 +879,15 @@ router.get(
 );
 
 /*
+ * Benjamin Orellana - 2026/05/26 - Crea contacto de emergencia desde portal alumno.
+ */
+router.post(
+  '/alumnos/perfil/contactos-emergencia',
+  authenticateAlumnoToken,
+  CR_MiContactoEmergencia_CTS
+);
+
+/*
  * Benjamin Orellana - 2026/05/26 - Crea contacto de emergencia desde panel interno.
  */
 router.post(
@@ -886,15 +900,6 @@ router.post(
     'COORD_SEDE'
   ]),
   CR_AlumnosContactosEmergencia_CTS
-);
-
-/*
- * Benjamin Orellana - 2026/05/26 - Crea contacto de emergencia desde portal alumno.
- */
-router.post(
-  '/alumnos/perfil/contactos-emergencia',
-  authenticateAlumnoToken,
-  CR_MiContactoEmergencia_CTS
 );
 
 /*
@@ -1025,6 +1030,17 @@ router.get(
   OBR_MiAnamnesisActual_CTS
 );
 
+
+/*
+ * Benjamin Orellana - 2026/05/26 - Crea anamnesis desde portal alumno.
+ */
+router.post(
+  '/alumnos/perfil/anamnesis',
+  authenticateAlumnoToken,
+  CR_MiAnamnesis_CTS
+);
+
+
 /*
  * Benjamin Orellana - 2026/05/26 - Lista anamnesis de un alumno.
  */
@@ -1086,15 +1102,6 @@ router.post(
     'COORD_SEDE'
   ]),
   CR_AlumnosAnamnesis_CTS
-);
-
-/*
- * Benjamin Orellana - 2026/05/26 - Crea anamnesis desde portal alumno.
- */
-router.post(
-  '/alumnos/perfil/anamnesis',
-  authenticateAlumnoToken,
-  CR_MiAnamnesis_CTS
 );
 
 /*
@@ -1240,7 +1247,7 @@ router.get('/planes/:id', authenticateToken, OBR_PlanPorId_CTS);
 // Benjamin Orellana - 2026/06/01 - Endpoint público para obtener ID y nombre de planes activos.
 router.get('/planes-publicos', OBR_PlanesPublicos_CTS);
 
-router.get('/planes-con-precios',authenticateToken, OBR_PlanesConPrecios_CTS);
+router.get('/planes-con-precios', OBR_PlanesConPrecios_CTS);
 
 router.post('/planes', authenticateToken, CR_Planes_CTS);
 

@@ -1030,7 +1030,6 @@ router.get(
   OBR_MiAnamnesisActual_CTS
 );
 
-
 /*
  * Benjamin Orellana - 2026/05/26 - Crea anamnesis desde portal alumno.
  */
@@ -1039,7 +1038,6 @@ router.post(
   authenticateAlumnoToken,
   CR_MiAnamnesis_CTS
 );
-
 
 /*
  * Benjamin Orellana - 2026/05/26 - Lista anamnesis de un alumno.
@@ -1165,8 +1163,6 @@ import {
   GR_HistorialAnamnesisAlumno_CTS,
   GR_DetalleHistorialAnamnesis_CTS
 } from '../Controllers/Alumno/CTS_TB_AlumnosAnamnesisHistorial.js';
-
-
 
 /*
  * =========================================================
@@ -1835,6 +1831,81 @@ router.post(
   authenticateToken,
   requireRolGlobal(['SUPER_ADMIN', 'DIRECCION']),
   PR_ProcesarVencimientos_CTS
+);
+
+import {
+  OBR_VencimientosAlumnoPlanesPagos_CTS,
+  CR_MarcarDeudaAlumnoPlanesPagos_CTS,
+  CR_AgregarBonificacionAlumnoPlanesPagos_CTS,
+  UR_CongelarMembresiaAlumnoPlanesPagos_CTS,
+  UR_ReactivarMembresiaAlumnoPlanesPagos_CTS,
+  UR_RegistrarBajaAlumnoPlanesPagos_CTS,
+  CR_ReingresarAlumnoPlanesPagos_CTS,
+  UR_CambiarSedeAlumnoPlanesPagos_CTS,
+  UR_CambiarPlanAlumnoPlanesPagos_CTS
+} from '../Controllers/Alumno/CTS_TB_AlumnosPlanesPagosOperaciones.js';
+
+// Benjamin Orellana - 2026/06/15 - Consulta operativa de vencimientos del alumno.
+router.get(
+  '/alumnos/:alumno_id/vencimientos',
+  authenticateToken,
+  OBR_VencimientosAlumnoPlanesPagos_CTS
+);
+
+// Benjamin Orellana - 2026/06/15 - Marca deuda manual desde ficha del alumno.
+router.post(
+  '/alumnos/:alumno_id/marcar-deuda',
+  authenticateToken,
+  CR_MarcarDeudaAlumnoPlanesPagos_CTS
+);
+
+// Benjamin Orellana - 2026/06/15 - Aplica bonificación administrativa desde ficha del alumno.
+router.post(
+  '/alumnos/:alumno_id/agregar-bonificacion',
+  authenticateToken,
+  CR_AgregarBonificacionAlumnoPlanesPagos_CTS
+);
+
+// Benjamin Orellana - 2026/06/15 - Congela membresía vigente del alumno.
+router.patch(
+  '/alumnos/:alumno_id/congelar-membresia',
+  authenticateToken,
+  UR_CongelarMembresiaAlumnoPlanesPagos_CTS
+);
+
+// Benjamin Orellana - 2026/06/15 - Reactiva membresía congelada del alumno.
+router.patch(
+  '/alumnos/:alumno_id/reactivar-membresia',
+  authenticateToken,
+  UR_ReactivarMembresiaAlumnoPlanesPagos_CTS
+);
+
+// Benjamin Orellana - 2026/06/15 - Registra baja operativa del alumno.
+router.patch(
+  '/alumnos/:alumno_id/registrar-baja',
+  authenticateToken,
+  UR_RegistrarBajaAlumnoPlanesPagos_CTS
+);
+
+// Benjamin Orellana - 2026/06/15 - Reingresa alumno dado de baja.
+router.post(
+  '/alumnos/:alumno_id/reingresar',
+  authenticateToken,
+  CR_ReingresarAlumnoPlanesPagos_CTS
+);
+
+// Benjamin Orellana - 2026/06/15 - Cambia sede operativa del alumno.
+router.patch(
+  '/alumnos/:alumno_id/cambiar-sede',
+  authenticateToken,
+  UR_CambiarSedeAlumnoPlanesPagos_CTS
+);
+
+// Benjamin Orellana - 2026/06/15 - Cambia plan operativo actual del alumno.
+router.patch(
+  '/alumnos/:alumno_id/cambiar-plan',
+  authenticateToken,
+  UR_CambiarPlanAlumnoPlanesPagos_CTS
 );
 
 export default router;

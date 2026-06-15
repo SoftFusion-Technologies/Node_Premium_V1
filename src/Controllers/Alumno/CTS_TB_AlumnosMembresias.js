@@ -553,7 +553,8 @@ export const OBR_MembresiasPorAlumno_CTS = async (req, res) => {
   }
 };
 
-// Benjamin Orellana - 2026/05/29 - Obtiene la membresía activa vigente de un alumno.
+
+// Benjamin Orellana - 2026/06/15 - Obtiene la membresía operativa vigente de un alumno.
 export const OBR_MembresiaActivaAlumno_CTS = async (req, res) => {
   try {
     const { alumno_id } = req.params;
@@ -578,7 +579,9 @@ export const OBR_MembresiaActivaAlumno_CTS = async (req, res) => {
     const membresia = await AlumnosMembresiasModel.findOne({
       where: {
         alumno_id: Number(alumno_id),
-        estado: 'activa',
+        estado: {
+          [Op.in]: ['activa', 'pendiente_pago', 'congelada']
+        },
         fecha_inicio: {
           [Op.lte]: fecha
         },
@@ -597,13 +600,13 @@ export const OBR_MembresiaActivaAlumno_CTS = async (req, res) => {
       return responderError(
         res,
         404,
-        'No se encontró una membresía activa vigente para el alumno solicitado.'
+        'No se encontró una membresía operativa vigente para el alumno solicitado.'
       );
     }
 
     return res.status(200).json({
       ok: true,
-      message: 'Membresía activa del alumno obtenida correctamente.',
+      message: 'Membresía operativa vigente del alumno obtenida correctamente.',
       data: membresia
     });
   } catch (error) {
@@ -612,7 +615,7 @@ export const OBR_MembresiaActivaAlumno_CTS = async (req, res) => {
     return responderError(
       res,
       500,
-      'Error interno al obtener la membresía activa del alumno.'
+      'Error interno al obtener la membresía operativa vigente del alumno.'
     );
   }
 };

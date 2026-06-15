@@ -10,6 +10,7 @@ import PagosMensualidadesModel from '../../Models/Pago/MD_TB_PagosMensualidades.
 import PagosMediosPagoModel from '../../Models/Pago/MD_TB_PagosMediosPago.js';
 
 import AlumnosModel from '../../Models/Alumno/MD_TB_Alumnos.js';
+import AlumnosMembresiasModel from '../../Models/Alumno/MD_TB_AlumnosMembresias.js';
 import SedesModel from '../../Models/Sede/MD_TB_Sedes.js';
 import UsuariosModel from '../../Models/Usuario/MD_TB_Usuarios.js';
 
@@ -611,6 +612,207 @@ const revertirPagoConfirmadoEnMensualidad = async (
   };
 };
 
+// Benjamin Orellana - 2026/06/15 - Sincroniza alumno y membresía luego de confirmar un pago.
+const sincronizarAlumnoMembresiaPorPagoConfirmado = async (
+  pago,
+  transaction
+) => {
+  if (!pago || !pago.mensualidad_id) {
+    return {
+      ok: true,
+      data: null
+    };
+  }
+
+  const mensualidad = await PagosMensualidadesModel.findByPk(
+    pago.mensualidad_id,
+    { transaction }
+  );
+
+  if (!mensualidad) {
+    return {
+      ok: false,
+      status: 404,
+      message: 'No se encontró la mensualidad asociada al pago confirmado.'
+    };
+  }
+
+  const alumno = await AlumnosModel.findByPk(pago.alumno_id, {
+    transaction
+  });
+
+  if (!alumno) {
+    return {
+      ok: false,
+      status: 404,
+      message: 'No se encontró el alumno asociado al pago confirmado.'
+    };
+  }
+
+  let membresia = null;
+
+  if (mensualidad.membresia_id) {
+    membresia = await AlumnosMembresiasModel.findByPk(
+      mensualidad.membresia_id,
+      { transaction }
+    );
+  }
+
+  if (!membresia) {
+    membresia = await AlumnosMembresiasModel.findOne({
+      where: {
+        alumno_id: Number(pago.alumno_id),
+        sede_id: Number(pago.sede_id)
+      },
+      order: [
+        ['fecha_inicio', 'DESC'],
+        ['id', 'DESC']
+      ],
+      transaction
+    });
+  }
+
+  if (!membresia) {
+    return {
+      ok: true,
+      data: {
+        alumno,
+        mensualidad,
+        membresia: null
+      }
+    };
+  }
+
+  const mensualidadPagada = mensualidad.estado === 'pagada';
+  const mensualidadConSaldo = Number(mensualidad.saldo || 0) > 0;
+
+  if (mensualidadPagada) {
+    await membresia.update(
+      {
+        estado: 'activa',
+        updated_at: new Date()
+      },
+      { transaction }
+    );
+
+    await alumno.update(
+      {
+        estado: 'activo',
+        sede_id: Number(membresia.sede_id),
+        fecha_inicio: alumno.fecha_inicio || membresia.fecha_inicio,
+        usuario_validacion_id:
+          alumno.usuario_validacion_id ||
+          pago.usuario_validacion_id ||
+          pago.usuario_registro_id ||
+          null,
+        updated_at: new Date()
+      },
+      { transaction }
+    );
+
+    return {
+      ok: true,
+      data: {
+        alumno,
+        mensualidad,
+        membresia,
+        estado_alumno: 'activo',
+        estado_membresia: 'activa'
+      }
+    };
+  }
+
+  if (mensualidadConSaldo) {
+    await membresia.update(
+      {
+        estado: 'pendiente_pago',
+        updated_at: new Date()
+      },
+      { transaction }
+    );
+
+    await alumno.update(
+      {
+        estado: 'pendiente_pago',
+        sede_id: Number(membresia.sede_id),
+        updated_at: new Date()
+      },
+      { transaction }
+    );
+
+    return {
+      ok: true,
+      data: {
+        alumno,
+        mensualidad,
+        membresia,
+        estado_alumno: 'pendiente_pago',
+        estado_membresia: 'pendiente_pago'
+      }
+    };
+  }
+
+  return {
+    ok: true,
+    data: {
+      alumno,
+      mensualidad,
+      membresia
+    }
+  };
+};
+
+// Benjamin Orellana - 2026/06/15 - Normaliza texto de búsqueda para pagos.
+const normalizarTextoBusqueda = (value) => {
+  if (value === undefined || value === null) return null;
+
+  const texto = String(value).trim().replace(/\s+/g, ' ');
+
+  return texto.length > 0 ? texto : null;
+};
+
+// Benjamin Orellana - 2026/06/15 - Arma búsqueda flexible de alumno por nombre, apellido, DNI, email o teléfono.
+const construirWhereBusquedaAlumnoPago = (search) => {
+  const terminos = String(search || '')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+
+  return {
+    [Op.and]: terminos.map((termino) => {
+      const condiciones = [
+        { nombre: { [Op.like]: `%${termino}%` } },
+        { apellido: { [Op.like]: `%${termino}%` } },
+        { dni: { [Op.like]: `%${termino}%` } },
+        { email: { [Op.like]: `%${termino}%` } },
+        { telefono: { [Op.like]: `%${termino}%` } }
+      ];
+
+      if (/^\d+$/.test(termino)) {
+        condiciones.push({ id: Number(termino) });
+      }
+
+      return {
+        [Op.or]: condiciones
+      };
+    })
+  };
+};
+
+// Benjamin Orellana - 2026/06/15 - Obtiene IDs de alumnos para filtrar pagos por texto.
+const buscarIdsAlumnosPorTexto = async (search) => {
+  const texto = normalizarTextoBusqueda(search);
+
+  if (!texto) return [];
+
+  const alumnos = await AlumnosModel.findAll({
+    where: construirWhereBusquedaAlumnoPago(texto),
+    attributes: ['id'],
+    limit: 500
+  });
+
+  return alumnos.map((alumno) => Number(alumno.id));
+};
 // Benjamin Orellana - 2026/05/30 - Lista pagos con filtros y paginación.
 export const OBR_Pagos_CTS = async (req, res) => {
   try {
@@ -620,6 +822,7 @@ export const OBR_Pagos_CTS = async (req, res) => {
       q,
       mensualidad_id,
       alumno_id,
+      alumno_q,
       sede_id,
       medio_pago_id,
       estado,
@@ -631,12 +834,26 @@ export const OBR_Pagos_CTS = async (req, res) => {
 
     const where = {};
 
-    if (q && String(q).trim() !== '') {
-      where[Op.or] = [
-        { referencia: { [Op.like]: `%${String(q).trim()}%` } },
-        { comprobante_url: { [Op.like]: `%${String(q).trim()}%` } },
-        { observaciones: { [Op.like]: `%${String(q).trim()}%` } }
+    const search = normalizarTextoBusqueda(q);
+
+    if (search) {
+      const alumnoIds = await buscarIdsAlumnosPorTexto(search);
+
+      const condicionesBusqueda = [
+        { referencia: { [Op.like]: `%${search}%` } },
+        { comprobante_url: { [Op.like]: `%${search}%` } },
+        { observaciones: { [Op.like]: `%${search}%` } }
       ];
+
+      if (alumnoIds.length > 0) {
+        condicionesBusqueda.push({
+          alumno_id: {
+            [Op.in]: alumnoIds
+          }
+        });
+      }
+
+      where[Op.or] = condicionesBusqueda;
     }
 
     if (mensualidad_id !== undefined) {
@@ -665,6 +882,16 @@ export const OBR_Pagos_CTS = async (req, res) => {
       }
 
       where.alumno_id = Number(alumno_id);
+    }
+
+    if (alumno_q !== undefined && String(alumno_q).trim() !== '') {
+      const alumnoIds = await buscarIdsAlumnosPorTexto(alumno_q);
+
+      where.alumno_id = alumnoIds.length
+        ? {
+            [Op.in]: alumnoIds
+          }
+        : -1;
     }
 
     if (sede_id !== undefined) {
@@ -1318,7 +1545,79 @@ export const UR_Pagos_CTS = async (req, res) => {
   }
 };
 
+// Benjamin Orellana - 2026/06/15 - Sincroniza membresía y alumno luego de confirmar un pago pendiente.
+const sincronizarMembresiaPorPagoConfirmado = async ({
+  mensualidadId,
+  transaction
+}) => {
+  if (!mensualidadId) return;
+
+  const mensualidad = await PagosMensualidadesModel.findByPk(mensualidadId, {
+    transaction
+  });
+
+  if (!mensualidad?.membresia_id) return;
+
+  const membresia = await AlumnosMembresiasModel.findByPk(
+    mensualidad.membresia_id,
+    { transaction }
+  );
+
+  if (!membresia) return;
+
+  if (
+    mensualidad.estado === 'pagada' &&
+    membresia.estado === 'pendiente_pago'
+  ) {
+    await membresia.update(
+      {
+        estado: 'activa',
+        updated_at: new Date()
+      },
+      { transaction }
+    );
+  }
+
+  const alumno = await AlumnosModel.findByPk(mensualidad.alumno_id, {
+    transaction
+  });
+
+  if (!alumno || ['baja', 'congelado'].includes(alumno.estado)) return;
+
+  const hoy = obtenerFechaActualDateOnly();
+
+  const membresiaVigente = await AlumnosMembresiasModel.findOne({
+    where: {
+      alumno_id: Number(alumno.id),
+      estado: 'activa',
+      fecha_inicio: {
+        [Op.lte]: hoy
+      },
+      fecha_vencimiento: {
+        [Op.gte]: hoy
+      }
+    },
+    order: [
+      ['fecha_inicio', 'DESC'],
+      ['id', 'DESC']
+    ],
+    transaction
+  });
+
+  if (membresiaVigente) {
+    await alumno.update(
+      {
+        estado: 'activo',
+        sede_id: Number(membresiaVigente.sede_id),
+        updated_at: new Date()
+      },
+      { transaction }
+    );
+  }
+};
+
 // Benjamin Orellana - 2026/05/30 - Confirma un pago e impacta la mensualidad si corresponde.
+// Benjamin Orellana - 2026/06/15 - Sincroniza alumno y membresía al confirmar pagos pendientes.
 export const UR_ConfirmarPago_CTS = async (req, res) => {
   const transaction = await db.transaction();
 
@@ -1352,7 +1651,11 @@ export const UR_ConfirmarPago_CTS = async (req, res) => {
       );
     }
 
-    let usuarioValidacionNormalizado = pago.usuario_validacion_id;
+    let usuarioValidacionNormalizado =
+      pago.usuario_validacion_id ||
+      req.user?.id ||
+      req.user?.usuario_id ||
+      null;
 
     if (
       usuario_validacion_id !== undefined &&
@@ -1415,7 +1718,11 @@ export const UR_ConfirmarPago_CTS = async (req, res) => {
       { transaction }
     );
 
-    // Benjamin Orellana - 2026/05/30 - Registra ingreso financiero al confirmar el pago.
+    await sincronizarMembresiaPorPagoConfirmado({
+      mensualidadId: pago.mensualidad_id,
+      transaction
+    });
+
     const movimientoFinanciero = await crearMovimientoIngresoPagoAlumno(
       pago,
       transaction
@@ -1430,6 +1737,16 @@ export const UR_ConfirmarPago_CTS = async (req, res) => {
       );
     }
 
+    const sincronizacion = await sincronizarAlumnoMembresiaPorPagoConfirmado(
+      pago,
+      transaction
+    );
+
+    if (!sincronizacion.ok) {
+      await transaction.rollback();
+      return responderError(res, sincronizacion.status, sincronizacion.message);
+    }
+
     await transaction.commit();
 
     const pagoActualizado = await PagosModel.findByPk(id, {
@@ -1439,7 +1756,8 @@ export const UR_ConfirmarPago_CTS = async (req, res) => {
     return res.status(200).json({
       ok: true,
       message: 'Pago confirmado correctamente.',
-      data: pagoActualizado
+      data: pagoActualizado,
+      sincronizacion: sincronizacion.data
     });
   } catch (error) {
     await transaction.rollback();

@@ -1797,4 +1797,44 @@ router.delete(
   ER_PagosMetodosRecurrentes_CTS
 );
 
+import {
+  CR_RegistrarPagoOperativo_CTS,
+  CR_RenovarMembresiaOperativa_CTS
+} from '../Controllers/Pago/CTS_TB_PagosRegistroOperativo.js';
+
+router.post(
+  '/pagos/registrar-operativo',
+  authenticateToken,
+  CR_RegistrarPagoOperativo_CTS
+);
+
+router.post(
+  '/alumnos/:alumno_id/registrar-pago',
+  authenticateToken,
+  CR_RegistrarPagoOperativo_CTS
+);
+
+// Benjamin Orellana - 2026/06/15 - Renueva la membresía del alumno creando nuevo período, mensualidad y pago.
+router.post(
+  '/alumnos/:alumno_id/renovar-membresia',
+  authenticateToken,
+  CR_RenovarMembresiaOperativa_CTS
+);
+
+import { PR_ProcesarVencimientos_CTS } from '../Controllers/Sistema/CTS_ProcesarVencimientos.js';
+
+/*
+ * =========================================================
+ * SISTEMA - PROCESOS OPERATIVOS
+ * =========================================================
+ */
+
+// Benjamin Orellana - 2026/06/15 - Procesa vencimientos de membresías, mensualidades y estados de alumnos.
+router.post(
+  '/sistema/procesar-vencimientos',
+  authenticateToken,
+  requireRolGlobal(['SUPER_ADMIN', 'DIRECCION']),
+  PR_ProcesarVencimientos_CTS
+);
+
 export default router;

@@ -48,6 +48,34 @@ const ROLES_LECTURA_ALUMNOS = [
   'PROFESOR'
 ];
 
+// Benjamin Orellana - 2026/06/15 - Permite buscar alumnos por nombre completo, DNI, email o teléfono.
+const construirWhereBusquedaAlumno = (search) => {
+  const terminos = String(search || '')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+
+  return {
+    [Op.and]: terminos.map((termino) => {
+      const condiciones = [
+        { nombre: { [Op.like]: `%${termino}%` } },
+        { apellido: { [Op.like]: `%${termino}%` } },
+        { dni: { [Op.like]: `%${termino}%` } },
+        { email: { [Op.like]: `%${termino}%` } },
+        { telefono: { [Op.like]: `%${termino}%` } }
+      ];
+
+      if (/^\d+$/.test(termino)) {
+        condiciones.push({ id: Number(termino) });
+      }
+
+      return {
+        [Op.or]: condiciones
+      };
+    })
+  };
+};
+
 const normalizarTexto = (value) => {
   if (value === undefined || value === null) return null;
 
@@ -243,7 +271,9 @@ const construirAlumnoRespuesta = async (alumno, transaction = null) => {
       ? UsuariosModel.findByPk(alumnoPlano.usuario_alta_id, { transaction })
       : null,
     alumnoPlano.usuario_validacion_id
-      ? UsuariosModel.findByPk(alumnoPlano.usuario_validacion_id, { transaction })
+      ? UsuariosModel.findByPk(alumnoPlano.usuario_validacion_id, {
+          transaction
+        })
       : null,
     AlumnosContactosEmergenciaModel.findAll({
       where: {
@@ -255,9 +285,16 @@ const construirAlumnoRespuesta = async (alumno, transaction = null) => {
       ],
       transaction
     }),
-    AlumnosMembresiasModel.findAll({
+    AlumnosMembresiasModel.findOne({
       where: {
-        alumno_id: alumnoPlano.id
+        alumno_id: alumnoPlano.id,
+        estado: 'activa',
+        fecha_inicio: {
+          [Op.lte]: obtenerFechaActualDateOnly()
+        },
+        fecha_vencimiento: {
+          [Op.gte]: obtenerFechaActualDateOnly()
+        }
       },
       include: [
         {
@@ -809,12 +846,9 @@ export const OBR_Alumnos_CTS = async (req, res) => {
     const search = normalizarTexto(q);
 
     if (search) {
-      where[Op.or] = [
-        { nombre: { [Op.like]: `%${search}%` } },
-        { apellido: { [Op.like]: `%${search}%` } },
-        { dni: { [Op.like]: `%${search}%` } },
-        { email: { [Op.like]: `%${search}%` } },
-        { telefono: { [Op.like]: `%${search}%` } }
+      where[Op.and] = [
+        ...(where[Op.and] || []),
+        construirWhereBusquedaAlumno(search)
       ];
     }
 

@@ -55,6 +55,58 @@ const esIdValido = (valor) => {
   return Number.isInteger(numero) && numero > 0;
 };
 
+// Benjamin Orellana - 2026/06/15 - Normaliza texto de búsqueda para mensualidades.
+const normalizarTextoBusqueda = (value) => {
+  if (value === undefined || value === null) return null;
+
+  const texto = String(value).trim().replace(/\s+/g, ' ');
+
+  return texto.length > 0 ? texto : null;
+};
+
+// Benjamin Orellana - 2026/06/15 - Permite buscar alumnos por nombre completo, DNI, email o teléfono.
+const construirWhereBusquedaAlumnoMensualidad = (search) => {
+  const terminos = String(search || '')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+
+  return {
+    [Op.and]: terminos.map((termino) => {
+      const condiciones = [
+        { nombre: { [Op.like]: `%${termino}%` } },
+        { apellido: { [Op.like]: `%${termino}%` } },
+        { dni: { [Op.like]: `%${termino}%` } },
+        { email: { [Op.like]: `%${termino}%` } },
+        { telefono: { [Op.like]: `%${termino}%` } }
+      ];
+
+      if (/^\d+$/.test(termino)) {
+        condiciones.push({ id: Number(termino) });
+      }
+
+      return {
+        [Op.or]: condiciones
+      };
+    })
+  };
+};
+
+// Benjamin Orellana - 2026/06/15 - Obtiene IDs de alumnos para filtrar mensualidades por texto.
+const buscarIdsAlumnosMensualidadPorTexto = async (search) => {
+  const texto = normalizarTextoBusqueda(search);
+
+  if (!texto) return [];
+
+  const alumnos = await AlumnosModel.findAll({
+    where: construirWhereBusquedaAlumnoMensualidad(texto),
+    attributes: ['id'],
+    limit: 500
+  });
+
+  return alumnos.map((alumno) => Number(alumno.id));
+};
+
 // Benjamin Orellana - 2026/05/29 - Valida enteros no negativos.
 const esEnteroValido = (valor) => {
   if (valor === null || valor === undefined || valor === '') return false;
@@ -298,6 +350,7 @@ export const OBR_PagosMensualidades_CTS = async (req, res) => {
     const {
       q,
       alumno_id,
+      alumno_q,
       membresia_id,
       sede_id,
       periodo_anio,
@@ -314,10 +367,24 @@ export const OBR_PagosMensualidades_CTS = async (req, res) => {
 
     const where = {};
 
-    if (q && String(q).trim() !== '') {
-      where.observaciones = {
-        [Op.like]: `%${String(q).trim()}%`
-      };
+    const search = normalizarTextoBusqueda(q);
+
+    if (search) {
+      const alumnoIds = await buscarIdsAlumnosMensualidadPorTexto(search);
+
+      const condicionesBusqueda = [
+        { observaciones: { [Op.like]: `%${search}%` } }
+      ];
+
+      if (alumnoIds.length > 0) {
+        condicionesBusqueda.push({
+          alumno_id: {
+            [Op.in]: alumnoIds
+          }
+        });
+      }
+
+      where[Op.or] = condicionesBusqueda;
     }
 
     if (alumno_id !== undefined) {
@@ -330,6 +397,16 @@ export const OBR_PagosMensualidades_CTS = async (req, res) => {
       }
 
       where.alumno_id = Number(alumno_id);
+    }
+
+    if (alumno_q !== undefined && String(alumno_q).trim() !== '') {
+      const alumnoIds = await buscarIdsAlumnosMensualidadPorTexto(alumno_q);
+
+      where.alumno_id = alumnoIds.length
+        ? {
+            [Op.in]: alumnoIds
+          }
+        : -1;
     }
 
     if (membresia_id !== undefined) {

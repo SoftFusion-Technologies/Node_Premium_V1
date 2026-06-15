@@ -48,6 +48,10 @@ import { initArcaRelaciones } from './src/Models/ARCA/relacionesARCA.js';
 // Benjamin Orellana - 2026/05/10 - Importa relaciones Sequelize del módulo Sistema.
 import { initSistemaRelaciones } from './src/Models/Sistema/relacionesSistema.js';
 
+import { iniciarCronProcesarVencimientos } from './src/Jobs/JB_ProcesarVencimientos.js';
+
+iniciarCronProcesarVencimientos();
+
 const app = express();
 
 // Benjamin Orellana - 25/04/2026 - Configuración base de middlewares para PREMIUM.

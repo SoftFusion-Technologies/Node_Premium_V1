@@ -17,6 +17,7 @@ import SedesModel from '../../Models/Sede/MD_TB_Sedes.js';
 import UsuariosModel from '../../Models/Usuario/MD_TB_Usuarios.js';
 import UsuariosRolesModel from '../../Models/Usuario/MD_TB_UsuariosRoles.js';
 import { hashPassword } from '../../Security/auth.js';
+import { capitalizarTexto, normalizarEmail, normalizarTelefono, normalizarDni } from '../../utils/texto.utils.js';
 import bcrypt from 'bcryptjs';
 
 const ESTADOS_ALUMNO_VALIDOS = [
@@ -84,29 +85,6 @@ const normalizarTexto = (value) => {
   return texto.length > 0 ? texto : null;
 };
 
-const normalizarEmail = (value) => {
-  const texto = normalizarTexto(value);
-
-  return texto ? texto.toLowerCase() : null;
-};
-
-const normalizarTelefono = (value) => {
-  const texto = normalizarTexto(value);
-
-  if (!texto) return null;
-
-  const soloNumeros = texto.replace(/\D/g, '');
-
-  return soloNumeros || texto;
-};
-
-const normalizarDni = (value) => {
-  const texto = normalizarTexto(value);
-
-  if (!texto) return null;
-
-  return texto.replace(/\D/g, '') || texto;
-};
 
 const normalizarFecha = (value) => {
   const texto = normalizarTexto(value);
@@ -1157,86 +1135,201 @@ export const CR_Alumnos_CTS = async (req, res) => {
  
 export const CR_Alumnos_Publico_CTS = async (req, res) => {
   const transaction = await db.transaction();
- 
+
   try {
     const { nombre, apellido, dni, telefono, email = null } = req.body;
- 
-    // Validación de campos obligatorios
-    if (!nombre || !apellido || !dni || !telefono) {
+
+    // Validación individual de cada campo obligatorio
+    if (!nombre?.trim()) {
       await transaction.rollback();
+
       return res.status(400).json({
         ok: false,
-        message: 'Faltan datos obligatorios: nombre, apellido, dni, telefono.'
+        field: 'nombre',
+        message: 'El nombre es obligatorio.'
       });
     }
- 
+
+    if (!apellido?.trim()) {
+      await transaction.rollback();
+
+      return res.status(400).json({
+        ok: false,
+        field: 'apellido',
+        message: 'El apellido es obligatorio.'
+      });
+    }
+
+    if (!dni?.trim()) {
+      await transaction.rollback();
+
+      return res.status(400).json({
+        ok: false,
+        field: 'dni',
+        message: 'El DNI es obligatorio.'
+      });
+    }
+
+    if (!telefono?.trim()) {
+      await transaction.rollback();
+
+      return res.status(400).json({
+        ok: false,
+        field: 'telefono',
+        message: 'El teléfono es obligatorio.'
+      });
+    }
+
+    if (!email?.trim()) {
+      await transaction.rollback();
+
+      return res.status(400).json({
+        ok: false,
+        field: 'email',
+        message: 'El email es obligatorio.'
+      });
+    }
+
     // Normalización
-    const dniLimpio      = dni.replace(/\D/g, '');
-    const telefonoLimpio = telefono.replace(/\D/g, '');
-    const emailLimpio    = email ? email.toLowerCase().trim() : null;
- 
+    const nombreLimpio = capitalizarTexto(nombre);
+    const apellidoLimpio = capitalizarTexto(apellido);
+
+    const dniLimpio = normalizarDni(dni);
+    const telefonoLimpio = normalizarTelefono(telefono);
+    const emailLimpio = normalizarEmail(email);
+
+    // Validar email
+    const regexEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+    if (!regexEmail.test(emailLimpio)) {
+      await transaction.rollback();
+
+      return res.status(400).json({
+        ok: false,
+        field: 'email',
+        message: 'El email ingresado no es válido.'
+      });
+    }
+
+    // Validar teléfono
+    if (
+      telefonoLimpio.length < 6 ||
+      telefonoLimpio.length > 20
+    ) {
+      await transaction.rollback();
+
+      return res.status(400).json({
+        ok: false,
+        field: 'telefono',
+        message: 'El teléfono ingresado no es válido.'
+      });
+    }
+
+    // Validar DNI
+    if (dniLimpio.length < 7 || dniLimpio.length > 12) {
+      await transaction.rollback();
+
+      return res.status(400).json({
+        ok: false,
+        field: 'dni',
+        message: 'El DNI ingresado no es válido.'
+      });
+    }
+
     // Verificar duplicados en paralelo
-    const [existeDni, existeTelefono, existeEmail] = await Promise.all([
-      AlumnosModel.findOne({ where: { dni: dniLimpio } }),
-      AlumnosModel.findOne({ where: { telefono: telefonoLimpio } }),
-      emailLimpio
-        ? AlumnosModel.findOne({ where: { email: emailLimpio } })
-        : null
-    ]);
- 
+    const [existeDni, existeTelefono, existeEmail] =
+      await Promise.all([
+        AlumnosModel.findOne({
+          where: { dni: dniLimpio }
+        }),
+        AlumnosModel.findOne({
+          where: { telefono: telefonoLimpio }
+        }),
+        AlumnosModel.findOne({
+          where: { email: emailLimpio }
+        })
+      ]);
+
     if (existeDni) {
       await transaction.rollback();
-      return res.status(409).json({ ok: false, message: 'Ya existe un alumno registrado con ese DNI.' });
+
+      return res.status(409).json({
+        ok: false,
+        message: 'Ya existe un alumno registrado con ese DNI.'
+      });
     }
- 
+
     if (existeTelefono) {
       await transaction.rollback();
-      return res.status(409).json({ ok: false, message: 'Ya existe un alumno registrado con ese teléfono.' });
+
+      return res.status(409).json({
+        ok: false,
+        message: 'Ya existe un alumno registrado con ese teléfono.'
+      });
     }
- 
+
     if (existeEmail) {
       await transaction.rollback();
-      return res.status(409).json({ ok: false, message: 'Ya existe un alumno registrado con ese email.' });
+
+      return res.status(409).json({
+        ok: false,
+        message: 'Ya existe un alumno registrado con ese email.'
+      });
     }
- 
+
     // Crear alumno
-    const nuevoAlumno = await AlumnosModel.create({
-      nombre,
-      apellido,
-      dni:      dniLimpio,
-      telefono: telefonoLimpio,
-      email:    emailLimpio,
-      origen_registro: 'externo',
-      estado:          'pendiente_validacion'
-    }, { transaction });
- 
-    // Crear credenciales — contraseña inicial = DNI sin puntos
-    await AlumnosLoginModel.create({
-      alumno_id:                nuevoAlumno.id,
-      password_hash:            await bcrypt.hash(dniLimpio, 10),
-      requiere_cambio_password: 1,
-      estado:                   'activo'
-    }, { transaction });
- 
+    const nuevoAlumno = await AlumnosModel.create(
+      {
+        nombre: nombreLimpio,
+        apellido: apellidoLimpio,
+        dni: dniLimpio,
+        telefono: telefonoLimpio,
+        email: emailLimpio,
+        origen_registro: 'externo',
+        estado: 'pendiente_validacion'
+      },
+      { transaction }
+    );
+
+    // Crear credenciales
+    await AlumnosLoginModel.create(
+      {
+        alumno_id: nuevoAlumno.id,
+        password_hash: await bcrypt.hash(dniLimpio, 10),
+        requiere_cambio_password: 1,
+        estado: 'activo'
+      },
+      { transaction }
+    );
+
     await transaction.commit();
- 
+
     return res.status(201).json({
       ok: true,
-      message: '¡Te registraste correctamente! Podés iniciar sesión con tu DNI como contraseña.',
+      message:
+        '¡Te registraste correctamente! Podés iniciar sesión con tu DNI como contraseña.',
       data: {
-        id:       nuevoAlumno.id,
-        nombre:   nuevoAlumno.nombre,
+        id: nuevoAlumno.id,
+        nombre: nuevoAlumno.nombre,
         apellido: nuevoAlumno.apellido,
-        dni:      nuevoAlumno.dni,
+        dni: nuevoAlumno.dni,
         telefono: nuevoAlumno.telefono,
-        email:    nuevoAlumno.email,
-        estado:   nuevoAlumno.estado
+        email: nuevoAlumno.email,
+        estado: nuevoAlumno.estado
       }
     });
+
   } catch (error) {
-    if (transaction && !transaction.finished) await transaction.rollback();
+    if (transaction && !transaction.finished) {
+      await transaction.rollback();
+    }
+
     console.error('Error CR_Alumnos_Publico_CTS:', error);
-    return res.status(500).json({ ok: false, message: 'Error al procesar el registro.' });
+
+    return res.status(500).json({
+      ok: false,
+      message: 'Error al procesar el registro.'
+    });
   }
 };
 /*
@@ -1435,6 +1528,30 @@ export const UR_AlumnoPerfil_CTS = async (req, res) => {
   try {
     const alumnoId = req.alumno?.id || req.alumno?.alumno_id;
 
+    const {
+      telefono,
+      email,
+      domicilio,
+      localidad,
+      provincia,
+      fecha_nacimiento
+    } = req.body;
+
+    // Campos obligatorios
+    if (
+      !telefono?.trim() ||
+      !email?.trim() ||
+      !domicilio?.trim() ||
+      !localidad?.trim() ||
+      !provincia?.trim() ||
+      !fecha_nacimiento
+    ) {
+      return res.status(400).json({
+        ok: false,
+        message: 'Todos los campos son obligatorios.'
+      });
+    }
+
     const alumno = await AlumnosModel.findByPk(alumnoId);
 
     if (!alumno) {
@@ -1444,22 +1561,100 @@ export const UR_AlumnoPerfil_CTS = async (req, res) => {
       });
     }
 
-    // Solo campos que el alumno puede editar
-    const payload = {};
-    const campos = ['telefono', 'email', 'domicilio', 'localidad', 'provincia', 'fecha_nacimiento'];
+    // Normalización
+    const emailNormalizado = normalizarEmail(email);
+    const telefonoNormalizado = normalizarTelefono(telefono);
 
-    campos.forEach((campo) => {
-      if (Object.prototype.hasOwnProperty.call(req.body, campo)) {
-        payload[campo] = normalizarTexto(req.body[campo]);
-      }
-    });
+    const domicilioNormalizado = capitalizarTexto(domicilio);
+    const localidadNormalizada = capitalizarTexto(localidad);
 
-    if (Object.keys(payload).length === 0) {
-      return res.status(400).json({
+    // El email no puede modificarse
+    if (
+      emailNormalizado !==
+      normalizarEmail(alumno.email)
+    ) {
+      return res.status(403).json({
         ok: false,
-        message: 'No se enviaron datos para actualizar.'
+        message: 'No está permitido modificar el email.'
       });
     }
+
+    // Validar formato de email
+    const regexEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+    if (!regexEmail.test(emailNormalizado)) {
+      return res.status(400).json({
+        ok: false,
+        message: 'El email ingresado no es válido.'
+      });
+    }
+
+    // Validar teléfono
+    if (!/^\d+$/.test(telefonoNormalizado)) {
+      return res.status(400).json({
+        ok: false,
+        message: 'El teléfono solo puede contener números.'
+      });
+    }
+
+    if (
+      telefonoNormalizado.length < 6 ||
+      telefonoNormalizado.length > 20
+    ) {
+      return res.status(400).json({
+        ok: false,
+        message: 'El teléfono ingresado no es válido.'
+      });
+    }
+
+    // Validar fecha de nacimiento
+    const fechaNacimiento = new Date(fecha_nacimiento);
+
+    if (Number.isNaN(fechaNacimiento.getTime())) {
+      return res.status(400).json({
+        ok: false,
+        message: 'La fecha de nacimiento no es válida.'
+      });
+    }
+
+    const hoy = new Date();
+
+    if (fechaNacimiento > hoy) {
+      return res.status(400).json({
+        ok: false,
+        message: 'La fecha de nacimiento no puede ser futura.'
+      });
+    }
+
+    // Validar longitudes máximas
+    if (domicilioNormalizado.length > 150) {
+      return res.status(400).json({
+        ok: false,
+        message: 'El domicilio es demasiado largo.'
+      });
+    }
+
+    if (localidadNormalizada.length > 100) {
+      return res.status(400).json({
+        ok: false,
+        message: 'La localidad es demasiado larga.'
+      });
+    }
+
+    if (provincia.length > 100) {
+      return res.status(400).json({
+        ok: false,
+        message: 'La provincia es demasiado larga.'
+      });
+    }
+
+    const payload = {
+      telefono: telefonoNormalizado,
+      domicilio: domicilioNormalizado,
+      localidad: localidadNormalizada,
+      provincia: provincia,
+      fecha_nacimiento
+    };
 
     await alumno.update(payload);
 
@@ -1470,11 +1665,13 @@ export const UR_AlumnoPerfil_CTS = async (req, res) => {
       message: 'Datos actualizados correctamente.',
       data
     });
+
   } catch (error) {
     console.error('Error UR_AlumnoPerfil_CTS:', error);
+
     return res.status(500).json({
       ok: false,
-      message: 'Error al actualizar los datos.'
+      message: 'Error al actualizar los datos, póngase en contacto con soporte.'
     });
   }
 };

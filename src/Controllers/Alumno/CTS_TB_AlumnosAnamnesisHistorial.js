@@ -108,7 +108,7 @@ const construirHistorialRespuesta = async (registro) => {
  * de más reciente a más antigua.
  * Acceso: roles de lectura de anamnesis.
  */
-export const GR_HistorialAnamnesis_CTS = async (req, res) => {
+export const OBRS_HistorialAnamnesis_CTS = async (req, res) => {
   try {
     if (!validarRolLecturaAnamnesis(req.user)) {
       return res.status(403).json({
@@ -166,7 +166,7 @@ export const GR_HistorialAnamnesis_CTS = async (req, res) => {
       data
     });
   } catch (error) {
-    console.error('Error GR_HistorialAnamnesis_CTS:', error);
+    console.error('Error OBRS_HistorialAnamnesis_CTS:', error);
 
     return res.status(500).json({
       ok: false,
@@ -183,7 +183,7 @@ export const GR_HistorialAnamnesis_CTS = async (req, res) => {
  * Útil para ver la línea de tiempo completa sin filtrar por anamnesis_id.
  * Acceso: roles de lectura de anamnesis.
  */
-export const GR_HistorialAnamnesisAlumno_CTS = async (req, res) => {
+export const OBRS_HistorialAnamnesisAlumno_CTS = async (req, res) => {
   try {
     if (!validarRolLecturaAnamnesis(req.user)) {
       return res.status(403).json({
@@ -228,7 +228,7 @@ export const GR_HistorialAnamnesisAlumno_CTS = async (req, res) => {
       data
     });
   } catch (error) {
-    console.error('Error GR_HistorialAnamnesisAlumno_CTS:', error);
+    console.error('Error OBRS_HistorialAnamnesisAlumno_CTS:', error);
 
     return res.status(500).json({
       ok: false,
@@ -243,7 +243,7 @@ export const GR_HistorialAnamnesisAlumno_CTS = async (req, res) => {
  * Devuelve el detalle de una versión histórica específica por su id.
  * Acceso: roles de lectura de anamnesis.
  */
-export const GR_DetalleHistorialAnamnesis_CTS = async (req, res) => {
+export const OBRS_DetalleHistorialAnamnesis_CTS = async (req, res) => {
   try {
     if (!validarRolLecturaAnamnesis(req.user)) {
       return res.status(403).json({
@@ -292,11 +292,51 @@ export const GR_DetalleHistorialAnamnesis_CTS = async (req, res) => {
       data
     });
   } catch (error) {
-    console.error('Error GR_DetalleHistorialAnamnesis_CTS:', error);
+    console.error('Error OBRS_DetalleHistorialAnamnesis_CTS:', error);
 
     return res.status(500).json({
       ok: false,
       message: 'Error al obtener el detalle del historial.'
+    });
+  }
+};
+
+
+export const OBRS_MiHistorialAnamnesis_CTS = async (
+  req,
+  res
+) => {
+  try {
+
+    console.log('ENTRO AL CONTROLADOR');
+    const alumnoId =
+      req.alumno?.id ||
+      req.alumno?.alumno_id;
+
+    const anamnesis =
+      await AlumnosAnamnesisModel.findAll({
+        where: {
+          alumno_id: alumnoId
+        },
+        order: [['created_at', 'DESC']]
+      });
+
+    return res.status(200).json({
+      ok: true,
+      total: anamnesis.length,
+      data: anamnesis
+    });
+
+  } catch (error) {
+    console.error(
+      'OBRS_MiHistorialAnamnesis_CTS:',
+      error
+    );
+
+    return res.status(500).json({
+      ok: false,
+      message:
+        'Error al obtener el historial.'
     });
   }
 };

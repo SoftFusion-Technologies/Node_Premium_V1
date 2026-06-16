@@ -1159,22 +1159,17 @@ router.delete(
 );
 
 import {
-  GR_HistorialAnamnesis_CTS,
-  GR_HistorialAnamnesisAlumno_CTS,
-  GR_DetalleHistorialAnamnesis_CTS
+  OBRS_HistorialAnamnesis_CTS,
+  OBRS_HistorialAnamnesisAlumno_CTS,
+  OBRS_DetalleHistorialAnamnesis_CTS,
+  OBRS_MiHistorialAnamnesis_CTS
 } from '../Controllers/Alumno/CTS_TB_AlumnosAnamnesisHistorial.js';
-
-/*
- * =========================================================
- * ALUMNOS ANAMNESIS HISTORIAL
- * =========================================================
- */
 
 /*
  * Sergio Manrique - 2026/06/03 - Lista todo el historial de anamnesis de un alumno.
  */
 router.get(
-  '/alumnos/:alumno_id/anamnesis/historial',
+  '/alumnos-admin/:alumno_id/anamnesis/historial',
   authenticateToken,
   requireRolGlobal([
     'SUPER_ADMIN',
@@ -1183,14 +1178,14 @@ router.get(
     'COORD_SEDE',
     'PROFESOR'
   ]),
-  GR_HistorialAnamnesisAlumno_CTS
+  OBRS_HistorialAnamnesisAlumno_CTS
 );
 
 /*
  * Sergio Manrique - 2026/06/03 - Lista versiones históricas de una anamnesis específica.
  */
 router.get(
-  '/alumnos-anamnesis/:anamnesis_id/historial',
+  '/alumnos-admin-anamnesis/:anamnesis_id/historial',
   authenticateToken,
   requireRolGlobal([
     'SUPER_ADMIN',
@@ -1199,14 +1194,14 @@ router.get(
     'COORD_SEDE',
     'PROFESOR'
   ]),
-  GR_HistorialAnamnesis_CTS
+  OBRS_HistorialAnamnesis_CTS
 );
 
 /*
  * Sergio Manrique - 2026/06/03 - Obtiene el detalle de una versión histórica por ID.
  */
 router.get(
-  '/alumnos-anamnesis/historial/:id',
+  '/alumnos-admin-anamnesis/historial/:id',
   authenticateToken,
   requireRolGlobal([
     'SUPER_ADMIN',
@@ -1215,7 +1210,16 @@ router.get(
     'COORD_SEDE',
     'PROFESOR'
   ]),
-  GR_DetalleHistorialAnamnesis_CTS
+  OBRS_DetalleHistorialAnamnesis_CTS
+);
+
+/*
+ * Sergio Manrique - 2026/06/16 - Historial de anamnesis del alumno autenticado.
+ */
+router.get(
+  '/alumnos-alumnos/anamnesis/historial',
+  authenticateAlumnoToken,
+  OBRS_MiHistorialAnamnesis_CTS
 );
 
 import {

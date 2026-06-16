@@ -671,42 +671,56 @@ export const CR_MiContactoEmergencia_CTS = async (req, res) => {
 
   try {
     const alumnoId = req.alumno?.id || req.alumno?.alumno_id;
+    
+    // Acepta tanto un objeto como un array
+    const contactosInput = Array.isArray(req.body.contactos) 
+      ? req.body.contactos 
+      : [req.body];
 
-    const payload = buildContactoPayload(req.body, 'create');
-    const errores = validarPayloadContacto(payload, 'create');
+    // Validar cada contacto individualmente
+    for (let i = 0; i < contactosInput.length; i++) {
+      const payload = buildContactoPayload(contactosInput[i], 'create');
+      const errores = validarPayloadContacto(payload, 'create');
 
-    if (errores.length > 0) {
-      await transaction.rollback();
-
-      return res.status(400).json({
-        ok: false,
-        message: 'Datos inválidos para crear el contacto de emergencia.',
-        errors: errores
-      });
+      if (errores.length > 0) {
+        await transaction.rollback();
+        return res.status(400).json({
+          ok: false,
+          message: `Datos inválidos en el contacto #${i + 1}`,
+          errors: errores
+        });
+      }
     }
 
+    // Obtener cantidad actual de contactos para determinar el principal
     const totalContactos = await AlumnosContactosEmergenciaModel.count({
-      where: {
-        alumno_id: Number(alumnoId)
-      },
+      where: { alumno_id: Number(alumnoId) },
       transaction
     });
 
-    const contacto = await AlumnosContactosEmergenciaModel.create(
-      {
+    // Preparar los datos para bulkCreate
+    const contactosParaCrear = contactosInput.map((contacto, index) => {
+      const payload = buildContactoPayload(contacto, 'create');
+      return {
         ...payload,
         alumno_id: Number(alumnoId),
-        principal: totalContactos === 0 ? 1 : payload.principal
-      },
-      {
-        transaction
-      }
+        // El primer contacto es principal si no hay ninguno
+        principal: totalContactos === 0 && index === 0 ? 1 : payload.principal
+      };
+    });
+
+    // ✅ Crear todos los contactos en una sola operación
+    const contactosCreados = await AlumnosContactosEmergenciaModel.bulkCreate(
+      contactosParaCrear,
+      { transaction }
     );
 
-    if (Number(contacto.principal) === 1) {
+    // Asegurar que solo haya un contacto principal
+    const contactoPrincipal = contactosCreados.find(c => Number(c.principal) === 1);
+    if (contactoPrincipal) {
       await asegurarContactoPrincipal({
         alumnoId: Number(alumnoId),
-        contactoId: contacto.id,
+        contactoId: contactoPrincipal.id,
         transaction
       });
     }
@@ -715,17 +729,15 @@ export const CR_MiContactoEmergencia_CTS = async (req, res) => {
 
     return res.status(201).json({
       ok: true,
-      message: 'Contacto de emergencia creado correctamente.',
-      data: contacto
+      message: `Se crearon ${contactosCreados.length} contacto(s) de emergencia correctamente.`,
+      data: contactosCreados
     });
   } catch (error) {
     await transaction.rollback();
-
     console.error('Error CR_MiContactoEmergencia_CTS:', error);
-
     return res.status(500).json({
       ok: false,
-      message: 'Error al crear mi contacto de emergencia.'
+      message: 'Error al crear los contactos de emergencia.'
     });
   }
 };

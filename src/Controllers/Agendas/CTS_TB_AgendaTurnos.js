@@ -1,0 +1,587 @@
+/*
+ * Programador: Sergio Manrique
+ * Fecha Creación: 23 / 06 / 2026
+ * Versión: 1.0
+ *
+ * Descripción:
+ * Este archivo (CTS_TB_AgendaTurnos.js) contiene los controladores
+ * para gestionar los turnos concretos (agenda_turnos).
+ * Incluye creación individual, masiva desde plantilla, y gestión de estado.
+ *
+ * Tema: Controladores - Agenda
+ * Capa: Backend
+ */
+
+import { Op }                      from 'sequelize';
+import dayjs                       from 'dayjs';
+import AgendaTurnosModel           from '../../Models/Agenda/MD_TB_AgendaTurnos.js';
+import AgendaHorariosSedeModel     from '../../Models/Agenda/MD_TB_AgendaHorariosSede.js';
+import AgendaTurnosReservasModel   from '../../Models/Agenda/MD_TB_AgendaTurnosReservas.js';
+import AgendaTurnosListaEsperaModel from '../../Models/Agenda/MD_TB_AgendaTurnosListaEspera.js';
+import SedesModel                  from '../../Models/Sede/MD_TB_Sedes.js';
+import UsuariosModel               from '../../Models/Usuario/MD_TB_Usuarios.js';
+import AlumnosModel                from '../../Models/Alumno/MD_TB_Alumnos.js';
+
+// ─── Helpers internos ─────────────────────────────────────────────────────────
+
+/*
+ * Genera los horarios de turno dentro de un rango dado una duración en minutos.
+ * Ejemplo: 18:00 → 22:00 con 60min → [{ horaInicio: "18:00", horaFin: "19:00" }, ...]
+ */
+const generarFranjasHorarias = (horaInicio, horaFin, duracionMinutos) => {
+  const franjas = [];
+  let   cursor  = dayjs(`2000-01-01 ${horaInicio}`);
+  const fin     = dayjs(`2000-01-01 ${horaFin}`);
+
+  while (cursor.isBefore(fin)) {
+    const siguiente = cursor.add(duracionMinutos, 'minute');
+    if (siguiente.isAfter(fin)) break;
+    franjas.push({
+      hora_inicio: cursor.format('HH:mm:ss'),
+      hora_fin:    siguiente.format('HH:mm:ss')
+    });
+    cursor = siguiente;
+  }
+
+  return franjas;
+};
+
+/*
+ * Genera las fechas válidas dentro de un rango,
+ * excluyendo días de semana y fechas específicas.
+ */
+const generarFechasValidas = (fechaInicio, fechaFin, diasExcluidos = [], fechasExcluidas = []) => {
+  const fechas = [];
+  let   cursor = dayjs(fechaInicio);
+  const fin    = dayjs(fechaFin);
+
+  while (cursor.isBefore(fin) || cursor.isSame(fin, 'day')) {
+    // dayjs: 0=domingo, 1=lunes... El backend usa 1=Lunes...7=Domingo igual que la BD
+    const diaBD = cursor.day() === 0 ? 7 : cursor.day();
+    const clave = cursor.format('YYYY-MM-DD');
+
+    const esDiaExcluido   = diasExcluidos.includes(diaBD);
+    const esFechaExcluida = fechasExcluidas.includes(clave);
+
+    if (!esDiaExcluido && !esFechaExcluida) {
+      fechas.push(clave);
+    }
+
+    cursor = cursor.add(1, 'day');
+  }
+
+  return fechas;
+};
+
+// ─── ADMIN ────────────────────────────────────────────────────────────────────
+
+/*
+ * Sergio Manrique - 2026/06/23
+ * Lista turnos con filtros opcionales: sede_id, fecha, estado, profesor_id.
+ */
+export const OBRS_Turnos_CTS = async (req, res) => {
+  try {
+    const { sede_id, fecha, estado, profesor_id, fecha_desde, fecha_hasta } = req.query;
+
+    const where = {};
+    if (sede_id)    where.sede_id    = sede_id;
+    if (estado)     where.estado     = estado;
+    if (profesor_id) where.profesor_id = profesor_id;
+
+    if (fecha) {
+      where.fecha = fecha;
+    } else if (fecha_desde || fecha_hasta) {
+      where.fecha = {};
+      if (fecha_desde) where.fecha[Op.gte] = fecha_desde;
+      if (fecha_hasta) where.fecha[Op.lte] = fecha_hasta;
+    }
+
+    const turnos = await AgendaTurnosModel.findAll({
+      where,
+      include: [
+        { model: SedesModel,    as: 'sede',    attributes: ['id', 'nombre'] },
+        { model: UsuariosModel, as: 'profesor', attributes: ['id', 'nombre', 'apellido'] },
+        {
+          model:      AgendaTurnosReservasModel,
+          as:         'reservas',
+          attributes: ['id', 'alumno_id', 'estado', 'origen_reserva'],
+          where:      { estado: 'reservada' },
+          required:   false
+        }
+      ],
+      order: [['fecha', 'ASC'], ['hora_inicio', 'ASC']]
+    });
+
+    return res.status(200).json(turnos);
+  } catch (error) {
+    console.error('[OBRS_Turnos_CTS]', error);
+    return res.status(500).json({ message: 'Error al obtener turnos.' });
+  }
+};
+
+/*
+ * Sergio Manrique - 2026/06/23
+ * Obtiene el detalle de un turno por ID con reservas y lista de espera.
+ */
+export const OBRS_DetTurno_CTS = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const turno = await AgendaTurnosModel.findByPk(id, {
+      include: [
+        { model: SedesModel,    as: 'sede',    attributes: ['id', 'nombre'] },
+        { model: UsuariosModel, as: 'profesor', attributes: ['id', 'nombre', 'apellido'] },
+        {
+          model:    AgendaTurnosReservasModel,
+          as:       'reservas',
+          required: false,
+          include: [
+            {
+              model:      AlumnosModel,
+              as:         'alumno',
+              attributes: ['id', 'nombre', 'apellido', 'telefono']
+            }
+          ]
+        },
+        {
+          model:    AgendaTurnosListaEsperaModel,
+          as:       'lista_espera',
+          required: false,
+          where:    { estado: 'esperando' },
+          include: [
+            {
+              model:      AlumnosModel,
+              as:         'alumno',
+              attributes: ['id', 'nombre', 'apellido', 'telefono']
+            }
+          ]
+        }
+      ],
+      order: [[{ model: AgendaTurnosListaEsperaModel, as: 'lista_espera' }, 'posicion', 'ASC']]
+    });
+
+    if (!turno) {
+      return res.status(404).json({ message: 'Turno no encontrado.' });
+    }
+
+    return res.status(200).json(turno);
+  } catch (error) {
+    console.error('[OBRS_DetTurno_CTS]', error);
+    return res.status(500).json({ message: 'Error al obtener el turno.' });
+  }
+};
+
+/*
+ * Sergio Manrique - 2026/06/23
+ * Crea un turno individual.
+ */
+export const CR_Turno_CTS = async (req, res) => {
+  try {
+    const {
+      horario_sede_id,
+      sede_id,
+      profesor_id,
+      fecha,
+      hora_inicio,
+      hora_fin,
+      cupo_maximo,
+      nombre_clase,
+      observaciones
+    } = req.body;
+
+    if (!sede_id || !fecha || !hora_inicio || !hora_fin) {
+      return res.status(400).json({ message: 'Faltan campos requeridos: sede_id, fecha, hora_inicio, hora_fin.' });
+    }
+
+    // Solo se pueden crear turnos de hoy en adelante (reloj del servidor)
+    if (dayjs(fecha).isBefore(dayjs(), 'day')) {
+      return res.status(400).json({ message: 'No se pueden crear turnos en una fecha pasada.' });
+    }
+
+    // Evitar duplicados: ya existe un turno para esa sede, fecha y horario
+    const turnoDuplicado = await AgendaTurnosModel.findOne({
+      where: { sede_id, fecha, hora_inicio }
+    });
+    if (turnoDuplicado) {
+      return res.status(400).json({ message: 'Ya existe un turno para esa sede, fecha y horario.' });
+    }
+
+    // Si viene de una plantilla, heredar nombre_clase si no se especificó
+    let nombreFinal = nombre_clase || null;
+    if (!nombreFinal && horario_sede_id) {
+      const plantilla = await AgendaHorariosSedeModel.findByPk(horario_sede_id);
+      if (plantilla) nombreFinal = plantilla.nombre_clase;
+    }
+
+    const turno = await AgendaTurnosModel.create({
+      horario_sede_id: horario_sede_id || null,
+      sede_id,
+      profesor_id:     profesor_id    || null,
+      fecha,
+      hora_inicio,
+      hora_fin,
+      cupo_maximo:     cupo_maximo    || 6,
+      cupos_reservados: 0,
+      nombre_clase:    nombreFinal,
+      estado:          'disponible',
+      observaciones:   observaciones  || null
+    });
+
+    return res.status(201).json({ message: 'Turno creado correctamente.', turno });
+  } catch (error) {
+    if (error.name === 'SequelizeUniqueConstraintError') {
+      return res.status(400).json({ message: 'Ya existe un turno para esa sede, fecha y horario.' });
+    }
+    console.error('[CR_Turno_CTS]', error);
+    return res.status(500).json({ message: 'Error al crear el turno.' });
+  }
+};
+
+/*
+ * Sergio Manrique - 2026/06/23
+ * Creación masiva de turnos desde un payload compacto.
+ *
+ * Body esperado:
+ * {
+ *   sede_ids:         [1, 2],
+ *   horario_sede_id:  3,         (opcional, para heredar nombre_clase y profesor)
+ *   profesor_id:      5,         (opcional)
+ *   nombre_clase:     "Funcional",
+ *   fecha_inicio:     "2026-07-01",
+ *   fecha_fin:        "2026-07-31",
+ *   dias_excluidos:   [6, 7],    (1=Lunes...7=Domingo)
+ *   fechas_excluidas: ["2026-07-09"],
+ *   hora_inicio:      "08:00",
+ *   hora_fin:         "10:00",
+ *   duracion_minutos: 60,
+ *   cupo_maximo:      6
+ * }
+ */
+export const CR_TurnosMasivo_CTS = async (req, res) => {
+  try {
+    const {
+      sede_ids,
+      horario_sede_id,
+      profesor_id,
+      nombre_clase,
+      fecha_inicio,
+      fecha_fin,
+      dias_excluidos   = [],
+      fechas_excluidas = [],
+      hora_inicio,
+      hora_fin,
+      duracion_minutos = 60,
+      cupo_maximo      = 6
+    } = req.body;
+
+    if (!sede_ids?.length || !fecha_inicio || !fecha_fin || !hora_inicio || !hora_fin) {
+      return res.status(400).json({ message: 'Faltan campos requeridos: sede_ids, fecha_inicio, fecha_fin, hora_inicio, hora_fin.' });
+    }
+
+    // Solo se pueden crear turnos de hoy en adelante (reloj del servidor)
+    if (dayjs(fecha_inicio).isBefore(dayjs(), 'day')) {
+      return res.status(400).json({ message: 'La fecha de inicio no puede ser anterior a hoy.' });
+    }
+
+    // Heredar nombre_clase de la plantilla si no se especificó
+    let nombreFinal = nombre_clase || null;
+    if (!nombreFinal && horario_sede_id) {
+      const plantilla = await AgendaHorariosSedeModel.findByPk(horario_sede_id);
+      if (plantilla) nombreFinal = plantilla.nombre_clase;
+    }
+
+    const fechasValidas = generarFechasValidas(fecha_inicio, fecha_fin, dias_excluidos, fechas_excluidas);
+    const franjas       = generarFranjasHorarias(hora_inicio, hora_fin, duracion_minutos);
+
+    if (!fechasValidas.length || !franjas.length) {
+      return res.status(400).json({ message: 'El rango no generó ningún turno válido.' });
+    }
+
+    // Buscar turnos ya existentes para las mismas sedes y fechas, para no
+    // crear duplicados (mismo sede_id + fecha + hora_inicio).
+    const turnosExistentes = await AgendaTurnosModel.findAll({
+      where: {
+        sede_id: { [Op.in]: sede_ids },
+        fecha:   { [Op.in]: fechasValidas }
+      },
+      attributes: ['sede_id', 'fecha', 'hora_inicio']
+    });
+
+    const clavesExistentes = new Set(
+      turnosExistentes.map((t) => `${t.sede_id}|${t.fecha}|${t.hora_inicio}`)
+    );
+
+    // Armar todos los registros a insertar, salteando los que ya existen
+    const registros = [];
+    let omitidos = 0;
+    for (const sede_id of sede_ids) {
+      for (const fecha of fechasValidas) {
+        for (const franja of franjas) {
+          const clave = `${sede_id}|${fecha}|${franja.hora_inicio}`;
+          if (clavesExistentes.has(clave)) {
+            omitidos++;
+            continue;
+          }
+          registros.push({
+            horario_sede_id: horario_sede_id || null,
+            sede_id,
+            profesor_id:     profesor_id     || null,
+            fecha,
+            hora_inicio:     franja.hora_inicio,
+            hora_fin:        franja.hora_fin,
+            cupo_maximo,
+            cupos_reservados: 0,
+            nombre_clase:    nombreFinal,
+            estado:          'disponible'
+          });
+        }
+      }
+    }
+
+    if (!registros.length) {
+      return res.status(400).json({
+        message: 'Todos los turnos del rango seleccionado ya existen. No se creó ninguno nuevo.'
+      });
+    }
+
+    // Inserción masiva en un solo query
+    await AgendaTurnosModel.bulkCreate(registros);
+
+    return res.status(201).json({
+      message: `Se crearon ${registros.length} turnos correctamente.${omitidos > 0 ? ` Se omitieron ${omitidos} por ya existir.` : ''}`,
+      omitidos,
+      total:   registros.length
+    });
+  } catch (error) {
+    if (error.name === 'SequelizeUniqueConstraintError') {
+      return res.status(400).json({ message: 'Alguno de los turnos a crear ya existe (misma sede, fecha y horario).' });
+    }
+    console.error('[CR_TurnosMasivo_CTS]', error);
+    return res.status(500).json({ message: 'Error al crear los turnos.' });
+  }
+};
+
+/*
+ * Sergio Manrique - 2026/06/23
+ * Actualiza un turno existente.
+ */
+export const UR_Turno_CTS = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const {
+      profesor_id,
+      fecha,
+      hora_inicio,
+      hora_fin,
+      cupo_maximo,
+      nombre_clase,
+      observaciones
+    } = req.body;
+
+    const turno = await AgendaTurnosModel.findByPk(id);
+    if (!turno) {
+      return res.status(404).json({ message: 'Turno no encontrado.' });
+    }
+
+    const fechaFinal      = fecha       ?? turno.fecha;
+    const horaInicioFinal = hora_inicio ?? turno.hora_inicio;
+
+    // Solo se puede mover un turno a una fecha de hoy en adelante
+    if (fecha && dayjs(fechaFinal).isBefore(dayjs(), 'day')) {
+      return res.status(400).json({ message: 'No se puede mover un turno a una fecha pasada.' });
+    }
+
+    // Evitar duplicados al mover el turno a otra fecha/horario ya ocupado
+    if (fecha || hora_inicio) {
+      const turnoDuplicado = await AgendaTurnosModel.findOne({
+        where: {
+          sede_id:     turno.sede_id,
+          fecha:       fechaFinal,
+          hora_inicio: horaInicioFinal,
+          id:          { [Op.ne]: turno.id }
+        }
+      });
+      if (turnoDuplicado) {
+        return res.status(400).json({ message: 'Ya existe un turno para esa sede, fecha y horario.' });
+      }
+    }
+
+    await turno.update({
+      profesor_id:  profesor_id  ?? turno.profesor_id,
+      fecha:        fechaFinal,
+      hora_inicio:  horaInicioFinal,
+      hora_fin:     hora_fin     ?? turno.hora_fin,
+      cupo_maximo:  cupo_maximo  ?? turno.cupo_maximo,
+      nombre_clase: nombre_clase ?? turno.nombre_clase,
+      observaciones: observaciones ?? turno.observaciones,
+      updated_at:   new Date()
+    });
+
+    return res.status(200).json({ message: 'Turno actualizado correctamente.', turno });
+  } catch (error) {
+    if (error.name === 'SequelizeUniqueConstraintError') {
+      return res.status(400).json({ message: 'Ya existe un turno para esa sede, fecha y horario.' });
+    }
+    console.error('[UR_Turno_CTS]', error);
+    return res.status(500).json({ message: 'Error al actualizar el turno.' });
+  }
+};
+
+/*
+ * Sergio Manrique - 2026/06/23
+ * Cambia el estado de un turno: bloquear, cancelar, disponible.
+ */
+export const UR_EstadoTurno_CTS = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { estado, motivo_bloqueo } = req.body;
+
+    const estadosValidos = ['disponible', 'bloqueado', 'cancelado'];
+    if (!estadosValidos.includes(estado)) {
+      return res.status(400).json({ message: `Estado inválido. Valores permitidos: ${estadosValidos.join(', ')}.` });
+    }
+
+    const turno = await AgendaTurnosModel.findByPk(id);
+    if (!turno) {
+      return res.status(404).json({ message: 'Turno no encontrado.' });
+    }
+
+    await turno.update({
+      estado,
+      motivo_bloqueo: estado === 'bloqueado' ? (motivo_bloqueo || null) : null,
+      updated_at:     new Date()
+    });
+
+    return res.status(200).json({ message: `Turno ${estado} correctamente.`, turno });
+  } catch (error) {
+    console.error('[UR_EstadoTurno_CTS]', error);
+    return res.status(500).json({ message: 'Error al cambiar estado del turno.' });
+  }
+};
+
+/*
+ * Sergio Manrique - 2026/06/23
+ * Elimina un turno y todas sus reservas (CASCADE en BD).
+ * Si había alumnos inscriptos se eliminan junto con el turno.
+ */
+export const ER_Turno_CTS = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const turno = await AgendaTurnosModel.findByPk(id);
+    if (!turno) {
+      return res.status(404).json({ message: 'Turno no encontrado.' });
+    }
+
+    await turno.destroy();
+
+    return res.status(200).json({ message: 'Turno eliminado correctamente.' });
+  } catch (error) {
+    console.error('[ER_Turno_CTS]', error);
+    return res.status(500).json({ message: 'Error al eliminar el turno.' });
+  }
+};
+
+// ─── ALUMNO ───────────────────────────────────────────────────────────────────
+
+/*
+ * Sergio Manrique - 2026/06/23
+ * Lista los turnos disponibles para que el alumno pueda inscribirse.
+ * Solo muestra turnos futuros con estado 'disponible' o 'completo'.
+ */
+export const OBRS_TurnosAlumno_CTS = async (req, res) => {
+  try {
+    const sede_id = req.alumno.sede_id;
+
+    if (!sede_id) {
+      return res.status(400).json({ message: 'No tenés una sede asignada. Consultá con administración.' });
+    }
+
+    const { fecha_desde, fecha_hasta } = req.query;
+
+    // La fecha de hoy se calcula con el reloj del servidor (nunca con el del
+    // dispositivo del alumno). El piso nunca puede ser anterior a hoy, sin
+    // importar qué fecha_desde mande el cliente.
+    const hoyServidor = dayjs().format('YYYY-MM-DD');
+    const piso = fecha_desde && dayjs(fecha_desde).isAfter(hoyServidor) ? fecha_desde : hoyServidor;
+
+    const where = {
+      sede_id,
+      estado: { [Op.in]: ['disponible', 'completo'] },
+      fecha:  { [Op.gte]: piso }
+    };
+
+    if (fecha_hasta) where.fecha[Op.lte] = fecha_hasta;
+
+    const turnos = await AgendaTurnosModel.findAll({
+      where,
+      include: [
+        { model: SedesModel,    as: 'sede',    attributes: ['id', 'nombre'] },
+        { model: UsuariosModel, as: 'profesor', attributes: ['id', 'nombre', 'apellido'] }
+      ],
+      order: [['fecha', 'ASC'], ['hora_inicio', 'ASC']]
+    });
+
+    return res.status(200).json(turnos);
+  } catch (error) {
+    console.error('[OBRS_TurnosAlumno_CTS]', error);
+    return res.status(500).json({ message: 'Error al obtener turnos.' });
+  }
+};
+
+/*
+ * Sergio Manrique - 2026/06/24
+ * Eliminación masiva de turnos por rango de fechas, sedes y horario opcional.
+ *
+ * Body esperado:
+ * {
+ *   sede_ids:     [1, 2],
+ *   fecha_inicio: "2026-07-01",
+ *   fecha_fin:    "2026-07-31",
+ *   hora_inicio:  "08:00",   (opcional — si no viene, elimina el día completo)
+ *   hora_fin:     "10:00"    (opcional)
+ * }
+ */
+export const ER_TurnosMasivo_CTS = async (req, res) => {
+  try {
+    const { sede_ids, fecha_inicio, fecha_fin, hora_inicio, hora_fin } = req.body;
+
+    if (!sede_ids?.length || !fecha_inicio || !fecha_fin) {
+      return res.status(400).json({ message: 'Faltan campos requeridos: sede_ids, fecha_inicio, fecha_fin.' });
+    }
+
+    const where = {
+      sede_id: { [Op.in]: sede_ids },
+      fecha:   { [Op.between]: [fecha_inicio, fecha_fin] }
+    };
+
+    // Si se especifica rango horario, filtrar solo los turnos que estén dentro
+    // Un turno está dentro del rango si su hora_inicio >= hora_inicio Y su hora_fin <= hora_fin
+    if (hora_inicio && hora_fin) {
+      where.hora_inicio = { [Op.gte]: hora_inicio };
+      where.hora_fin    = { [Op.lte]: hora_fin };
+    }
+
+    const total = await AgendaTurnosModel.count({ where });
+
+    if (total === 0) {
+      return res.status(404).json({ message: 'No se encontraron turnos en el rango indicado para las sedes seleccionadas.' });
+    }
+
+    // El CASCADE en BD elimina reservas y lista de espera automáticamente
+    await AgendaTurnosModel.destroy({ where });
+
+    const descripcionRango = hora_inicio && hora_fin
+      ? ` en el horario ${hora_inicio} - ${hora_fin}`
+      : '';
+
+    return res.status(200).json({
+      message: `Se eliminaron ${total} turnos correctamente${descripcionRango}.`,
+      total
+    });
+  } catch (error) {
+    console.error('[ER_TurnosMasivo_CTS]', error);
+    return res.status(500).json({ message: 'Error al eliminar los turnos.' });
+  }
+};
+

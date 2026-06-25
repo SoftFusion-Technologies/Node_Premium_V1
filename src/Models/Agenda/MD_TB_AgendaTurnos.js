@@ -73,6 +73,11 @@ const AgendaTurnosModel = db.define(
       allowNull: false
     },
 
+    nombre_clase: {
+      type: DataTypes.STRING(120),
+      allowNull: true
+    },
+
     cupo_maximo: {
       type: DataTypes.INTEGER,
       allowNull: false,

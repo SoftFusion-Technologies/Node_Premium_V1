@@ -499,19 +499,31 @@ export const OBRS_TurnosAlumno_CTS = async (req, res) => {
 
     const { fecha_desde, fecha_hasta } = req.query;
 
-    // La fecha de hoy se calcula con el reloj del servidor (nunca con el del
-    // dispositivo del alumno). El piso nunca puede ser anterior a hoy, sin
-    // importar qué fecha_desde mande el cliente.
-    const hoyServidor = dayjs().format('YYYY-MM-DD');
+    // La fecha y hora de "ahora" se calculan con el reloj del servidor (nunca
+    // con el del dispositivo del alumno). El piso de fecha nunca puede ser
+    // anterior a hoy, sin importar qué fecha_desde mande el cliente.
+    const hoyServidor  = dayjs().format('YYYY-MM-DD');
+    const horaServidor = dayjs().format('HH:mm:ss');
     const piso = fecha_desde && dayjs(fecha_desde).isAfter(hoyServidor) ? fecha_desde : hoyServidor;
+
+    const condicionesFecha = [{ fecha: { [Op.gte]: piso } }];
+    if (fecha_hasta) condicionesFecha.push({ fecha: { [Op.lte]: fecha_hasta } });
 
     const where = {
       sede_id,
       estado: { [Op.in]: ['disponible', 'completo'] },
-      fecha:  { [Op.gte]: piso }
+      [Op.and]: [
+        ...condicionesFecha,
+        {
+          // Excluye las clases de hoy cuyo horario ya pasó. Las de fechas
+          // futuras no se ven afectadas por esta condición.
+          [Op.or]: [
+            { fecha: { [Op.gt]: hoyServidor } },
+            { fecha: hoyServidor, hora_inicio: { [Op.gte]: horaServidor } }
+          ]
+        }
+      ]
     };
-
-    if (fecha_hasta) where.fecha[Op.lte] = fecha_hasta;
 
     const turnos = await AgendaTurnosModel.findAll({
       where,

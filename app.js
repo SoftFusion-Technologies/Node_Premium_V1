@@ -13,7 +13,9 @@ import db from './src/DataBase/db.js';
 import { PORT, DB_SYNC, DB_ALTER } from './src/DataBase/config.js';
 
 // Benjamin Orellana - 2026/05/10 - Importa rutas centralizadas del backend PREMIUM.
-import GetRoutes from './src/Routes/routes.js';
+// Sergio Gustavo Manrique - 2026/06/25 - Refactor: routes.js monolítico dividido
+// por responsabilidades en src/Routes/*.routes.js, orquestados desde index.js.
+import GetRoutes from './src/Routes/index.js';
 
 // Benjamin Orellana - 2026/05/10 - Importa auth JWT para usuarios internos y alumnos PREMIUM.
 import {

@@ -18,9 +18,11 @@ import AgendaTurnosModel           from '../../Models/Agenda/MD_TB_AgendaTurnos.
 import AgendaHorariosSedeModel     from '../../Models/Agenda/MD_TB_AgendaHorariosSede.js';
 import AgendaTurnosReservasModel   from '../../Models/Agenda/MD_TB_AgendaTurnosReservas.js';
 import AgendaTurnosListaEsperaModel from '../../Models/Agenda/MD_TB_AgendaTurnosListaEspera.js';
+import AlumnosMembresiasModel      from '../../Models/Alumno/MD_TB_AlumnosMembresias.js';
 import SedesModel                  from '../../Models/Sede/MD_TB_Sedes.js';
 import UsuariosModel               from '../../Models/Usuario/MD_TB_Usuarios.js';
 import AlumnosModel                from '../../Models/Alumno/MD_TB_Alumnos.js';
+import db                          from '../../DataBase/db.js';
 
 // ─── Helpers internos ─────────────────────────────────────────────────────────
 
@@ -460,23 +462,53 @@ export const UR_EstadoTurno_CTS = async (req, res) => {
 };
 
 /*
- * Sergio Manrique - 2026/06/23
+ * Sergio Manrique - 2026/06/23 / actualizado 2026/06/29
  * Elimina un turno y todas sus reservas (CASCADE en BD).
- * Si había alumnos inscriptos se eliminan junto con el turno.
+ * Si el turno es futuro, restaura los créditos de todos los alumnos inscriptos
+ * que tengan membresía asociada, antes de eliminar.
  */
 export const ER_Turno_CTS = async (req, res) => {
+  const transaccion = await db.transaction();
   try {
     const { id } = req.params;
 
-    const turno = await AgendaTurnosModel.findByPk(id);
+    const turno = await AgendaTurnosModel.findByPk(id, { transaction: transaccion });
     if (!turno) {
+      await transaccion.rollback();
       return res.status(404).json({ message: 'Turno no encontrado.' });
     }
 
-    await turno.destroy();
+    // Restaurar créditos solo si el turno todavía no ocurrió
+    const inicioTurno = dayjs(`${turno.fecha} ${turno.hora_inicio}`);
+    if (inicioTurno.isAfter(dayjs())) {
+      const reservasActivas = await AgendaTurnosReservasModel.findAll({
+        where:       { turno_id: id, estado: 'reservada' },
+        transaction: transaccion
+      });
+
+      for (const reserva of reservasActivas) {
+        if (!reserva.membresia_id) continue;
+
+        const membresia = await AlumnosMembresiasModel.findByPk(reserva.membresia_id, {
+          transaction: transaccion,
+          lock:        transaccion.LOCK.UPDATE
+        });
+        if (membresia) {
+          await membresia.update({
+            clases_usadas:      Math.max(0, membresia.clases_usadas - 1),
+            clases_disponibles: membresia.clases_disponibles + 1,
+            updated_at:         new Date()
+          }, { transaction: transaccion });
+        }
+      }
+    }
+
+    await turno.destroy({ transaction: transaccion });
+    await transaccion.commit();
 
     return res.status(200).json({ message: 'Turno eliminado correctamente.' });
   } catch (error) {
+    await transaccion.rollback();
     console.error('[ER_Turno_CTS]', error);
     return res.status(500).json({ message: 'Error al eliminar el turno.' });
   }
@@ -555,10 +587,12 @@ export const OBRS_TurnosAlumno_CTS = async (req, res) => {
  * }
  */
 export const ER_TurnosMasivo_CTS = async (req, res) => {
+  const transaccion = await db.transaction();
   try {
     const { sede_ids, fecha_inicio, fecha_fin, hora_inicio, hora_fin } = req.body;
 
     if (!sede_ids?.length || !fecha_inicio || !fecha_fin) {
+      await transaccion.rollback();
       return res.status(400).json({ message: 'Faltan campos requeridos: sede_ids, fecha_inicio, fecha_fin.' });
     }
 
@@ -568,30 +602,69 @@ export const ER_TurnosMasivo_CTS = async (req, res) => {
     };
 
     // Si se especifica rango horario, filtrar solo los turnos que estén dentro
-    // Un turno está dentro del rango si su hora_inicio >= hora_inicio Y su hora_fin <= hora_fin
     if (hora_inicio && hora_fin) {
       where.hora_inicio = { [Op.gte]: hora_inicio };
       where.hora_fin    = { [Op.lte]: hora_fin };
     }
 
-    const total = await AgendaTurnosModel.count({ where });
+    const turnos = await AgendaTurnosModel.findAll({
+      where,
+      attributes: ['id', 'fecha', 'hora_inicio'],
+      transaction: transaccion
+    });
 
-    if (total === 0) {
+    if (turnos.length === 0) {
+      await transaccion.rollback();
       return res.status(404).json({ message: 'No se encontraron turnos en el rango indicado para las sedes seleccionadas.' });
     }
 
+    // Para los turnos futuros, restaurar créditos de los alumnos inscriptos
+    const ahora       = dayjs();
+    const turnosFuturos = turnos.filter((t) =>
+      dayjs(`${t.fecha} ${t.hora_inicio}`).isAfter(ahora)
+    );
+
+    if (turnosFuturos.length > 0) {
+      const idsFuturos = turnosFuturos.map((t) => t.id);
+
+      const reservasActivas = await AgendaTurnosReservasModel.findAll({
+        where: {
+          turno_id:    { [Op.in]: idsFuturos },
+          estado:      'reservada',
+          membresia_id: { [Op.ne]: null }
+        },
+        transaction: transaccion
+      });
+
+      for (const reserva of reservasActivas) {
+        const membresia = await AlumnosMembresiasModel.findByPk(reserva.membresia_id, {
+          transaction: transaccion,
+          lock:        transaccion.LOCK.UPDATE
+        });
+        if (membresia) {
+          await membresia.update({
+            clases_usadas:      Math.max(0, membresia.clases_usadas - 1),
+            clases_disponibles: membresia.clases_disponibles + 1,
+            updated_at:         new Date()
+          }, { transaction: transaccion });
+        }
+      }
+    }
+
     // El CASCADE en BD elimina reservas y lista de espera automáticamente
-    await AgendaTurnosModel.destroy({ where });
+    await AgendaTurnosModel.destroy({ where, transaction: transaccion });
+    await transaccion.commit();
 
     const descripcionRango = hora_inicio && hora_fin
       ? ` en el horario ${hora_inicio} - ${hora_fin}`
       : '';
 
     return res.status(200).json({
-      message: `Se eliminaron ${total} turnos correctamente${descripcionRango}.`,
-      total
+      message: `Se eliminaron ${turnos.length} turnos correctamente${descripcionRango}.`,
+      total:   turnos.length
     });
   } catch (error) {
+    await transaccion.rollback();
     console.error('[ER_TurnosMasivo_CTS]', error);
     return res.status(500).json({ message: 'Error al eliminar los turnos.' });
   }

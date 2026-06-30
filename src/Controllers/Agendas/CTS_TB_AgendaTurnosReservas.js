@@ -13,11 +13,13 @@
  * Capa: Backend
  */
 
+import { Op }                         from 'sequelize';
 import dayjs                          from 'dayjs';
 import AgendaTurnosModel              from '../../Models/Agenda/MD_TB_AgendaTurnos.js';
 import AgendaTurnosReservasModel      from '../../Models/Agenda/MD_TB_AgendaTurnosReservas.js';
 import AgendaTurnosListaEsperaModel   from '../../Models/Agenda/MD_TB_AgendaTurnosListaEspera.js';
 import AlumnosModel                   from '../../Models/Alumno/MD_TB_Alumnos.js';
+import AlumnosMembresiasModel         from '../../Models/Alumno/MD_TB_AlumnosMembresias.js';
 import SistemaConfiguracionModel      from '../../Models/Sistema/MD_TB_SistemaConfiguracion.js';
 import SedesModel                     from '../../Models/Sede/MD_TB_Sedes.js';
 import db                             from '../../DataBase/db.js';
@@ -38,6 +40,7 @@ const obtenerMinutosCancelacion = async () => {
 /*
  * Promueve al primer alumno en lista de espera de un turno
  * cuando se libera un cupo (cancelación o reprogramación).
+ * Si el alumno tiene membresía activa con créditos, los descuenta.
  */
 const promoverListaEspera = async (turno_id) => {
   const primero = await AgendaTurnosListaEsperaModel.findOne({
@@ -47,14 +50,36 @@ const promoverListaEspera = async (turno_id) => {
 
   if (!primero) return;
 
+  // Intentar encontrar membresía activa con créditos para el alumno promovido
+  const hoy = dayjs().format('YYYY-MM-DD');
+  const membresia = await AlumnosMembresiasModel.findOne({
+    where: {
+      alumno_id:          primero.alumno_id,
+      estado:             'activa',
+      fecha_inicio:       { [Op.lte]: hoy },
+      fecha_vencimiento:  { [Op.gte]: hoy },
+      clases_disponibles: { [Op.gt]: 0 }
+    }
+  });
+
   // Crear reserva para el primero de la lista
   await AgendaTurnosReservasModel.create({
     turno_id,
     alumno_id:      primero.alumno_id,
+    membresia_id:   membresia?.id ?? null,
     origen_reserva: 'sistema',
     estado:         'reservada',
     fecha_reserva:  new Date()
   });
+
+  // Descontar crédito si tiene membresía activa
+  if (membresia) {
+    await membresia.update({
+      clases_usadas:      membresia.clases_usadas + 1,
+      clases_disponibles: membresia.clases_disponibles - 1,
+      updated_at:         new Date()
+    });
+  }
 
   // Marcar como asignado en la lista de espera
   await primero.update({
@@ -202,21 +227,25 @@ export const UR_AsistenciaAdmin_CTS = async (req, res) => {
 };
 
 /*
- * Sergio Manrique - 2026/06/23
+ * Sergio Manrique - 2026/06/23 / actualizado 2026/06/29
  * Admin cancela la reserva de un alumno sin restricción de tiempo.
+ * Si la clase es futura y la reserva tiene membresía, restaura el crédito al alumno.
  * Si hay lista de espera, promueve al primero automáticamente.
  */
 export const ER_ReservaAdmin_CTS = async (req, res) => {
+  const transaccion = await db.transaction();
   try {
     const { id } = req.params;
     const { motivo_cancelacion } = req.body;
 
-    const reserva = await AgendaTurnosReservasModel.findByPk(id);
+    const reserva = await AgendaTurnosReservasModel.findByPk(id, { transaction: transaccion });
     if (!reserva) {
+      await transaccion.rollback();
       return res.status(404).json({ message: 'Reserva no encontrada.' });
     }
 
     if (reserva.estado !== 'reservada') {
+      await transaccion.rollback();
       return res.status(400).json({ message: 'Solo se pueden cancelar reservas activas.' });
     }
 
@@ -225,21 +254,41 @@ export const ER_ReservaAdmin_CTS = async (req, res) => {
       fecha_cancelacion:  new Date(),
       motivo_cancelacion: motivo_cancelacion || null,
       updated_at:         new Date()
-    });
+    }, { transaction: transaccion });
 
     // Liberar cupo en el turno
-    const turno = await AgendaTurnosModel.findByPk(reserva.turno_id);
+    const turno = await AgendaTurnosModel.findByPk(reserva.turno_id, { transaction: transaccion });
     await turno.update({
       cupos_reservados: Math.max(0, turno.cupos_reservados - 1),
       estado:           'disponible',
       updated_at:       new Date()
-    });
+    }, { transaction: transaccion });
 
-    // Promover al primero de la lista de espera si hay
+    // Restaurar crédito si la clase es futura y la reserva tiene membresía
+    const inicioTurno = dayjs(`${turno.fecha} ${turno.hora_inicio}`);
+    if (reserva.membresia_id && inicioTurno.isAfter(dayjs())) {
+      const membresia = await AlumnosMembresiasModel.findByPk(reserva.membresia_id, {
+        transaction: transaccion,
+        lock:        transaccion.LOCK.UPDATE
+      });
+      if (membresia) {
+        await membresia.update({
+          clases_usadas:      Math.max(0, membresia.clases_usadas - 1),
+          clases_disponibles: membresia.clases_disponibles + 1,
+          updated_at:         new Date()
+        }, { transaction: transaccion });
+      }
+    }
+
+    await transaccion.commit();
+
+    // Promover al primero de la lista de espera (fuera de la transacción,
+    // ya con el cupo liberado confirmado)
     await promoverListaEspera(reserva.turno_id);
 
     return res.status(200).json({ message: 'Reserva cancelada correctamente.' });
   } catch (error) {
+    await transaccion.rollback();
     console.error('[ER_ReservaAdmin_CTS]', error);
     return res.status(500).json({ message: 'Error al cancelar la reserva.' });
   }
@@ -278,16 +327,18 @@ export const OBRS_MisReservas_CTS = async (req, res) => {
 };
 
 /*
- * Sergio Manrique - 2026/06/23
+ * Sergio Manrique - 2026/06/23 / actualizado 2026/06/29
  * Alumno se inscribe a un turno disponible.
+ * Valida membresía activa y créditos disponibles antes de inscribir.
  * Si el turno está completo, se agrega a lista de espera automáticamente.
+ * El backend determina y valida la membresía; nunca confía en datos del cliente.
  */
 export const CR_MiReserva_CTS = async (req, res) => {
   const transaccion = await db.transaction();
   try {
     const alumno_id = req.alumno.id;
     const sede_id   = req.alumno.sede_id;
-    const { turno_id, membresia_id } = req.body;
+    const { turno_id } = req.body;
 
     if (!sede_id) {
       await transaccion.rollback();
@@ -337,8 +388,52 @@ export const CR_MiReserva_CTS = async (req, res) => {
       return res.status(400).json({ message: 'Ya estás inscripto en este turno.' });
     }
 
+    // ── Validación de membresía y créditos (siempre desde el backend) ──────────
+    // Bloquea la fila de la membresía para que no haya doble descuento si el
+    // alumno envía dos peticiones simultáneas.
+    const hoy = dayjs().format('YYYY-MM-DD');
+
+    const membresia = await AlumnosMembresiasModel.findOne({
+      where: {
+        alumno_id,
+        estado:            'activa',
+        fecha_inicio:      { [Op.lte]: hoy },
+        fecha_vencimiento: { [Op.gte]: hoy }
+      },
+      transaction: transaccion,
+      lock:        transaccion.LOCK.UPDATE
+    });
+
+    if (!membresia) {
+      // Buscar membresía para dar un mensaje preciso
+      const cualquiera = await AlumnosMembresiasModel.findOne({
+        where:       { alumno_id },
+        order:       [['fecha_inicio', 'DESC']],
+        transaction: transaccion
+      });
+
+      await transaccion.rollback();
+
+      if (!cualquiera) {
+        return res.status(403).json({ message: 'No tenés una membresía activa para inscribirte en esta clase.' });
+      }
+      if (cualquiera.estado === 'vencida' || dayjs(cualquiera.fecha_vencimiento).isBefore(hoy)) {
+        return res.status(403).json({ message: 'Tu membresía ya se encuentra vencida.' });
+      }
+      if (dayjs(cualquiera.fecha_inicio).isAfter(hoy)) {
+        return res.status(403).json({ message: 'Tu membresía todavía no está vigente.' });
+      }
+      return res.status(403).json({ message: 'No tenés una membresía activa para inscribirte en esta clase.' });
+    }
+
+    if (membresia.clases_disponibles <= 0) {
+      await transaccion.rollback();
+      return res.status(403).json({ message: 'No tenés créditos disponibles para inscribirte en esta clase.' });
+    }
+
     // Si no hay cupo, agregar a lista de espera (dentro de la misma transacción
-    // para evitar que dos alumnos reciban la misma posición)
+    // para evitar que dos alumnos reciban la misma posición).
+    // No se descuentan créditos hasta que se concrete la inscripción efectiva.
     if (turno.cupos_reservados >= turno.cupo_maximo) {
       const posicionActual = await AgendaTurnosListaEsperaModel.count({
         where:       { turno_id, estado: 'esperando' },
@@ -356,17 +451,24 @@ export const CR_MiReserva_CTS = async (req, res) => {
       await transaccion.commit();
 
       return res.status(200).json({
-        message:  `El turno está completo. Quedaste en la posición ${enEspera.posicion} de la lista de espera.`,
+        message:   `El turno está completo. Quedaste en la posición ${enEspera.posicion} de la lista de espera.`,
         en_espera: true,
         posicion:  enEspera.posicion
       });
     }
 
-    // Crear la reserva
+    // Descontar crédito de la membresía
+    await membresia.update({
+      clases_usadas:      membresia.clases_usadas + 1,
+      clases_disponibles: membresia.clases_disponibles - 1,
+      updated_at:         new Date()
+    }, { transaction: transaccion });
+
+    // Crear la reserva vinculada a la membresía que pagó el crédito
     const reserva = await AgendaTurnosReservasModel.create({
       turno_id,
       alumno_id,
-      membresia_id:   membresia_id || null,
+      membresia_id:   membresia.id,
       origen_reserva: 'alumno',
       estado:         'reservada',
       fecha_reserva:  new Date()
@@ -385,38 +487,43 @@ export const CR_MiReserva_CTS = async (req, res) => {
   } catch (error) {
     await transaccion.rollback();
     console.error('[CR_MiReserva_CTS]', error);
-    return res.status(500).json({ message: 'Error al inscribirte en el turno.' });
+    return res.status(500).json({ message: 'No fue posible completar la inscripción porque otro usuario ocupó el último cupo unos instantes antes. Intentá de nuevo.' });
   }
 };
 
 /*
- * Sergio Manrique - 2026/06/23
+ * Sergio Manrique - 2026/06/23 / actualizado 2026/06/29
  * Alumno cancela su propia reserva.
  * Valida el tiempo mínimo de anticipación desde sistema_configuracion.
+ * Si la clase es futura y la reserva tiene membresía asociada, restaura el crédito.
  * Si hay lista de espera, promueve al primero automáticamente.
  */
 export const ER_MiReserva_CTS = async (req, res) => {
+  const transaccion = await db.transaction();
   try {
     const alumno_id = req.alumno.id;
     const { id }    = req.params;
 
-    const reserva = await AgendaTurnosReservasModel.findByPk(id);
+    const reserva = await AgendaTurnosReservasModel.findByPk(id, { transaction: transaccion });
     if (!reserva || reserva.alumno_id !== alumno_id) {
+      await transaccion.rollback();
       return res.status(404).json({ message: 'Reserva no encontrada.' });
     }
 
     if (reserva.estado !== 'reservada') {
+      await transaccion.rollback();
       return res.status(400).json({ message: 'Solo podés cancelar reservas activas.' });
     }
 
-    const turno = await AgendaTurnosModel.findByPk(reserva.turno_id);
+    const turno = await AgendaTurnosModel.findByPk(reserva.turno_id, { transaction: transaccion });
 
-    // Validar tiempo mínimo de cancelación
+    // Validar tiempo mínimo de cancelación (con el reloj del servidor)
     const minutosLimite    = await obtenerMinutosCancelacion();
     const inicioTurno      = dayjs(`${turno.fecha} ${turno.hora_inicio}`);
     const minutosRestantes = inicioTurno.diff(dayjs(), 'minute');
 
     if (minutosRestantes < minutosLimite) {
+      await transaccion.rollback();
       return res.status(400).json({
         message: `No podés cancelar con menos de ${minutosLimite} minutos de anticipación. Quedan ${minutosRestantes} minutos.`
       });
@@ -426,20 +533,39 @@ export const ER_MiReserva_CTS = async (req, res) => {
       estado:            'cancelada',
       fecha_cancelacion: new Date(),
       updated_at:        new Date()
-    });
+    }, { transaction: transaccion });
 
     // Liberar cupo
     await turno.update({
       cupos_reservados: Math.max(0, turno.cupos_reservados - 1),
       estado:           'disponible',
       updated_at:       new Date()
-    });
+    }, { transaction: transaccion });
 
-    // Promover al primero de la lista de espera
+    // Restaurar crédito si la clase es futura y la reserva tiene membresía
+    if (reserva.membresia_id && inicioTurno.isAfter(dayjs())) {
+      const membresia = await AlumnosMembresiasModel.findByPk(reserva.membresia_id, {
+        transaction: transaccion,
+        lock:        transaccion.LOCK.UPDATE
+      });
+      if (membresia) {
+        await membresia.update({
+          clases_usadas:      Math.max(0, membresia.clases_usadas - 1),
+          clases_disponibles: membresia.clases_disponibles + 1,
+          updated_at:         new Date()
+        }, { transaction: transaccion });
+      }
+    }
+
+    await transaccion.commit();
+
+    // Promover al primero de la lista de espera (fuera de la transacción,
+    // ya con el cupo liberado confirmado)
     await promoverListaEspera(reserva.turno_id);
 
     return res.status(200).json({ message: 'Reserva cancelada correctamente.' });
   } catch (error) {
+    await transaccion.rollback();
     console.error('[ER_MiReserva_CTS]', error);
     return res.status(500).json({ message: 'Error al cancelar tu reserva.' });
   }

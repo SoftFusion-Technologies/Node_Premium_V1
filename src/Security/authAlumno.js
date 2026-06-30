@@ -15,7 +15,6 @@
  *   solicitarResetPasswordAlumno   → POST /alumnos/login/reset-solicitar
  *   confirmarResetPasswordAlumno   → POST /alumnos/login/reset-confirmar
  *   authenticateAlumnoToken        → Middleware JWT para rutas de alumno
- *   requireAlumnoAuth              → Middleware: exige alumno autenticado
  *   requireAlumnoActivo            → Middleware: exige alumno en estado operativo
  *
  * Tema: Seguridad - Auth Alumno
@@ -225,7 +224,6 @@ const construirPayloadAlumno = (alumno, loginRecord) => ({
  * Body: { identificador, password }
  */
 export const loginAlumno = async (req, res) => {
-  console.log('>>> loginAlumno ejecutándose', req.body);
   try {
     const identificador = normalizarTexto(
       req.body.identificador || req.body.dni || req.body.email || req.body.telefono
@@ -600,7 +598,6 @@ export const authenticateAlumnoToken = async (req, res, next) => {
     }
 
     const decoded = jwt.verify(token, JWT_SECRET);
-    console.log('TOKEN DECODED EN PERFIL:', JSON.stringify(decoded, null, 2));
 
     if (decoded.tipo_auth !== 'ALUMNO') {
       return res.status(403).json({
@@ -686,21 +683,8 @@ export const authenticateAlumnoToken = async (req, res, next) => {
 
 /*
  * Sergio Gustavo Manrique - 2026/06/10
- * Middleware para exigir alumno autenticado en req.alumno.
- */
-export const requireAlumnoAuth = (req, res, next) => {
-  if (!req.alumno) {
-    return res.status(401).json({
-      ok: false,
-      message: 'Alumno no autenticado.'
-    });
-  }
-  return next();
-};
-
-/*
- * Sergio Gustavo Manrique - 2026/06/10
- * Middleware para exigir alumno en estado operativo.
+ * Middleware para exigir alumno en estado operativo (no congelado, no de baja).
+ * Requiere haber pasado antes por authenticateAlumnoToken.
  */
 export const requireAlumnoActivo = (req, res, next) => {
   if (!req.alumno) {

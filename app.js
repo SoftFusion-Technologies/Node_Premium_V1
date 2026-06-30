@@ -17,20 +17,20 @@ import { PORT, DB_SYNC, DB_ALTER } from './src/DataBase/config.js';
 // por responsabilidades en src/Routes/*.routes.js, orquestados desde index.js.
 import GetRoutes from './src/Routes/index.js';
 
-// Benjamin Orellana - 2026/05/10 - Importa auth JWT para usuarios internos y alumnos PREMIUM.
+// Benjamin Orellana - 2026/05/10 - Importa auth JWT para usuarios internos PREMIUM.
 import {
   loginUsuario,
-  loginAlumno,
   authenticateToken,
   requireRolGlobal,
-  requireSedeAccess,
-  requireAlumnoActivo
+  requireSedeAccess
 } from './src/Security/auth.js';
 
+// Sergio Gustavo Manrique - 2026/06/10 - Importa auth JWT exclusivo de alumnos PREMIUM.
 import {
   loginAlumno as loginAlumnoNuevo,
-  cambiarPasswordAlumno,        // ← agregar
-  authenticateAlumnoToken       // ← agregar
+  cambiarPasswordAlumno,
+  authenticateAlumnoToken,
+  requireAlumnoActivo
 } from './src/Security/authAlumno.js';
 
 // Benjamin Orellana - 2026/05/10 - Importa relaciones Sequelize del módulo Usuario.

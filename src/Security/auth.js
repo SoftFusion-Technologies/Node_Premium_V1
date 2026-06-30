@@ -1,5 +1,12 @@
 /*
- * Benjamin Orellana - 2026/05/10 - Auth JWT para usuarios internos y alumnos del sistema PREMIUM.
+ * Benjamin Orellana - 2026/05/10 - Auth JWT para usuarios internos del sistema PREMIUM.
+ *
+ * Sergio Gustavo Manrique - 2026/06/25 - Se removió toda la lógica de alumno
+ * que quedó acá (loginAlumno, authenticateAlumnoToken, requireAlumnoAuth,
+ * requireAlumnoActivo y sus helpers): era un modelo viejo que autenticaba al
+ * alumno vía usuarios_usuarios + usuario_app_id, ya reemplazado por
+ * Security/authAlumno.js, que autentica directo contra alumnos_alumnos +
+ * alumnos_login. Nada en el backend importaba esas funciones desde acá.
  */
 
 import dotenv from 'dotenv';
@@ -11,7 +18,6 @@ import UsuariosModel from '../Models/Usuario/MD_TB_Usuarios.js';
 import UsuariosRolesModel from '../Models/Usuario/MD_TB_UsuariosRoles.js';
 import UsuariosSedesModel from '../Models/Usuario/MD_TB_UsuariosSedes.js';
 import SedesModel from '../Models/Sede/MD_TB_Sedes.js';
-import AlumnosModel from '../Models/Alumno/MD_TB_Alumnos.js';
 
 if (process.env.NODE_ENV !== 'production') {
   dotenv.config();
@@ -21,19 +27,6 @@ const JWT_SECRET = process.env.JWT_SECRET || 'PREMIUM_SECRET_DESA_10_05_2026';
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '8h';
 
 const ESTADOS_USUARIO_PERMITIDOS = ['activo'];
-const ESTADOS_ALUMNO_LOGIN_PERMITIDOS = [
-  'pendiente_validacion',
-  'activo',
-  'pendiente_pago',
-  'congelado',
-  'prueba_clase_inicial'
-];
-
-const ESTADOS_ALUMNO_OPERATIVO_PERMITIDOS = [
-  'activo',
-  'pendiente_pago',
-  'prueba_clase_inicial'
-];
 
 const ROLES_INTERNOS = [
   'SUPER_ADMIN',
@@ -201,37 +194,6 @@ const construirUsuarioSeguro = async (usuario, ultimoLoginOverride = null) => {
   };
 };
 
-const construirAlumnoSeguro = async (alumno, usuario = null) => {
-  if (!alumno) return null;
-
-  const alumnoPlano =
-    typeof alumno.toJSON === 'function' ? alumno.toJSON() : alumno;
-
-  const usuarioSeguro = usuario ? await construirUsuarioSeguro(usuario) : null;
-
-  return {
-    id: alumnoPlano.id,
-    usuario_app_id: alumnoPlano.usuario_app_id,
-    sede_id: alumnoPlano.sede_id,
-    nombre: alumnoPlano.nombre,
-    apellido: alumnoPlano.apellido,
-    dni: alumnoPlano.dni,
-    fecha_nacimiento: alumnoPlano.fecha_nacimiento,
-    telefono: alumnoPlano.telefono,
-    email: alumnoPlano.email,
-    domicilio: alumnoPlano.domicilio,
-    localidad: alumnoPlano.localidad,
-    provincia: alumnoPlano.provincia,
-    fecha_inicio: alumnoPlano.fecha_inicio,
-    estado: alumnoPlano.estado,
-    ultima_asistencia: alumnoPlano.ultima_asistencia,
-    dias_sin_actividad: alumnoPlano.dias_sin_actividad,
-    created_at: alumnoPlano.created_at,
-    updated_at: alumnoPlano.updated_at,
-    usuario: usuarioSeguro
-  };
-};
-
 const construirPayloadUsuario = async (usuario) => {
   const rol = await buscarRolPorId(usuario.rol_id);
 
@@ -244,14 +206,6 @@ const construirPayloadUsuario = async (usuario) => {
     tipo_auth: 'USUARIO'
   };
 };
-
-const construirPayloadAlumno = (usuario, alumno) => ({
-  id: usuario.id,
-  usuario_id: usuario.id,
-  alumno_id: alumno.id,
-  sede_id: alumno.sede_id || null,
-  tipo_auth: 'ALUMNO'
-});
 
 const buscarUsuarioPorIdentificador = async (identificadorBase) => {
   const emailLogin = normalizarEmail(identificadorBase);
@@ -384,131 +338,6 @@ export const loginUsuario = async (req, res) => {
 };
 
 /*
- * Benjamin Orellana - 2026/05/10 - Login de alumnos PREMIUM mediante usuario_app_id.
- */
-export const loginAlumno = async (req, res) => {
-  try {
-    const { identificador, email, telefono, dni, password } = req.body;
-
-    const identificadorBase = normalizarTexto(
-      identificador || email || telefono || dni
-    );
-
-    if (!identificadorBase || !password) {
-      return res.status(400).json({
-        ok: false,
-        message: 'Debe ingresar email, teléfono o DNI y contraseña.'
-      });
-    }
-
-    let usuario = await buscarUsuarioPorIdentificador(identificadorBase);
-
-    let alumno = null;
-
-    if (usuario) {
-      alumno = await AlumnosModel.findOne({
-        where: {
-          usuario_app_id: usuario.id
-        }
-      });
-    }
-
-    if (!alumno) {
-      alumno = await AlumnosModel.findOne({
-        where: {
-          [Op.or]: [
-            { email: normalizarEmail(identificadorBase) },
-            { telefono: identificadorBase },
-            { telefono: normalizarTelefono(identificadorBase) },
-            { dni: identificadorBase }
-          ]
-        }
-      });
-
-      if (alumno?.usuario_app_id) {
-        usuario = await UsuariosModel.findByPk(alumno.usuario_app_id);
-      }
-    }
-
-    if (!usuario || !alumno) {
-      return res.status(401).json({
-        ok: false,
-        message: 'Credenciales inválidas.'
-      });
-    }
-
-    if (!ESTADOS_USUARIO_PERMITIDOS.includes(usuario.estado)) {
-      return res.status(403).json({
-        ok: false,
-        message: `El usuario del alumno se encuentra ${String(usuario.estado).toLowerCase()}.`
-      });
-    }
-
-    const rol = await buscarRolPorId(usuario.rol_id);
-
-    if (!rol || rol.codigo !== 'ALUMNO') {
-      return res.status(403).json({
-        ok: false,
-        message: 'El usuario no corresponde a un acceso de alumno.'
-      });
-    }
-
-    if (!ESTADOS_ALUMNO_LOGIN_PERMITIDOS.includes(alumno.estado)) {
-      return res.status(403).json({
-        ok: false,
-        message: `El alumno se encuentra ${String(alumno.estado).toLowerCase()}.`
-      });
-    }
-
-    const passwordValida = await validarPassword(
-      password,
-      usuario.password_hash
-    );
-
-    if (!passwordValida) {
-      return res.status(401).json({
-        ok: false,
-        message: 'Credenciales inválidas.'
-      });
-    }
-
-    const fechaUltimoLogin = new Date();
-
-    await usuario.update({
-      ultimo_login: fechaUltimoLogin
-    });
-
-    const payload = construirPayloadAlumno(usuario, alumno);
-
-    const token = jwt.sign(payload, JWT_SECRET, {
-      expiresIn: JWT_EXPIRES_IN
-    });
-
-    const alumnoRespuesta = await construirAlumnoSeguro(alumno, {
-      ...usuario.toJSON(),
-      ultimo_login: fechaUltimoLogin
-    });
-
-    return res.status(200).json({
-      ok: true,
-      message: 'Login de alumno correcto.',
-      token,
-      token_type: 'Bearer',
-      expires_in: JWT_EXPIRES_IN,
-      tipo_auth: 'ALUMNO',
-      alumno: alumnoRespuesta
-    });
-  } catch (error) {
-    console.error('Error loginAlumno PREMIUM:', error);
-
-    return res.status(500).json({
-      ok: false,
-      message: 'Error al iniciar sesión como alumno.'
-    });
-  }
-};
-
-/*
  * Benjamin Orellana - 2026/05/10 - Middleware para validar token de usuario interno.
  */
 export const authenticateToken = async (req, res, next) => {
@@ -583,102 +412,6 @@ export const authenticateToken = async (req, res, next) => {
     return res.status(500).json({
       ok: false,
       message: 'Error al validar autenticación.'
-    });
-  }
-};
-
-/*
- * Benjamin Orellana - 2026/05/10 - Middleware para validar token de alumno.
- */
-export const authenticateAlumnoToken = async (req, res, next) => {
-  try {
-    const token = obtenerTokenDesdeRequest(req);
-
-    if (!token) {
-      return res.status(401).json({
-        ok: false,
-        message: 'Token no proporcionado.'
-      });
-    }
-
-    const decoded = jwt.verify(token, JWT_SECRET);
-
-    if (decoded.tipo_auth !== 'ALUMNO') {
-      return res.status(403).json({
-        ok: false,
-        message: 'El token no corresponde a un alumno.'
-      });
-    }
-
-    const usuario = await UsuariosModel.findByPk(
-      decoded.usuario_id || decoded.id,
-      {
-        attributes: {
-          exclude: ['password_hash']
-        }
-      }
-    );
-
-    if (!usuario) {
-      return res.status(401).json({
-        ok: false,
-        message: 'Usuario del alumno no encontrado.'
-      });
-    }
-
-    if (!ESTADOS_USUARIO_PERMITIDOS.includes(usuario.estado)) {
-      return res.status(403).json({
-        ok: false,
-        message: `El usuario del alumno se encuentra ${String(usuario.estado).toLowerCase()}.`
-      });
-    }
-
-    const alumno = await AlumnosModel.findOne({
-      where: {
-        id: decoded.alumno_id,
-        usuario_app_id: usuario.id
-      }
-    });
-
-    if (!alumno) {
-      return res.status(401).json({
-        ok: false,
-        message: 'Alumno del token no encontrado.'
-      });
-    }
-
-    if (!ESTADOS_ALUMNO_LOGIN_PERMITIDOS.includes(alumno.estado)) {
-      return res.status(403).json({
-        ok: false,
-        message: `El alumno se encuentra ${String(alumno.estado).toLowerCase()}.`
-      });
-    }
-
-    req.user = await construirUsuarioSeguro(usuario);
-    req.alumno = await construirAlumnoSeguro(alumno, usuario);
-    req.authTipo = 'ALUMNO';
-
-    return next();
-  } catch (error) {
-    console.error('Error authenticateAlumnoToken PREMIUM:', error);
-
-    if (error.name === 'TokenExpiredError') {
-      return res.status(401).json({
-        ok: false,
-        message: 'Token expirado.'
-      });
-    }
-
-    if (error.name === 'JsonWebTokenError') {
-      return res.status(401).json({
-        ok: false,
-        message: 'Token inválido.'
-      });
-    }
-
-    return res.status(500).json({
-      ok: false,
-      message: 'Error al validar autenticación del alumno.'
     });
   }
 };
@@ -782,41 +515,6 @@ export const requireSedeAccess = async (req, res, next) => {
       message: 'Error al validar acceso a sede.'
     });
   }
-};
-
-/*
- * Benjamin Orellana - 2026/05/10 - Middleware para exigir alumno autenticado.
- */
-export const requireAlumnoAuth = (req, res, next) => {
-  if (!req.alumno) {
-    return res.status(401).json({
-      ok: false,
-      message: 'Alumno no autenticado.'
-    });
-  }
-
-  return next();
-};
-
-/*
- * Benjamin Orellana - 2026/05/10 - Middleware para exigir alumno operativo.
- */
-export const requireAlumnoActivo = (req, res, next) => {
-  if (!req.alumno) {
-    return res.status(401).json({
-      ok: false,
-      message: 'Alumno no autenticado.'
-    });
-  }
-
-  if (!ESTADOS_ALUMNO_OPERATIVO_PERMITIDOS.includes(req.alumno.estado)) {
-    return res.status(403).json({
-      ok: false,
-      message: 'El alumno no se encuentra habilitado para realizar esta acción.'
-    });
-  }
-
-  return next();
 };
 
 /*

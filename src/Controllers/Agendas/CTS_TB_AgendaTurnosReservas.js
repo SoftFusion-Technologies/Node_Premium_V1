@@ -7,7 +7,9 @@
  * Este archivo (CTS_TB_AgendaTurnosReservas.js) contiene los controladores
  * para gestionar las reservas de turnos (agenda_turnos_reservas).
  * Incluye inscripción de alumnos, cancelación con tiempo límite,
- * reprogramación y marcado de asistencia.
+ * reprogramación y marcado de asistencia. Al inscribir se crea
+ * automáticamente el registro de asistencia en estado 'asistio';
+ * al cancelar/anular la inscripción, ese registro se elimina.
  *
  * Tema: Controladores - Agenda
  * Capa: Backend
@@ -20,6 +22,7 @@ import AgendaTurnosReservasModel      from '../../Models/Agenda/MD_TB_AgendaTurn
 import AgendaTurnosListaEsperaModel   from '../../Models/Agenda/MD_TB_AgendaTurnosListaEspera.js';
 import AlumnosModel                   from '../../Models/Alumno/MD_TB_Alumnos.js';
 import AlumnosMembresiasModel         from '../../Models/Alumno/MD_TB_AlumnosMembresias.js';
+import AlumnosAsistenciasModel        from '../../Models/Alumno/MD_TB_AlumnosAsistencias.js';
 import SistemaConfiguracionModel      from '../../Models/Sistema/MD_TB_SistemaConfiguracion.js';
 import SedesModel                     from '../../Models/Sede/MD_TB_Sedes.js';
 import db                             from '../../DataBase/db.js';
@@ -38,6 +41,33 @@ const obtenerMinutosCancelacion = async () => {
 };
 
 /*
+ * Crea el registro de asistencia en estado 'asistio' (presente por defecto)
+ * para una reserva recién confirmada. El instructor podrá cambiarlo luego.
+ */
+const crearAsistenciaPorReserva = async (turno, reserva, transaccion) => {
+  await AlumnosAsistenciasModel.create({
+    alumno_id:    reserva.alumno_id,
+    sede_id:      turno.sede_id,
+    turno_id:     turno.id,
+    reserva_id:   reserva.id,
+    membresia_id: reserva.membresia_id || null,
+    fecha:        turno.fecha,
+    estado:       'asistio'
+  }, { transaction: transaccion });
+};
+
+/*
+ * Elimina el registro de asistencia asociado a una reserva cancelada.
+ * Al anular la inscripción, es como si la asistencia nunca hubiese existido.
+ */
+const eliminarAsistenciaPorReserva = async (reserva_id, transaccion) => {
+  await AlumnosAsistenciasModel.destroy({
+    where:       { reserva_id },
+    transaction: transaccion
+  });
+};
+
+/*
  * Promueve al primer alumno en lista de espera de un turno
  * cuando se libera un cupo (cancelación o reprogramación).
  * Si el alumno tiene membresía activa con créditos, los descuenta.
@@ -49,6 +79,9 @@ const promoverListaEspera = async (turno_id) => {
   });
 
   if (!primero) return;
+
+  const turno = await AgendaTurnosModel.findByPk(turno_id);
+  if (!turno) return;
 
   // Intentar encontrar membresía activa con créditos para el alumno promovido
   const hoy = dayjs().format('YYYY-MM-DD');
@@ -63,7 +96,7 @@ const promoverListaEspera = async (turno_id) => {
   });
 
   // Crear reserva para el primero de la lista
-  await AgendaTurnosReservasModel.create({
+  const reserva = await AgendaTurnosReservasModel.create({
     turno_id,
     alumno_id:      primero.alumno_id,
     membresia_id:   membresia?.id ?? null,
@@ -71,6 +104,9 @@ const promoverListaEspera = async (turno_id) => {
     estado:         'reservada',
     fecha_reserva:  new Date()
   });
+
+  // Crear asistencia en estado 'asistio' por defecto para la nueva reserva
+  await crearAsistenciaPorReserva(turno, reserva, null);
 
   // Descontar crédito si tiene membresía activa
   if (membresia) {
@@ -181,6 +217,9 @@ export const CR_ReservaAdmin_CTS = async (req, res) => {
       observaciones:  observaciones  || null
     }, { transaction: transaccion });
 
+    // Crear asistencia en estado 'asistio' por defecto para la nueva reserva
+    await crearAsistenciaPorReserva(turno, reserva, transaccion);
+
     // Actualizar contador de cupos
     await turno.update({
       cupos_reservados: turno.cupos_reservados + 1,
@@ -255,6 +294,9 @@ export const ER_ReservaAdmin_CTS = async (req, res) => {
       motivo_cancelacion: motivo_cancelacion || null,
       updated_at:         new Date()
     }, { transaction: transaccion });
+
+    // Eliminar el registro de asistencia: la inscripción fue anulada
+    await eliminarAsistenciaPorReserva(reserva.id, transaccion);
 
     // Liberar cupo en el turno
     const turno = await AgendaTurnosModel.findByPk(reserva.turno_id, { transaction: transaccion });
@@ -474,6 +516,9 @@ export const CR_MiReserva_CTS = async (req, res) => {
       fecha_reserva:  new Date()
     }, { transaction: transaccion });
 
+    // Crear asistencia en estado 'asistio' por defecto para la nueva reserva
+    await crearAsistenciaPorReserva(turno, reserva, transaccion);
+
     // Actualizar contador de cupos
     await turno.update({
       cupos_reservados: turno.cupos_reservados + 1,
@@ -534,6 +579,9 @@ export const ER_MiReserva_CTS = async (req, res) => {
       fecha_cancelacion: new Date(),
       updated_at:        new Date()
     }, { transaction: transaccion });
+
+    // Eliminar el registro de asistencia: la inscripción fue anulada
+    await eliminarAsistenciaPorReserva(reserva.id, transaccion);
 
     // Liberar cupo
     await turno.update({
@@ -649,6 +697,9 @@ export const UR_ReprogramarMiReserva_CTS = async (req, res) => {
       updated_at:        new Date()
     }, { transaction: transaccion });
 
+    // Eliminar la asistencia de la reserva original: se traslada al turno destino
+    await eliminarAsistenciaPorReserva(reserva.id, transaccion);
+
     await turnoOrigen.update({
       cupos_reservados: Math.max(0, turnoOrigen.cupos_reservados - 1),
       estado:           'disponible',
@@ -665,6 +716,9 @@ export const UR_ReprogramarMiReserva_CTS = async (req, res) => {
       fecha_reserva:  new Date(),
       observaciones:  `Reprogramada desde turno #${turnoOrigen.id}`
     }, { transaction: transaccion });
+
+    // Crear asistencia en estado 'asistio' por defecto para la nueva reserva
+    await crearAsistenciaPorReserva(turnoDestino, nuevaReserva, transaccion);
 
     await turnoDestino.update({
       cupos_reservados: turnoDestino.cupos_reservados + 1,

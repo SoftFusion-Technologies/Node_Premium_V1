@@ -91,6 +91,7 @@ import {
 
 import {
   OBR_VencimientosAlumnoPlanesPagos_CTS,
+  CR_GenerarMembresiaAlumnoPlanesPagos_CTS,
   CR_MarcarDeudaAlumnoPlanesPagos_CTS,
   CR_AgregarBonificacionAlumnoPlanesPagos_CTS,
   UR_CongelarMembresiaAlumnoPlanesPagos_CTS,
@@ -734,6 +735,13 @@ router.get(
   '/alumnos/:alumno_id/vencimientos',
   authenticateToken,
   OBR_VencimientosAlumnoPlanesPagos_CTS
+);
+
+// Benjamin Orellana - 2026/06/30 - Genera membresía administrativa con mensualidad pendiente desde ficha del alumno.
+router.post(
+  '/alumnos/:alumno_id/generar-membresia',
+  authenticateToken,
+  CR_GenerarMembresiaAlumnoPlanesPagos_CTS
 );
 
 // Benjamin Orellana - 2026/06/15 - Marca deuda manual desde ficha del alumno.

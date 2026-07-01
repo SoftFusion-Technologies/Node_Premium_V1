@@ -2,7 +2,7 @@
  * Benjamin Orellana - 2026/05/29 - Controlador Sequelize para gestión de planes PREMIUM.
  */
 
-import { Op } from 'sequelize';
+import { Op, QueryTypes } from 'sequelize';
 import db from '../../DataBase/db.js';
 import PlanesModel from '../../Models/Plan/MD_TB_Planes.js';
 // Benjamin Orellana - 2026/05/30 - Importa precios de planes para eliminarlos junto al plan.
@@ -308,6 +308,405 @@ export const OBR_PlanesPublicos_CTS = async (req, res) => {
       res,
       500,
       'Error interno al obtener los planes públicos.'
+    );
+  }
+};
+
+// Benjamin Orellana - 2026/07/01 - Lista alumnos asignados a un plan con vencimiento, cupos, deuda y resumen operativo.
+export const OBR_AlumnosAsignadosPlan_CTS = async (req, res) => {
+  try {
+    const { plan_id } = req.params;
+    const {
+      page = '1',
+      limit = '20',
+      q,
+      sede_id,
+      estado,
+      estado_mensualidad,
+      vigencia = 'todas',
+      order_by = 'fecha_vencimiento',
+      order_direction = 'ASC'
+    } = req.query;
+
+    const planId = toNumberOrNull(plan_id);
+
+    if (!planId) {
+      return responderError(
+        res,
+        400,
+        'El parámetro plan_id debe ser un número válido.'
+      );
+    }
+
+    const plan = await PlanesModel.findByPk(planId, {
+      attributes: [
+        'id',
+        'nombre',
+        'codigo',
+        'clases_por_mes',
+        'cantidad_clases_periodo',
+        'periodo',
+        'duracion_dias',
+        'activo'
+      ]
+    });
+
+    if (!plan) {
+      return responderError(res, 404, 'No se encontró el plan solicitado.');
+    }
+
+    const pageNumber = Math.max(parseInt(page, 10) || 1, 1);
+    const limitNumber = Math.min(Math.max(parseInt(limit, 10) || 20, 1), 100);
+    const offsetNumber = (pageNumber - 1) * limitNumber;
+
+    const estadosMembresiaValidos = [
+      'pendiente_pago',
+      'activa',
+      'vencida',
+      'cancelada',
+      'congelada'
+    ];
+    const estadosMensualidadValidos = [
+      'pendiente',
+      'parcial',
+      'pagada',
+      'vencida',
+      'anulada'
+    ];
+    const vigenciasValidas = ['todas', 'actuales', 'futuras', 'vencidas'];
+
+    if (estado && !estadosMembresiaValidos.includes(String(estado))) {
+      return responderError(
+        res,
+        400,
+        `El filtro estado debe ser uno de los siguientes valores: ${estadosMembresiaValidos.join(', ')}.`
+      );
+    }
+
+    if (
+      estado_mensualidad &&
+      !estadosMensualidadValidos.includes(String(estado_mensualidad))
+    ) {
+      return responderError(
+        res,
+        400,
+        `El filtro estado_mensualidad debe ser uno de los siguientes valores: ${estadosMensualidadValidos.join(', ')}.`
+      );
+    }
+
+    if (!vigenciasValidas.includes(String(vigencia))) {
+      return responderError(
+        res,
+        400,
+        `El filtro vigencia debe ser uno de los siguientes valores: ${vigenciasValidas.join(', ')}.`
+      );
+    }
+
+    const sedeId = toNumberOrNull(sede_id);
+
+    if (sede_id !== undefined && sede_id !== '' && !sedeId) {
+      return responderError(
+        res,
+        400,
+        'El parámetro sede_id debe ser un número válido.'
+      );
+    }
+
+    const replacements = {
+      planId,
+      limit: limitNumber,
+      offset: offsetNumber
+    };
+    const filtros = ['m.plan_id = :planId'];
+
+    if (sedeId) {
+      filtros.push('m.sede_id = :sedeId');
+      replacements.sedeId = sedeId;
+    }
+
+    if (estado) {
+      filtros.push('m.estado = :estado');
+      replacements.estado = String(estado);
+    }
+
+    if (estado_mensualidad) {
+      filtros.push('pm.estado = :estadoMensualidad');
+      replacements.estadoMensualidad = String(estado_mensualidad);
+    }
+
+    if (q && String(q).trim() !== '') {
+      filtros.push(`(
+        a.nombre LIKE :q
+        OR a.apellido LIKE :q
+        OR CONCAT(a.nombre, ' ', a.apellido) LIKE :q
+        OR a.dni LIKE :q
+        OR a.telefono LIKE :q
+        OR a.email LIKE :q
+      )`);
+      replacements.q = `%${String(q).trim()}%`;
+    }
+
+    if (vigencia === 'actuales') {
+      filtros.push('CURDATE() BETWEEN m.fecha_inicio AND m.fecha_vencimiento');
+    }
+
+    if (vigencia === 'futuras') {
+      filtros.push('m.fecha_inicio > CURDATE()');
+    }
+
+    if (vigencia === 'vencidas') {
+      filtros.push('m.fecha_vencimiento < CURDATE()');
+    }
+
+    const whereSql = filtros.join('\n      AND ');
+
+    const camposOrdenValidos = {
+      alumno: 'alumno',
+      sede: 'sede_nombre',
+      estado: 'm.estado',
+      fecha_inicio: 'm.fecha_inicio',
+      fecha_vencimiento: 'm.fecha_vencimiento',
+      dias_para_vencer: 'dias_para_vencer',
+      clases_disponibles: 'm.clases_disponibles',
+      saldo: 'saldo_mensualidad',
+      created_at: 'm.created_at'
+    };
+    const campoOrden = camposOrdenValidos[order_by] || 'm.fecha_vencimiento';
+    const direccionOrden =
+      String(order_direction).toUpperCase() === 'DESC' ? 'DESC' : 'ASC';
+
+    // Benjamin Orellana - 2026/07/01 - Obtiene la última mensualidad asociada a cada membresía para mostrar deuda y estado de cobro.
+    const joinUltimaMensualidad = `
+      LEFT JOIN pagos_mensualidades pm
+        ON pm.id = (
+          SELECT pm2.id
+          FROM pagos_mensualidades pm2
+          WHERE pm2.membresia_id = m.id
+            AND pm2.alumno_id = m.alumno_id
+          ORDER BY pm2.periodo_desde DESC, pm2.id DESC
+          LIMIT 1
+        )
+    `;
+
+    const countRows = await db.query(
+      `
+        SELECT COUNT(*) AS total
+        FROM alumnos_membresias m
+        INNER JOIN alumnos_alumnos a
+          ON a.id = m.alumno_id
+        LEFT JOIN sedes_sedes s
+          ON s.id = m.sede_id
+        ${joinUltimaMensualidad}
+        WHERE ${whereSql}
+      `,
+      {
+        replacements,
+        type: QueryTypes.SELECT
+      }
+    );
+
+    const resumenRows = await db.query(
+      `
+        SELECT
+          COUNT(*) AS total_asignados,
+          SUM(CASE WHEN m.estado = 'activa' THEN 1 ELSE 0 END) AS activos,
+          SUM(CASE WHEN m.estado = 'pendiente_pago' THEN 1 ELSE 0 END) AS pendientes_pago,
+          SUM(CASE WHEN m.estado = 'vencida' THEN 1 ELSE 0 END) AS vencidos,
+          SUM(CASE WHEN m.estado = 'congelada' THEN 1 ELSE 0 END) AS congelados,
+          SUM(CASE WHEN m.estado = 'cancelada' THEN 1 ELSE 0 END) AS cancelados,
+          SUM(CASE WHEN m.fecha_inicio > CURDATE() THEN 1 ELSE 0 END) AS futuras,
+          SUM(CASE WHEN CURDATE() BETWEEN m.fecha_inicio AND m.fecha_vencimiento THEN 1 ELSE 0 END) AS vigentes_fecha,
+          SUM(CASE WHEN m.fecha_vencimiento < CURDATE() THEN 1 ELSE 0 END) AS vencidas_fecha,
+          SUM(CASE WHEN DATEDIFF(m.fecha_vencimiento, CURDATE()) BETWEEN 0 AND 7 THEN 1 ELSE 0 END) AS vencen_7_dias,
+          COALESCE(SUM(m.clases_incluidas), 0) AS clases_totales,
+          COALESCE(SUM(m.clases_usadas), 0) AS clases_usadas,
+          COALESCE(SUM(m.clases_disponibles), 0) AS clases_disponibles,
+          COALESCE(SUM(m.precio_final), 0) AS importe_total_membresias,
+          COALESCE(SUM(pm.saldo), 0) AS deuda_total,
+          COALESCE(SUM(CASE WHEN pm.estado = 'pagada' THEN pm.monto_pagado ELSE 0 END), 0) AS total_pagado,
+          SUM(CASE WHEN pm.estado = 'pendiente' THEN 1 ELSE 0 END) AS mensualidades_pendientes,
+          SUM(CASE WHEN pm.estado = 'pagada' THEN 1 ELSE 0 END) AS mensualidades_pagadas
+        FROM alumnos_membresias m
+        INNER JOIN alumnos_alumnos a
+          ON a.id = m.alumno_id
+        LEFT JOIN sedes_sedes s
+          ON s.id = m.sede_id
+        ${joinUltimaMensualidad}
+        WHERE ${whereSql}
+      `,
+      {
+        replacements,
+        type: QueryTypes.SELECT
+      }
+    );
+
+    const dataRows = await db.query(
+      `
+        SELECT
+          m.id AS membresia_id,
+          m.alumno_id,
+          CONCAT(a.nombre, ' ', a.apellido) AS alumno,
+          a.nombre AS alumno_nombre,
+          a.apellido AS alumno_apellido,
+          a.dni,
+          a.telefono,
+          a.email,
+          a.estado AS estado_alumno,
+          a.ultima_asistencia,
+          m.sede_id,
+          s.nombre AS sede_nombre,
+          s.codigo AS sede_codigo,
+          m.estado AS estado_membresia,
+          m.fecha_inicio,
+          m.fecha_vencimiento,
+          DATEDIFF(m.fecha_vencimiento, CURDATE()) AS dias_para_vencer,
+          CASE
+            WHEN m.fecha_inicio > CURDATE() THEN 'futura'
+            WHEN CURDATE() BETWEEN m.fecha_inicio AND m.fecha_vencimiento THEN 'vigente'
+            WHEN m.fecha_vencimiento < CURDATE() THEN 'vencida'
+            ELSE 'sin_estado_fecha'
+          END AS estado_vigencia,
+          m.precio_lista,
+          m.descuento_valor,
+          m.descuento_porcentaje,
+          m.precio_final,
+          m.clases_incluidas,
+          m.clases_usadas,
+          m.clases_disponibles,
+          m.origen_alta,
+          m.created_at AS membresia_created_at,
+          m.updated_at AS membresia_updated_at,
+          pm.id AS mensualidad_id,
+          pm.periodo_anio,
+          pm.periodo_mes,
+          pm.periodo_desde,
+          pm.periodo_hasta,
+          pm.fecha_vencimiento AS mensualidad_vencimiento,
+          pm.estado AS estado_mensualidad,
+          COALESCE(pm.monto_total, 0) AS monto_total_mensualidad,
+          COALESCE(pm.monto_pagado, 0) AS monto_pagado_mensualidad,
+          COALESCE(pm.saldo, 0) AS saldo_mensualidad
+        FROM alumnos_membresias m
+        INNER JOIN alumnos_alumnos a
+          ON a.id = m.alumno_id
+        LEFT JOIN sedes_sedes s
+          ON s.id = m.sede_id
+        ${joinUltimaMensualidad}
+        WHERE ${whereSql}
+        ORDER BY ${campoOrden} ${direccionOrden}, m.id DESC
+        LIMIT :limit OFFSET :offset
+      `,
+      {
+        replacements,
+        type: QueryTypes.SELECT
+      }
+    );
+
+    const total = Number(countRows?.[0]?.total || 0);
+    const resumenBase = resumenRows?.[0] || {};
+    const resumen = {
+      total_asignados: Number(resumenBase.total_asignados || 0),
+      activos: Number(resumenBase.activos || 0),
+      pendientes_pago: Number(resumenBase.pendientes_pago || 0),
+      vencidos: Number(resumenBase.vencidos || 0),
+      congelados: Number(resumenBase.congelados || 0),
+      cancelados: Number(resumenBase.cancelados || 0),
+      futuras: Number(resumenBase.futuras || 0),
+      vigentes_fecha: Number(resumenBase.vigentes_fecha || 0),
+      vencidas_fecha: Number(resumenBase.vencidas_fecha || 0),
+      vencen_7_dias: Number(resumenBase.vencen_7_dias || 0),
+      clases_totales: Number(resumenBase.clases_totales || 0),
+      clases_usadas: Number(resumenBase.clases_usadas || 0),
+      clases_disponibles: Number(resumenBase.clases_disponibles || 0),
+      importe_total_membresias: Number(
+        resumenBase.importe_total_membresias || 0
+      ),
+      deuda_total: Number(resumenBase.deuda_total || 0),
+      total_pagado: Number(resumenBase.total_pagado || 0),
+      mensualidades_pendientes: Number(
+        resumenBase.mensualidades_pendientes || 0
+      ),
+      mensualidades_pagadas: Number(resumenBase.mensualidades_pagadas || 0)
+    };
+
+    const data = dataRows.map((row) => ({
+      membresia_id: Number(row.membresia_id),
+      alumno_id: Number(row.alumno_id),
+      alumno: row.alumno,
+      alumno_nombre: row.alumno_nombre,
+      alumno_apellido: row.alumno_apellido,
+      dni: row.dni,
+      telefono: row.telefono,
+      email: row.email,
+      estado_alumno: row.estado_alumno,
+      ultima_asistencia: row.ultima_asistencia,
+      sede: {
+        id: row.sede_id ? Number(row.sede_id) : null,
+        nombre: row.sede_nombre,
+        codigo: row.sede_codigo
+      },
+      estado_membresia: row.estado_membresia,
+      fecha_inicio: row.fecha_inicio,
+      fecha_vencimiento: row.fecha_vencimiento,
+      dias_para_vencer:
+        row.dias_para_vencer !== null && row.dias_para_vencer !== undefined
+          ? Number(row.dias_para_vencer)
+          : null,
+      estado_vigencia: row.estado_vigencia,
+      precio_lista: Number(row.precio_lista || 0),
+      descuento_valor: Number(row.descuento_valor || 0),
+      descuento_porcentaje: Number(row.descuento_porcentaje || 0),
+      precio_final: Number(row.precio_final || 0),
+      clases_incluidas: Number(row.clases_incluidas || 0),
+      clases_usadas: Number(row.clases_usadas || 0),
+      clases_disponibles: Number(row.clases_disponibles || 0),
+      origen_alta: row.origen_alta,
+      mensualidad: row.mensualidad_id
+        ? {
+            id: Number(row.mensualidad_id),
+            periodo_anio: Number(row.periodo_anio),
+            periodo_mes:
+              row.periodo_mes !== null && row.periodo_mes !== undefined
+                ? Number(row.periodo_mes)
+                : null,
+            periodo_desde: row.periodo_desde,
+            periodo_hasta: row.periodo_hasta,
+            fecha_vencimiento: row.mensualidad_vencimiento,
+            estado: row.estado_mensualidad,
+            monto_total: Number(row.monto_total_mensualidad || 0),
+            monto_pagado: Number(row.monto_pagado_mensualidad || 0),
+            saldo: Number(row.saldo_mensualidad || 0)
+          }
+        : null,
+      created_at: row.membresia_created_at,
+      updated_at: row.membresia_updated_at
+    }));
+
+    return res.status(200).json({
+      ok: true,
+      message: 'Alumnos asignados al plan obtenidos correctamente.',
+      plan,
+      resumen,
+      total,
+      page: pageNumber,
+      limit: limitNumber,
+      total_pages: Math.ceil(total / limitNumber),
+      filtros: {
+        q: q || null,
+        sede_id: sedeId || null,
+        estado: estado || null,
+        estado_mensualidad: estado_mensualidad || null,
+        vigencia
+      },
+      data
+    });
+  } catch (error) {
+    console.error('Error en OBR_AlumnosAsignadosPlan_CTS:', error);
+
+    return responderError(
+      res,
+      500,
+      'Error interno al obtener los alumnos asignados al plan.'
     );
   }
 };
@@ -676,8 +1075,8 @@ export const ER_Planes_CTS = async (req, res) => {
  */
 export const OBR_PlanesConPrecios_CTS = async (req, res) => {
   try {
-    const { sede_id, fecha_consulta = obtenerFechaActualDateOnly() } = req.query;
-
+    const { sede_id, fecha_consulta = obtenerFechaActualDateOnly() } =
+      req.query;
 
     // CASO 1: Sin sede_id - devuelve TODOS los planes activos
     if (!sede_id) {
@@ -719,15 +1118,22 @@ export const OBR_PlanesConPrecios_CTS = async (req, res) => {
             sede_id: sedeIdNum,
             activo: 1,
             fecha_desde: {
-              [Op.lte]: fecha_consulta  // fecha_desde <= fecha_consulta
+              [Op.lte]: fecha_consulta // fecha_desde <= fecha_consulta
             },
             [Op.or]: [
-              { fecha_hasta: null },  // Sin fecha fin (vigente indefinidamente)
-              { fecha_hasta: { [Op.gte]: fecha_consulta } }  // O fecha_hasta >= fecha_consulta
+              { fecha_hasta: null }, // Sin fecha fin (vigente indefinidamente)
+              { fecha_hasta: { [Op.gte]: fecha_consulta } } // O fecha_hasta >= fecha_consulta
             ]
           },
-          attributes: ['id', 'precio', 'moneda', 'fecha_desde', 'fecha_hasta', 'activo'],
-          required: true  // INNER JOIN - solo planes con precio vigente
+          attributes: [
+            'id',
+            'precio',
+            'moneda',
+            'fecha_desde',
+            'fecha_hasta',
+            'activo'
+          ],
+          required: true // INNER JOIN - solo planes con precio vigente
         }
       ],
       order: [['id', 'ASC']]

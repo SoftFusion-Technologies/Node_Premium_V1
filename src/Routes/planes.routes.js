@@ -20,6 +20,7 @@ import { authenticateToken } from '../Security/auth.js';
 import {
   OBR_Planes_CTS,
   OBR_PlanPorId_CTS,
+  OBR_AlumnosAsignadosPlan_CTS,
   OBR_PlanesPublicos_CTS,
   OBR_PlanesConPrecios_CTS,
   CR_Planes_CTS,
@@ -51,6 +52,13 @@ const router = express.Router();
  */
 
 router.get('/planes', authenticateToken, OBR_Planes_CTS);
+
+// Benjamin Orellana - 2026/07/01 - Lista alumnos asignados a un plan desde el módulo Planes.
+router.get(
+  '/planes/:plan_id/alumnos-asignados',
+  authenticateToken,
+  OBR_AlumnosAsignadosPlan_CTS
+);
 
 router.get('/planes/:id', authenticateToken, OBR_PlanPorId_CTS);
 

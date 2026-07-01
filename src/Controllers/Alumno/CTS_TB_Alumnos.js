@@ -2,7 +2,7 @@
  * Benjamin Orellana - 2026/05/26 - Controlador Sequelize para la gestión principal de alumnos PREMIUM.
  */
 
-import { Op } from 'sequelize';
+import { Op, QueryTypes } from 'sequelize';
 
 import db from '../../DataBase/db.js';
 
@@ -1951,16 +1951,19 @@ export const UR_HabilitarAccesoAlumno_CTS = async (req, res) => {
     });
   }
 };
-
 /*
- * Benjamin Orellana - 2026/05/26 - Marca alumno como inactivo sin eliminarlo físicamente.
+ * Benjamin Orellana - 2026/06/30 - Elimina físicamente un alumno y sus relaciones conocidas en orden controlado.
  */
 export const DR_Alumnos_CTS = async (req, res) => {
+  const transaction = await db.transaction();
+
   try {
     if (!validarRolOperacionAlumnos(req.user)) {
+      await transaction.rollback();
+
       return res.status(403).json({
         ok: false,
-        message: 'No tiene permisos para desactivar alumnos.'
+        message: 'No tiene permisos para eliminar alumnos.'
       });
     }
 
@@ -1969,27 +1972,496 @@ export const DR_Alumnos_CTS = async (req, res) => {
     const result = await buscarAlumnoPorIdConPermiso(id, req.user);
 
     if (!result.ok) {
+      await transaction.rollback();
+
       return res.status(result.status).json({
         ok: false,
         message: result.message
       });
     }
 
-    await result.alumno.update({ estado: 'inactivo' });
+    const alumno = result.alumno;
+    const alumnoPlano =
+      typeof alumno.toJSON === 'function' ? alumno.toJSON() : alumno;
 
-    const data = await construirAlumnoRespuesta(result.alumno);
+    const alumnoId = Number(alumnoPlano.id);
+
+    /*
+     * Limpieza preventiva por si el mismo connection pool reutilizó
+     * una conexión donde una ejecución anterior falló antes de dropear temporales.
+     */
+    await db.query('DROP TEMPORARY TABLE IF EXISTS tmp_delete_alumno_membresias', {
+      transaction
+    });
+    await db.query('DROP TEMPORARY TABLE IF EXISTS tmp_delete_alumno_mensualidades', {
+      transaction
+    });
+    await db.query('DROP TEMPORARY TABLE IF EXISTS tmp_delete_alumno_pagos', {
+      transaction
+    });
+    await db.query('DROP TEMPORARY TABLE IF EXISTS tmp_delete_alumno_anamnesis', {
+      transaction
+    });
+    await db.query('DROP TEMPORARY TABLE IF EXISTS tmp_delete_alumno_reservas', {
+      transaction
+    });
+
+    /*
+     * 1) Se congelan los IDs dependientes antes de borrar.
+     */
+    await db.query(
+      `
+        CREATE TEMPORARY TABLE tmp_delete_alumno_membresias AS
+        SELECT id
+        FROM alumnos_membresias
+        WHERE alumno_id = :alumnoId
+      `,
+      {
+        replacements: { alumnoId },
+        transaction
+      }
+    );
+
+    await db.query(
+      `
+        CREATE TEMPORARY TABLE tmp_delete_alumno_mensualidades AS
+        SELECT DISTINCT pm.id
+        FROM pagos_mensualidades pm
+        LEFT JOIN tmp_delete_alumno_membresias tam
+          ON tam.id = pm.membresia_id
+        WHERE pm.alumno_id = :alumnoId
+           OR tam.id IS NOT NULL
+      `,
+      {
+        replacements: { alumnoId },
+        transaction
+      }
+    );
+
+    await db.query(
+      `
+        CREATE TEMPORARY TABLE tmp_delete_alumno_pagos AS
+        SELECT DISTINCT pp.id
+        FROM pagos_pagos pp
+        LEFT JOIN tmp_delete_alumno_mensualidades tm
+          ON tm.id = pp.mensualidad_id
+        WHERE pp.alumno_id = :alumnoId
+           OR tm.id IS NOT NULL
+      `,
+      {
+        replacements: { alumnoId },
+        transaction
+      }
+    );
+
+    await db.query(
+      `
+        CREATE TEMPORARY TABLE tmp_delete_alumno_anamnesis AS
+        SELECT id
+        FROM alumnos_anamnesis
+        WHERE alumno_id = :alumnoId
+      `,
+      {
+        replacements: { alumnoId },
+        transaction
+      }
+    );
+
+    await db.query(
+      `
+        CREATE TEMPORARY TABLE tmp_delete_alumno_reservas AS
+        SELECT DISTINCT atr.id
+        FROM agenda_turnos_reservas atr
+        LEFT JOIN tmp_delete_alumno_membresias tam
+          ON tam.id = atr.membresia_id
+        WHERE atr.alumno_id = :alumnoId
+           OR tam.id IS NOT NULL
+      `,
+      {
+        replacements: { alumnoId },
+        transaction
+      }
+    );
+
+    /*
+     * 2) Diagnóstico previo: esto se devuelve al front para saber qué se borró.
+     */
+    const relacionesRows = await db.query(
+      `
+        SELECT 'arca_comprobantes' AS tabla, COUNT(DISTINCT ac.id) AS cantidad
+        FROM arca_comprobantes ac
+        LEFT JOIN tmp_delete_alumno_pagos tp
+          ON tp.id = ac.pago_id
+        WHERE ac.alumno_id = :alumnoId
+           OR tp.id IS NOT NULL
+
+        UNION ALL
+
+        SELECT 'finanzas_movimientos' AS tabla, COUNT(DISTINCT fm.id) AS cantidad
+        FROM finanzas_movimientos fm
+        INNER JOIN tmp_delete_alumno_pagos tp
+          ON tp.id = fm.pago_id
+
+        UNION ALL
+
+        SELECT 'pagos_pagos' AS tabla, COUNT(*) AS cantidad
+        FROM tmp_delete_alumno_pagos
+
+        UNION ALL
+
+        SELECT 'pagos_mensualidades' AS tabla, COUNT(*) AS cantidad
+        FROM tmp_delete_alumno_mensualidades
+
+        UNION ALL
+
+        SELECT 'alumnos_asistencias' AS tabla, COUNT(DISTINCT aa.id) AS cantidad
+        FROM alumnos_asistencias aa
+        LEFT JOIN tmp_delete_alumno_membresias tam
+          ON tam.id = aa.membresia_id
+        LEFT JOIN tmp_delete_alumno_reservas tr
+          ON tr.id = aa.reserva_id
+        WHERE aa.alumno_id = :alumnoId
+           OR tam.id IS NOT NULL
+           OR tr.id IS NOT NULL
+
+        UNION ALL
+
+        SELECT 'agenda_turnos_reservas' AS tabla, COUNT(*) AS cantidad
+        FROM tmp_delete_alumno_reservas
+
+        UNION ALL
+
+        SELECT 'alumnos_anamnesis_historial' AS tabla, COUNT(DISTINCT aah.id) AS cantidad
+        FROM alumnos_anamnesis_historial aah
+        LEFT JOIN tmp_delete_alumno_anamnesis taa
+          ON taa.id = aah.anamnesis_id
+        WHERE aah.alumno_id = :alumnoId
+           OR taa.id IS NOT NULL
+
+        UNION ALL
+
+        SELECT 'alumnos_anamnesis' AS tabla, COUNT(*) AS cantidad
+        FROM tmp_delete_alumno_anamnesis
+
+        UNION ALL
+
+        SELECT 'agenda_turnos_lista_espera' AS tabla, COUNT(*) AS cantidad
+        FROM agenda_turnos_lista_espera
+        WHERE alumno_id = :alumnoId
+
+        UNION ALL
+
+        SELECT 'pagos_metodos_recurrentes' AS tabla, COUNT(*) AS cantidad
+        FROM pagos_metodos_recurrentes
+        WHERE alumno_id = :alumnoId
+
+        UNION ALL
+
+        SELECT 'sistema_alertas' AS tabla, COUNT(*) AS cantidad
+        FROM sistema_alertas
+        WHERE alumno_id = :alumnoId
+
+        UNION ALL
+
+        SELECT 'alumnos_contactos_emergencia' AS tabla, COUNT(*) AS cantidad
+        FROM alumnos_contactos_emergencia
+        WHERE alumno_id = :alumnoId
+
+        UNION ALL
+
+        SELECT 'alumnos_usuarios' AS tabla, COUNT(*) AS cantidad
+        FROM alumnos_usuarios
+        WHERE alumno_id = :alumnoId
+
+        UNION ALL
+
+        SELECT 'alumnos_login' AS tabla, COUNT(*) AS cantidad
+        FROM alumnos_login
+        WHERE alumno_id = :alumnoId
+
+        UNION ALL
+
+        SELECT 'alumnos_membresias' AS tabla, COUNT(*) AS cantidad
+        FROM tmp_delete_alumno_membresias
+
+        UNION ALL
+
+        SELECT 'alumnos_alumnos' AS tabla, COUNT(*) AS cantidad
+        FROM alumnos_alumnos
+        WHERE id = :alumnoId
+      `,
+      {
+        replacements: { alumnoId },
+        type: QueryTypes.SELECT,
+        transaction
+      }
+    );
+
+    const relacionesDetectadas = relacionesRows.reduce((acc, row) => {
+      acc[row.tabla] = Number(row.cantidad || 0);
+      return acc;
+    }, {});
+
+    const relacionesConDatos = relacionesRows
+      .filter((row) => Number(row.cantidad || 0) > 0)
+      .map((row) => ({
+        tabla: row.tabla,
+        cantidad: Number(row.cantidad || 0)
+      }));
+
+    /*
+     * 3) Borrado explícito en orden correcto.
+     * Primero hijos más profundos, después padres.
+     */
+
+    await db.query(
+      `
+        DELETE ac
+        FROM arca_comprobantes ac
+        LEFT JOIN tmp_delete_alumno_pagos tp
+          ON tp.id = ac.pago_id
+        WHERE ac.alumno_id = :alumnoId
+           OR tp.id IS NOT NULL
+      `,
+      {
+        replacements: { alumnoId },
+        transaction
+      }
+    );
+
+    await db.query(
+      `
+        DELETE fm
+        FROM finanzas_movimientos fm
+        INNER JOIN tmp_delete_alumno_pagos tp
+          ON tp.id = fm.pago_id
+      `,
+      { transaction }
+    );
+
+    await db.query(
+      `
+        DELETE pp
+        FROM pagos_pagos pp
+        INNER JOIN tmp_delete_alumno_pagos tp
+          ON tp.id = pp.id
+      `,
+      { transaction }
+    );
+
+    await db.query(
+      `
+        DELETE pm
+        FROM pagos_mensualidades pm
+        INNER JOIN tmp_delete_alumno_mensualidades tm
+          ON tm.id = pm.id
+      `,
+      { transaction }
+    );
+
+    await db.query(
+      `
+        DELETE aa
+        FROM alumnos_asistencias aa
+        LEFT JOIN tmp_delete_alumno_membresias tam
+          ON tam.id = aa.membresia_id
+        LEFT JOIN tmp_delete_alumno_reservas tr
+          ON tr.id = aa.reserva_id
+        WHERE aa.alumno_id = :alumnoId
+           OR tam.id IS NOT NULL
+           OR tr.id IS NOT NULL
+      `,
+      {
+        replacements: { alumnoId },
+        transaction
+      }
+    );
+
+    await db.query(
+      `
+        DELETE atr
+        FROM agenda_turnos_reservas atr
+        INNER JOIN tmp_delete_alumno_reservas tr
+          ON tr.id = atr.id
+      `,
+      { transaction }
+    );
+
+    await db.query(
+      `
+        DELETE aah
+        FROM alumnos_anamnesis_historial aah
+        LEFT JOIN tmp_delete_alumno_anamnesis taa
+          ON taa.id = aah.anamnesis_id
+        WHERE aah.alumno_id = :alumnoId
+           OR taa.id IS NOT NULL
+      `,
+      {
+        replacements: { alumnoId },
+        transaction
+      }
+    );
+
+    await db.query(
+      `
+        DELETE aa
+        FROM alumnos_anamnesis aa
+        INNER JOIN tmp_delete_alumno_anamnesis taa
+          ON taa.id = aa.id
+      `,
+      { transaction }
+    );
+
+    await db.query(
+      `
+        DELETE FROM agenda_turnos_lista_espera
+        WHERE alumno_id = :alumnoId
+      `,
+      {
+        replacements: { alumnoId },
+        transaction
+      }
+    );
+
+    await db.query(
+      `
+        DELETE FROM pagos_metodos_recurrentes
+        WHERE alumno_id = :alumnoId
+      `,
+      {
+        replacements: { alumnoId },
+        transaction
+      }
+    );
+
+    await db.query(
+      `
+        DELETE FROM sistema_alertas
+        WHERE alumno_id = :alumnoId
+      `,
+      {
+        replacements: { alumnoId },
+        transaction
+      }
+    );
+
+    await db.query(
+      `
+        DELETE FROM alumnos_contactos_emergencia
+        WHERE alumno_id = :alumnoId
+      `,
+      {
+        replacements: { alumnoId },
+        transaction
+      }
+    );
+
+    await db.query(
+      `
+        DELETE FROM alumnos_usuarios
+        WHERE alumno_id = :alumnoId
+      `,
+      {
+        replacements: { alumnoId },
+        transaction
+      }
+    );
+
+    await db.query(
+      `
+        DELETE FROM alumnos_login
+        WHERE alumno_id = :alumnoId
+      `,
+      {
+        replacements: { alumnoId },
+        transaction
+      }
+    );
+
+    await db.query(
+      `
+        DELETE am
+        FROM alumnos_membresias am
+        INNER JOIN tmp_delete_alumno_membresias tam
+          ON tam.id = am.id
+      `,
+      { transaction }
+    );
+
+    await alumno.destroy({ transaction });
+
+    await db.query('DROP TEMPORARY TABLE IF EXISTS tmp_delete_alumno_reservas', {
+      transaction
+    });
+    await db.query('DROP TEMPORARY TABLE IF EXISTS tmp_delete_alumno_anamnesis', {
+      transaction
+    });
+    await db.query('DROP TEMPORARY TABLE IF EXISTS tmp_delete_alumno_pagos', {
+      transaction
+    });
+    await db.query('DROP TEMPORARY TABLE IF EXISTS tmp_delete_alumno_mensualidades', {
+      transaction
+    });
+    await db.query('DROP TEMPORARY TABLE IF EXISTS tmp_delete_alumno_membresias', {
+      transaction
+    });
+
+    await transaction.commit();
+
+    const totalRelacionesEliminadas = relacionesConDatos.reduce(
+      (acc, item) => acc + Number(item.cantidad || 0),
+      0
+    );
 
     return res.status(200).json({
       ok: true,
-      message: 'Alumno marcado como inactivo correctamente.',
-      data
+      message: 'Alumno eliminado físicamente correctamente.',
+      detalle:
+        totalRelacionesEliminadas > 1
+          ? 'También se eliminaron las relaciones asociadas del alumno.'
+          : 'El alumno no tenía relaciones asociadas fuera de su propio registro.',
+      total_relaciones_eliminadas: totalRelacionesEliminadas,
+      relaciones_detectadas: relacionesDetectadas,
+      relaciones_eliminadas: relacionesConDatos,
+      data: {
+        id: alumnoId,
+        nombre: alumnoPlano.nombre,
+        apellido: alumnoPlano.apellido,
+        dni: alumnoPlano.dni,
+        usuario_app_id: alumnoPlano.usuario_app_id || null
+      }
     });
   } catch (error) {
+    if (transaction && !transaction.finished) {
+      await transaction.rollback();
+    }
+
     console.error('Error DR_Alumnos_CTS:', error);
+
+    if (
+      error?.name === 'SequelizeForeignKeyConstraintError' ||
+      error?.original?.code === 'ER_ROW_IS_REFERENCED_2'
+    ) {
+      return res.status(409).json({
+        ok: false,
+        message:
+          'No se pudo completar el borrado físico porque existe una relación adicional no contemplada en el orden de borrado.',
+        detalle: {
+          tabla: error?.table || error?.original?.table || null,
+          constraint:
+            error?.index ||
+            error?.constraint ||
+            error?.original?.constraint ||
+            null,
+          campos: error?.fields || [],
+          sqlMessage: error?.original?.sqlMessage || error?.message
+        }
+      });
+    }
 
     return res.status(500).json({
       ok: false,
-      message: 'Error al desactivar el alumno.'
+      message: 'Error al eliminar físicamente el alumno.'
     });
   }
 };

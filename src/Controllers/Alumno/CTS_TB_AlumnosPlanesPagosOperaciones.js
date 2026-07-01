@@ -10,6 +10,7 @@ import AlumnosMembresiasModel from '../../Models/Alumno/MD_TB_AlumnosMembresias.
 import PagosMensualidadesModel from '../../Models/Pago/MD_TB_PagosMensualidades.js';
 import PagosModel from '../../Models/Pago/MD_TB_Pagos.js';
 import PlanesModel from '../../Models/Plan/MD_TB_Planes.js';
+import PlanesPreciosModel from '../../Models/Plan/MD_TB_PlanesPrecios.js';
 import SedesModel from '../../Models/Sede/MD_TB_Sedes.js';
 import PagosMetodosRecurrentesModel from '../../Models/Pago/MD_TB_PagosMetodosRecurrentes.js';
 
@@ -230,6 +231,124 @@ const sumarDiasDateOnly = (fecha, dias) => {
   return date.toISOString().slice(0, 10);
 };
 
+// Benjamin Orellana - 2026/06/30 - Valida fechas DATEONLY usadas al generar membresías operativas desde ficha de alumno.
+const esFechaDateOnlyValida = (valor) => {
+  if (!valor || typeof valor !== 'string') return false;
+
+  const fecha = String(valor).slice(0, 10);
+  const regexFecha = /^\d{4}-\d{2}-\d{2}$/;
+
+  if (!regexFecha.test(fecha)) return false;
+
+  const date = new Date(`${fecha}T00:00:00`);
+
+  return !Number.isNaN(date.getTime());
+};
+
+// Benjamin Orellana - 2026/06/30 - Normaliza fechas opcionales conservando formato YYYY-MM-DD para operaciones de membresía.
+const normalizarFechaDateOnlyOperativa = (valor, fechaDefault = null) => {
+  if (valor === undefined || valor === null || valor === '') {
+    return fechaDefault;
+  }
+
+  return String(valor).slice(0, 10);
+};
+
+// Benjamin Orellana - 2026/06/30 - Busca precio vigente priorizando sede específica y usando precio global si la sede no tiene precio propio.
+const buscarPrecioVigentePlanOperativo = async ({
+  planId,
+  sedeId,
+  fechaConsulta,
+  transaction
+}) => {
+  const whereBase = {
+    plan_id: Number(planId),
+    activo: 1,
+    fecha_desde: {
+      [Op.lte]: fechaConsulta
+    },
+    [Op.or]: [
+      { fecha_hasta: null },
+      {
+        fecha_hasta: {
+          [Op.gte]: fechaConsulta
+        }
+      }
+    ]
+  };
+
+  const precioSede = await PlanesPreciosModel.findOne({
+    where: {
+      ...whereBase,
+      sede_id: Number(sedeId)
+    },
+    order: [
+      ['fecha_desde', 'DESC'],
+      ['id', 'DESC']
+    ],
+    transaction
+  });
+
+  if (precioSede) {
+    return {
+      precio: precioSede,
+      origen_precio: 'sede'
+    };
+  }
+
+  const precioGlobal = await PlanesPreciosModel.findOne({
+    where: {
+      ...whereBase,
+      sede_id: null
+    },
+    order: [
+      ['fecha_desde', 'DESC'],
+      ['id', 'DESC']
+    ],
+    transaction
+  });
+
+  if (!precioGlobal) {
+    return {
+      precio: null,
+      origen_precio: null
+    };
+  }
+
+  return {
+    precio: precioGlobal,
+    origen_precio: 'global'
+  };
+};
+
+// Benjamin Orellana - 2026/06/30 - Detecta membresías operativas superpuestas antes de crear una nueva cobertura.
+const buscarMembresiaSuperpuestaOperativa = async ({
+  alumnoId,
+  fechaInicio,
+  fechaVencimiento,
+  transaction
+}) => {
+  return AlumnosMembresiasModel.findOne({
+    where: {
+      alumno_id: Number(alumnoId),
+      estado: {
+        [Op.in]: ['activa', 'pendiente_pago', 'congelada']
+      },
+      fecha_inicio: {
+        [Op.lte]: fechaVencimiento
+      },
+      fecha_vencimiento: {
+        [Op.gte]: fechaInicio
+      }
+    },
+    order: [
+      ['fecha_inicio', 'DESC'],
+      ['id', 'DESC']
+    ],
+    transaction
+  });
+};
+
 // Benjamin Orellana - 2026/06/15 - Obtiene vencimientos y estado financiero operativo del alumno.
 export const OBR_VencimientosAlumnoPlanesPagos_CTS = async (req, res) => {
   try {
@@ -416,6 +535,310 @@ export const OBR_VencimientosAlumnoPlanesPagos_CTS = async (req, res) => {
       500,
       'Error interno al obtener vencimientos del alumno.'
     );
+  }
+};
+
+// Benjamin Orellana - 2026/06/30 - Genera membresía inicial o administrativa y deja una mensualidad pendiente sin registrar pago.
+export const CR_GenerarMembresiaAlumnoPlanesPagos_CTS = async (req, res) => {
+  const transaction = await db.transaction();
+
+  try {
+    const { alumno_id } = req.params;
+
+    if (!esIdValido(alumno_id)) {
+      await transaction.rollback();
+      return responderError(res, 400, 'El parámetro alumno_id no es válido.');
+    }
+
+    const {
+      plan_id,
+      sede_id,
+      fecha_inicio,
+      fecha_vencimiento,
+      generar_mensualidad = true,
+      descuento_valor = 0,
+      descuento_porcentaje = 0,
+      observaciones
+    } = req.body;
+
+    if (!esIdValido(plan_id)) {
+      await transaction.rollback();
+      return responderError(res, 400, 'El plan es obligatorio.');
+    }
+
+    if (!esIdValido(sede_id)) {
+      await transaction.rollback();
+      return responderError(res, 400, 'La sede es obligatoria.');
+    }
+
+    const hoy = obtenerFechaArgentinaDateOnly();
+    const fechaInicioFinal = normalizarFechaDateOnlyOperativa(
+      fecha_inicio,
+      hoy
+    );
+
+    if (!esFechaDateOnlyValida(fechaInicioFinal)) {
+      await transaction.rollback();
+      return responderError(
+        res,
+        400,
+        'La fecha de inicio debe ser válida y tener formato YYYY-MM-DD.'
+      );
+    }
+
+    const alumno = await AlumnosModel.findByPk(alumno_id, { transaction });
+
+    if (!alumno) {
+      await transaction.rollback();
+      return responderError(res, 404, 'No se encontró el alumno solicitado.');
+    }
+
+    if (String(alumno.estado).toLowerCase() === 'baja') {
+      await transaction.rollback();
+      return responderError(
+        res,
+        409,
+        'No se puede generar una membresía para un alumno dado de baja. Primero debe reingresar.'
+      );
+    }
+
+    const sede = await SedesModel.findOne({
+      where: {
+        id: Number(sede_id),
+        activo: 1
+      },
+      transaction
+    });
+
+    if (!sede) {
+      await transaction.rollback();
+      return responderError(
+        res,
+        404,
+        'No se encontró la sede indicada o está inactiva.'
+      );
+    }
+
+    const plan = await PlanesModel.findOne({
+      where: {
+        id: Number(plan_id),
+        activo: 1
+      },
+      transaction
+    });
+
+    if (!plan) {
+      await transaction.rollback();
+      return responderError(
+        res,
+        404,
+        'No se encontró el plan indicado o está inactivo.'
+      );
+    }
+
+    const duracionDias = Number(plan.duracion_dias || 0);
+
+    if (!Number.isFinite(duracionDias) || duracionDias <= 0) {
+      await transaction.rollback();
+      return responderError(
+        res,
+        400,
+        'El plan no tiene una duración válida para calcular el vencimiento.'
+      );
+    }
+
+    const fechaVencimientoFinal = normalizarFechaDateOnlyOperativa(
+      fecha_vencimiento,
+      sumarDiasDateOnly(fechaInicioFinal, Math.max(duracionDias - 1, 0))
+    );
+
+    if (!esFechaDateOnlyValida(fechaVencimientoFinal)) {
+      await transaction.rollback();
+      return responderError(
+        res,
+        400,
+        'La fecha de vencimiento debe ser válida y tener formato YYYY-MM-DD.'
+      );
+    }
+
+    if (fechaVencimientoFinal < fechaInicioFinal) {
+      await transaction.rollback();
+      return responderError(
+        res,
+        400,
+        'La fecha de vencimiento no puede ser menor que la fecha de inicio.'
+      );
+    }
+
+    const membresiaSuperpuesta = await buscarMembresiaSuperpuestaOperativa({
+      alumnoId: alumno_id,
+      fechaInicio: fechaInicioFinal,
+      fechaVencimiento: fechaVencimientoFinal,
+      transaction
+    });
+
+    if (membresiaSuperpuesta) {
+      await transaction.rollback();
+      return responderError(
+        res,
+        409,
+        'El alumno ya tiene una membresía operativa que se superpone con el período indicado.',
+        {
+          membresia_id: membresiaSuperpuesta.id,
+          fecha_inicio: membresiaSuperpuesta.fecha_inicio,
+          fecha_vencimiento: membresiaSuperpuesta.fecha_vencimiento,
+          estado: membresiaSuperpuesta.estado
+        }
+      );
+    }
+
+    const resultadoPrecio = await buscarPrecioVigentePlanOperativo({
+      planId: plan_id,
+      sedeId: sede_id,
+      fechaConsulta: fechaInicioFinal,
+      transaction
+    });
+
+    if (!resultadoPrecio.precio) {
+      await transaction.rollback();
+      return responderError(
+        res,
+        400,
+        'No hay un precio vigente para este plan en la sede indicada ni un precio global vigente.'
+      );
+    }
+
+    const precioLista = Number(resultadoPrecio.precio.precio || 0);
+    const descuentoValorNumerico = Number(descuento_valor || 0);
+    const descuentoPorcentajeNumerico = Number(descuento_porcentaje || 0);
+
+    if (
+      !Number.isFinite(precioLista) ||
+      precioLista < 0 ||
+      !Number.isFinite(descuentoValorNumerico) ||
+      descuentoValorNumerico < 0 ||
+      !Number.isFinite(descuentoPorcentajeNumerico) ||
+      descuentoPorcentajeNumerico < 0
+    ) {
+      await transaction.rollback();
+      return responderError(
+        res,
+        400,
+        'El precio o descuento indicado no es válido.'
+      );
+    }
+
+    const descuentoPorPorcentaje =
+      precioLista * (descuentoPorcentajeNumerico / 100);
+    const precioFinal = Math.max(
+      precioLista - descuentoValorNumerico - descuentoPorPorcentaje,
+      0
+    );
+
+    const clasesIncluidas = Number(
+      plan.cantidad_clases_periodo || plan.clases_por_mes || 0
+    );
+
+    const observacionMembresia = [
+      '[GENERACIÓN MEMBRESÍA] Alta administrativa desde ficha del alumno',
+      `Plan: ${plan.nombre || plan.id}`,
+      `Sede: ${sede.nombre || sede.id}`,
+      `Precio: ${precioLista}`,
+      `Origen precio: ${resultadoPrecio.origen_precio}`,
+      observaciones ? String(observaciones).trim() : null
+    ]
+      .filter(Boolean)
+      .join(' - ');
+
+    const nuevaMembresia = await AlumnosMembresiasModel.create(
+      {
+        alumno_id: Number(alumno_id),
+        plan_id: Number(plan_id),
+        sede_id: Number(sede_id),
+        fecha_inicio: fechaInicioFinal,
+        fecha_vencimiento: fechaVencimientoFinal,
+        estado: 'pendiente_pago',
+        precio_lista: precioLista.toFixed(2),
+        descuento_valor: descuentoValorNumerico.toFixed(2),
+        descuento_porcentaje: descuentoPorcentajeNumerico.toFixed(2),
+        precio_final: precioFinal.toFixed(2),
+        clases_incluidas: clasesIncluidas,
+        clases_usadas: 0,
+        clases_disponibles: clasesIncluidas,
+        origen_alta: 'administracion',
+        observaciones: observacionMembresia
+      },
+      { transaction }
+    );
+
+    let nuevaMensualidad = null;
+
+    if (generar_mensualidad !== false) {
+      const fechaBasePeriodo = new Date(`${fechaInicioFinal}T00:00:00`);
+      const estadoMensualidad =
+        fechaVencimientoFinal < hoy ? 'vencida' : 'pendiente';
+
+      nuevaMensualidad = await PagosMensualidadesModel.create(
+        {
+          alumno_id: Number(alumno_id),
+          membresia_id: Number(nuevaMembresia.id),
+          sede_id: Number(sede_id),
+          periodo_anio: fechaBasePeriodo.getFullYear(),
+          periodo_mes: fechaBasePeriodo.getMonth() + 1,
+          periodo_desde: fechaInicioFinal,
+          periodo_hasta: fechaVencimientoFinal,
+          fecha_emision: hoy,
+          fecha_vencimiento: fechaVencimientoFinal,
+          monto_total: precioFinal.toFixed(2),
+          monto_pagado: Number(0).toFixed(2),
+          saldo: precioFinal.toFixed(2),
+          estado: estadoMensualidad,
+          observaciones:
+            '[GENERACIÓN MEMBRESÍA] Mensualidad pendiente generada automáticamente.'
+        },
+        { transaction }
+      );
+    }
+
+    if (!['baja', 'congelado'].includes(String(alumno.estado).toLowerCase())) {
+      await alumno.update(
+        {
+          sede_id: Number(sede_id),
+          fecha_inicio: alumno.fecha_inicio || fechaInicioFinal,
+          estado: 'pendiente_pago',
+          updated_at: new Date()
+        },
+        { transaction }
+      );
+    }
+
+    await transaction.commit();
+
+    return res.status(201).json({
+      ok: true,
+      message: 'Membresía generada correctamente.',
+      data: {
+        alumno_id: Number(alumno_id),
+        membresia_id: nuevaMembresia.id,
+        mensualidad_id: nuevaMensualidad?.id || null,
+        plan_id: Number(plan_id),
+        sede_id: Number(sede_id),
+        fecha_inicio: fechaInicioFinal,
+        fecha_vencimiento: fechaVencimientoFinal,
+        estado_membresia: nuevaMembresia.estado,
+        estado_mensualidad: nuevaMensualidad?.estado || null,
+        precio_lista: precioLista,
+        precio_final: precioFinal,
+        origen_precio: resultadoPrecio.origen_precio,
+        mensualidad_generada: Boolean(nuevaMensualidad)
+      }
+    });
+  } catch (error) {
+    await transaction.rollback();
+
+    console.error('Error en CR_GenerarMembresiaAlumnoPlanesPagos_CTS:', error);
+
+    return responderError(res, 500, 'Error interno al generar membresía.');
   }
 };
 
@@ -1277,11 +1700,7 @@ export const UR_RegistrarBajaAlumnoPlanesPagos_CTS = async (req, res) => {
 
     if (!politicasPermitidas.includes(politica_deuda)) {
       await transaction.rollback();
-      return responderError(
-        res,
-        400,
-        'La política de deuda no es válida.'
-      );
+      return responderError(res, 400, 'La política de deuda no es válida.');
     }
 
     const alumno = await AlumnosModel.findByPk(alumno_id, { transaction });
@@ -1542,25 +1961,25 @@ export const CR_ReingresarAlumnoPlanesPagos_CTS = async (req, res) => {
       .filter(Boolean)
       .join(' - ');
 
-   const nuevaMembresia = await AlumnosMembresiasModel.create(
-     {
-       alumno_id: Number(alumno_id),
-       plan_id: Number(plan_id),
-       sede_id: Number(sede_id),
-       fecha_inicio: fechaInicioFinal,
-       fecha_vencimiento: fechaVencimientoFinal,
-       estado: 'pendiente_pago',
-       precio_lista: montoNumerico,
-       precio_final: montoNumerico,
-       descuento_valor: 0,
-       descuento_porcentaje: 0,
-       clases_incluidas: clasesIncluidas,
-       clases_usadas: 0,
-       clases_disponibles: clasesIncluidas,
-       observaciones: observacionReingreso
-     },
-     { transaction }
-   );
+    const nuevaMembresia = await AlumnosMembresiasModel.create(
+      {
+        alumno_id: Number(alumno_id),
+        plan_id: Number(plan_id),
+        sede_id: Number(sede_id),
+        fecha_inicio: fechaInicioFinal,
+        fecha_vencimiento: fechaVencimientoFinal,
+        estado: 'pendiente_pago',
+        precio_lista: montoNumerico,
+        precio_final: montoNumerico,
+        descuento_valor: 0,
+        descuento_porcentaje: 0,
+        clases_incluidas: clasesIncluidas,
+        clases_usadas: 0,
+        clases_disponibles: clasesIncluidas,
+        observaciones: observacionReingreso
+      },
+      { transaction }
+    );
 
     const fechaBasePeriodo = new Date(`${fechaInicioFinal}T00:00:00`);
 
@@ -1594,9 +2013,7 @@ export const CR_ReingresarAlumnoPlanesPagos_CTS = async (req, res) => {
             [Op.in]: ['inactivo', 'vencido', 'error']
           }
         },
-        order: [
-          ['id', 'DESC']
-        ],
+        order: [['id', 'DESC']],
         transaction
       });
 
@@ -1661,11 +2078,7 @@ export const UR_CambiarSedeAlumnoPlanesPagos_CTS = async (req, res) => {
       return responderError(res, 400, 'El parámetro alumno_id no es válido.');
     }
 
-    const {
-      sede_id,
-      alcance = 'actual_pendientes',
-      observaciones
-    } = req.body;
+    const { sede_id, alcance = 'actual_pendientes', observaciones } = req.body;
 
     if (!esIdValido(sede_id)) {
       await transaction.rollback();
@@ -1680,7 +2093,11 @@ export const UR_CambiarSedeAlumnoPlanesPagos_CTS = async (req, res) => {
 
     if (!alcancesPermitidos.includes(alcance)) {
       await transaction.rollback();
-      return responderError(res, 400, 'El alcance del cambio de sede no es válido.');
+      return responderError(
+        res,
+        400,
+        'El alcance del cambio de sede no es válido.'
+      );
     }
 
     const alumno = await AlumnosModel.findByPk(alumno_id, { transaction });
@@ -1746,10 +2163,15 @@ export const UR_CambiarSedeAlumnoPlanesPagos_CTS = async (req, res) => {
       );
     }
 
-    const sedeAnteriorId = Number(alumno.sede_id || membresiaActual.sede_id || 0);
+    const sedeAnteriorId = Number(
+      alumno.sede_id || membresiaActual.sede_id || 0
+    );
     const nuevaSedeId = Number(sede_id);
 
-    if (sedeAnteriorId === nuevaSedeId && Number(membresiaActual.sede_id) === nuevaSedeId) {
+    if (
+      sedeAnteriorId === nuevaSedeId &&
+      Number(membresiaActual.sede_id) === nuevaSedeId
+    ) {
       await transaction.rollback();
       return responderError(
         res,
@@ -1870,7 +2292,11 @@ export const UR_CambiarSedeAlumnoPlanesPagos_CTS = async (req, res) => {
 
     console.error('Error en UR_CambiarSedeAlumnoPlanesPagos_CTS:', error);
 
-    return responderError(res, 500, 'Error interno al cambiar sede del alumno.');
+    return responderError(
+      res,
+      500,
+      'Error interno al cambiar sede del alumno.'
+    );
   }
 };
 
@@ -1886,11 +2312,7 @@ export const UR_CambiarPlanAlumnoPlanesPagos_CTS = async (req, res) => {
       return responderError(res, 400, 'El parámetro alumno_id no es válido.');
     }
 
-    const {
-      plan_id,
-      monto,
-      observaciones
-    } = req.body;
+    const { plan_id, monto, observaciones } = req.body;
 
     if (!esIdValido(plan_id)) {
       await transaction.rollback();
@@ -1988,9 +2410,7 @@ export const UR_CambiarPlanAlumnoPlanesPagos_CTS = async (req, res) => {
           [Op.in]: ['pendiente', 'parcial', 'vencida']
         }
       },
-      order: [
-        ['id', 'DESC']
-      ],
+      order: [['id', 'DESC']],
       transaction
     });
 
@@ -2123,6 +2543,10 @@ export const UR_CambiarPlanAlumnoPlanesPagos_CTS = async (req, res) => {
 
     console.error('Error en UR_CambiarPlanAlumnoPlanesPagos_CTS:', error);
 
-    return responderError(res, 500, 'Error interno al cambiar plan del alumno.');
+    return responderError(
+      res,
+      500,
+      'Error interno al cambiar plan del alumno.'
+    );
   }
 };

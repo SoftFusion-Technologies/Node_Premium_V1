@@ -523,7 +523,8 @@ export const ER_Turno_CTS = async (req, res) => {
  */
 export const OBRS_TurnosAlumno_CTS = async (req, res) => {
   try {
-    const sede_id = req.alumno.sede_id;
+    const alumno_id = req.alumno.id;
+    const sede_id   = req.alumno.sede_id;
 
     if (!sede_id) {
       return res.status(400).json({ message: 'No tenés una sede asignada. Consultá con administración.' });
@@ -538,8 +539,27 @@ export const OBRS_TurnosAlumno_CTS = async (req, res) => {
     const horaServidor = dayjs().format('HH:mm:ss');
     const piso = fecha_desde && dayjs(fecha_desde).isAfter(hoyServidor) ? fecha_desde : hoyServidor;
 
+    // Obtener el vencimiento de la membresía activa del alumno para limitar el rango
+    const membresia = await AlumnosMembresiasModel.findOne({
+      where: {
+        alumno_id,
+        estado:            'activa',
+        fecha_inicio:      { [Op.lte]: hoyServidor },
+        fecha_vencimiento: { [Op.gte]: hoyServidor }
+      },
+      attributes: ['fecha_vencimiento']
+    });
+
+    const fechaVencimiento = membresia?.fecha_vencimiento ?? null;
+
+    // El techo es el mínimo entre fecha_hasta pedida y fecha_vencimiento
+    let techo = fecha_hasta ?? null;
+    if (fechaVencimiento) {
+      techo = techo && dayjs(techo).isBefore(fechaVencimiento) ? techo : fechaVencimiento;
+    }
+
     const condicionesFecha = [{ fecha: { [Op.gte]: piso } }];
-    if (fecha_hasta) condicionesFecha.push({ fecha: { [Op.lte]: fecha_hasta } });
+    if (techo) condicionesFecha.push({ fecha: { [Op.lte]: techo } });
 
     const where = {
       sede_id,
@@ -566,7 +586,8 @@ export const OBRS_TurnosAlumno_CTS = async (req, res) => {
       order: [['fecha', 'ASC'], ['hora_inicio', 'ASC']]
     });
 
-    return res.status(200).json(turnos);
+    // Incluir fecha_vencimiento para que el frontend pueda limitar la navegación
+    return res.status(200).json({ turnos, fecha_vencimiento: fechaVencimiento });
   } catch (error) {
     console.error('[OBRS_TurnosAlumno_CTS]', error);
     return res.status(500).json({ message: 'Error al obtener turnos.' });

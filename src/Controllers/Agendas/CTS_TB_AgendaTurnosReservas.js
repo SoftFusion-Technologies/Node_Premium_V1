@@ -473,6 +473,14 @@ export const CR_MiReserva_CTS = async (req, res) => {
       return res.status(403).json({ message: 'No tenés créditos disponibles para inscribirte en esta clase.' });
     }
 
+    // Validar que el turno no sea posterior al vencimiento de la membresía
+    if (dayjs(turno.fecha).isAfter(dayjs(membresia.fecha_vencimiento), 'day')) {
+      await transaccion.rollback();
+      return res.status(403).json({
+        message: `No podés inscribirte en una clase posterior al vencimiento de tu membresía (${dayjs(membresia.fecha_vencimiento).format('DD/MM/YYYY')}).`
+      });
+    }
+
     // Si no hay cupo, agregar a lista de espera (dentro de la misma transacción
     // para evitar que dos alumnos reciban la misma posición).
     // No se descuentan créditos hasta que se concrete la inscripción efectiva.

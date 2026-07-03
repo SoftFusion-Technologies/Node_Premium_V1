@@ -12,17 +12,18 @@
  * Capa: Backend
  */
 
-import { Op }                      from 'sequelize';
-import dayjs                       from 'dayjs';
-import AgendaTurnosModel           from '../../Models/Agenda/MD_TB_AgendaTurnos.js';
-import AgendaHorariosSedeModel     from '../../Models/Agenda/MD_TB_AgendaHorariosSede.js';
-import AgendaTurnosReservasModel   from '../../Models/Agenda/MD_TB_AgendaTurnosReservas.js';
+import { Op }                       from 'sequelize';
+import dayjs                        from 'dayjs';
+import AgendaTurnosModel            from '../../Models/Agenda/MD_TB_AgendaTurnos.js';
+import AgendaHorariosSedeModel      from '../../Models/Agenda/MD_TB_AgendaHorariosSede.js';
+import AgendaTurnosReservasModel    from '../../Models/Agenda/MD_TB_AgendaTurnosReservas.js';
 import AgendaTurnosListaEsperaModel from '../../Models/Agenda/MD_TB_AgendaTurnosListaEspera.js';
-import AlumnosMembresiasModel      from '../../Models/Alumno/MD_TB_AlumnosMembresias.js';
-import SedesModel                  from '../../Models/Sede/MD_TB_Sedes.js';
-import UsuariosModel               from '../../Models/Usuario/MD_TB_Usuarios.js';
-import AlumnosModel                from '../../Models/Alumno/MD_TB_Alumnos.js';
-import db                          from '../../DataBase/db.js';
+import AlumnosMembresiasModel       from '../../Models/Alumno/MD_TB_AlumnosMembresias.js';
+import SedesModel                   from '../../Models/Sede/MD_TB_Sedes.js';
+import SedesHorariosModel           from '../../Models/Sede/MD_TB_SedesHorarios.js';
+import UsuariosModel                from '../../Models/Usuario/MD_TB_Usuarios.js';
+import AlumnosModel                 from '../../Models/Alumno/MD_TB_Alumnos.js';
+import db                           from '../../DataBase/db.js';
 
 // ─── Helpers internos ─────────────────────────────────────────────────────────
 
@@ -299,6 +300,20 @@ export const CR_TurnosMasivo_CTS = async (req, res) => {
       return res.status(400).json({ message: 'El rango no generó ningún turno válido.' });
     }
 
+    // Cargar horarios configurados para todas las sedes involucradas.
+    // Construye horarioMap[sede_id][dia_semana] = { hora_inicio, hora_fin }
+    // Solo se incluyen horarios activos; si falta un día, ese día se omite.
+    const horariosRows = await SedesHorariosModel.findAll({
+      where: { sede_id: { [Op.in]: sede_ids }, activo: 1 },
+      attributes: ['sede_id', 'dia_semana', 'hora_inicio', 'hora_fin']
+    });
+
+    const horarioMap = {};
+    for (const h of horariosRows) {
+      if (!horarioMap[h.sede_id]) horarioMap[h.sede_id] = {};
+      horarioMap[h.sede_id][h.dia_semana] = { hora_inicio: h.hora_inicio, hora_fin: h.hora_fin };
+    }
+
     // Buscar turnos ya existentes para las mismas sedes y fechas, para no
     // crear duplicados (mismo sede_id + fecha + hora_inicio).
     const turnosExistentes = await AgendaTurnosModel.findAll({
@@ -313,28 +328,54 @@ export const CR_TurnosMasivo_CTS = async (req, res) => {
       turnosExistentes.map((t) => `${t.sede_id}|${t.fecha}|${t.hora_inicio}`)
     );
 
-    // Armar todos los registros a insertar, salteando los que ya existen
+    // Armar todos los registros a insertar aplicando el horario de la sede por día.
+    // Para cada (sede, fecha, franja):
+    //   1. Busca el horario configurado para esa sede y ese día de la semana.
+    //   2. Si no existe horario → omite (ese día no está habilitado en la sede).
+    //   3. Si la franja queda fuera del horario → omite (recorte por día).
+    //   4. Si ya existe en BD → omite (duplicado).
     const registros = [];
-    let omitidos = 0;
+    let omitidos           = 0;
+    let omitidosSinHorario = 0;
+
     for (const sede_id of sede_ids) {
+      const horariosSede = horarioMap[sede_id] ?? {};
+
       for (const fecha of fechasValidas) {
+        // dia_semana en formato BD: 1=Lun...7=Dom
+        const diaBD      = dayjs(fecha).day() === 0 ? 7 : dayjs(fecha).day();
+        const horarioDia = horariosSede[diaBD];
+
+        if (!horarioDia) {
+          // Ese día no está configurado en esta sede → saltear todas sus franjas
+          omitidosSinHorario += franjas.length;
+          continue;
+        }
+
         for (const franja of franjas) {
+          // Recortar: la franja debe caer dentro del horario habilitado del día
+          if (franja.hora_inicio < horarioDia.hora_inicio || franja.hora_fin > horarioDia.hora_fin) {
+            omitidosSinHorario++;
+            continue;
+          }
+
           const clave = `${sede_id}|${fecha}|${franja.hora_inicio}`;
           if (clavesExistentes.has(clave)) {
             omitidos++;
             continue;
           }
+
           registros.push({
-            horario_sede_id: horario_sede_id || null,
+            horario_sede_id:  horario_sede_id || null,
             sede_id,
-            profesor_id:     profesor_id     || null,
+            profesor_id:      profesor_id     || null,
             fecha,
-            hora_inicio:     franja.hora_inicio,
-            hora_fin:        franja.hora_fin,
+            hora_inicio:      franja.hora_inicio,
+            hora_fin:         franja.hora_fin,
             cupo_maximo,
             cupos_reservados: 0,
-            nombre_clase:    nombreFinal,
-            estado:          'disponible'
+            nombre_clase:     nombreFinal,
+            estado:           'disponible'
           });
         }
       }
@@ -342,17 +383,22 @@ export const CR_TurnosMasivo_CTS = async (req, res) => {
 
     if (!registros.length) {
       return res.status(400).json({
-        message: 'Todos los turnos del rango seleccionado ya existen. No se creó ninguno nuevo.'
+        message: 'No se generó ningún turno válido. Verificá que las sedes tengan horarios configurados para los días seleccionados.'
       });
     }
 
     // Inserción masiva en un solo query
     await AgendaTurnosModel.bulkCreate(registros);
 
+    const partes = [`Se crearon ${registros.length} turnos correctamente.`];
+    if (omitidos > 0)           partes.push(`${omitidos} omitidos por ya existir.`);
+    if (omitidosSinHorario > 0) partes.push(`${omitidosSinHorario} omitidos por estar fuera del horario configurado de la sede.`);
+
     return res.status(201).json({
-      message: `Se crearon ${registros.length} turnos correctamente.${omitidos > 0 ? ` Se omitieron ${omitidos} por ya existir.` : ''}`,
+      message:              partes.join(' '),
+      total:                registros.length,
       omitidos,
-      total:   registros.length
+      omitidos_sin_horario: omitidosSinHorario
     });
   } catch (error) {
     if (error.name === 'SequelizeUniqueConstraintError') {

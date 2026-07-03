@@ -28,7 +28,91 @@ import {
   DRSede_CTS
 } from '../Controllers/Sede/CTS_TB_Sedes.js';
 
+// Registra las asociaciones Sequelize entre Sedes y SedesHorarios
+import '../Models/Sede/relacionesSede.js';
+
+import {
+  OBRS_HorariosSedes_CTS,
+  OBRS_HorarioSedePorId_CTS,
+  CR_HorarioSede_CTS,
+  UR_HorarioSede_CTS,
+  UR_ToggleHorarioSede_CTS,
+  ER_HorarioSede_CTS
+} from '../Controllers/Sede/CTS_TB_SedesHorarios.js';
+
 const router = express.Router();
+
+/*
+ * =========================================================
+ * SEDES
+ * =========================================================
+ */
+
+/*
+ * =========================================================
+ * SEDES HORARIOS
+ * IMPORTANTE: estas rutas deben estar ANTES de /sedes/:id
+ * para que Express no capture "horarios" como parámetro.
+ * =========================================================
+ */
+
+/*
+ * Sergio Manrique - 2026/07/02 - Lista horarios de sedes (filtro opcional: sede_id, activo).
+ */
+router.get(
+  '/sedes/horarios',
+  authenticateToken,
+  OBRS_HorariosSedes_CTS
+);
+
+/*
+ * Sergio Manrique - 2026/07/02 - Obtiene un horario por ID.
+ */
+router.get(
+  '/sedes/horarios/:id',
+  authenticateToken,
+  OBRS_HorarioSedePorId_CTS
+);
+
+/*
+ * Sergio Manrique - 2026/07/02 - Crea un horario para una sede y día.
+ */
+router.post(
+  '/sedes/horarios',
+  authenticateToken,
+  requireRolGlobal(['SUPER_ADMIN', 'DIRECCION']),
+  CR_HorarioSede_CTS
+);
+
+/*
+ * Sergio Manrique - 2026/07/02 - Actualiza un horario existente.
+ */
+router.put(
+  '/sedes/horarios/:id',
+  authenticateToken,
+  requireRolGlobal(['SUPER_ADMIN', 'DIRECCION']),
+  UR_HorarioSede_CTS
+);
+
+/*
+ * Sergio Manrique - 2026/07/02 - Activa o desactiva un horario.
+ */
+router.patch(
+  '/sedes/horarios/:id/toggle',
+  authenticateToken,
+  requireRolGlobal(['SUPER_ADMIN', 'DIRECCION']),
+  UR_ToggleHorarioSede_CTS
+);
+
+/*
+ * Sergio Manrique - 2026/07/02 - Elimina un horario de sede.
+ */
+router.delete(
+  '/sedes/horarios/:id',
+  authenticateToken,
+  requireRolGlobal(['SUPER_ADMIN', 'DIRECCION']),
+  ER_HorarioSede_CTS
+);
 
 /*
  * =========================================================

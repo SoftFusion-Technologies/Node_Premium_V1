@@ -347,6 +347,8 @@ export const authenticateToken = async (req, res, next) => {
     if (!token) {
       return res.status(401).json({
         ok: false,
+        codigo: 'TOKEN_REQUIRED',
+        code: 'TOKEN_REQUIRED',
         message: 'Token no proporcionado.'
       });
     }
@@ -356,6 +358,8 @@ export const authenticateToken = async (req, res, next) => {
     if (decoded.tipo_auth !== 'USUARIO') {
       return res.status(403).json({
         ok: false,
+        codigo: 'TOKEN_WRONG_AUTH_TYPE',
+        code: 'TOKEN_WRONG_AUTH_TYPE',
         message: 'El token no corresponde a un usuario interno.'
       });
     }
@@ -372,6 +376,8 @@ export const authenticateToken = async (req, res, next) => {
     if (!usuario) {
       return res.status(401).json({
         ok: false,
+        codigo: 'TOKEN_USER_NOT_FOUND',
+        code: 'TOKEN_USER_NOT_FOUND',
         message: 'Usuario del token no encontrado.'
       });
     }
@@ -379,6 +385,8 @@ export const authenticateToken = async (req, res, next) => {
     if (!ESTADOS_USUARIO_PERMITIDOS.includes(usuario.estado)) {
       return res.status(403).json({
         ok: false,
+        codigo: 'USER_INACTIVE',
+        code: 'USER_INACTIVE',
         message: `El usuario se encuentra ${String(usuario.estado).toLowerCase()}.`
       });
     }
@@ -388,29 +396,42 @@ export const authenticateToken = async (req, res, next) => {
 
     return next();
   } catch (error) {
-    console.error('Error authenticateToken PREMIUM:', error);
-
-    // Benjamin Orellana - 2026/06/07 - Respuesta controlada para que el frontend detecte sesión expirada.
+    /*
+     * Caso esperado: token vencido.
+     * No se loguea con console.error porque no es un fallo real del backend.
+     */
     if (error.name === 'TokenExpiredError') {
       return res.status(401).json({
         ok: false,
         codigo: 'TOKEN_EXPIRED',
+        code: 'TOKEN_EXPIRED',
         message: 'Tu sesión expiró. Iniciá sesión nuevamente.',
         expiredAt: error.expiredAt || null
       });
     }
 
-    // Benjamin Orellana - 2026/06/07 - Respuesta controlada para token inválido.
+    /*
+     * Caso esperado: token inválido, corrupto o mal formado.
+     * Tampoco conviene imprimir stack completo.
+     */
     if (error.name === 'JsonWebTokenError') {
       return res.status(401).json({
         ok: false,
         codigo: 'TOKEN_INVALID',
+        code: 'TOKEN_INVALID',
         message: 'La sesión no es válida. Iniciá sesión nuevamente.'
       });
     }
 
+    /*
+     * Caso no esperado: ahí sí corresponde loguear el error completo.
+     */
+    console.error('Error authenticateToken PREMIUM:', error);
+
     return res.status(500).json({
       ok: false,
+      codigo: 'AUTH_ERROR',
+      code: 'AUTH_ERROR',
       message: 'Error al validar autenticación.'
     });
   }

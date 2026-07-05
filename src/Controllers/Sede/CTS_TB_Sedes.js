@@ -2,10 +2,30 @@
  * Benjamin Orellana - 2026/05/10 - Controlador Sequelize para la gestión de sedes PREMIUM.
  */
 
-import { Op } from 'sequelize';
+import { Op, literal } from 'sequelize';
 import SedesModel from '../../Models/Sede/MD_TB_Sedes.js';
 
 const ESTADOS_ACTIVO_VALIDOS = [0, 1];
+
+const getHorariosSedeAttributes = () => [
+  [
+    literal(`(
+      SELECT COUNT(*)
+      FROM sedes_horarios AS sh
+      WHERE sh.sede_id = sedes_sedes.id
+    )`),
+    'horarios_count'
+  ],
+  [
+    literal(`(
+      SELECT COUNT(*)
+      FROM sedes_horarios AS sh
+      WHERE sh.sede_id = sedes_sedes.id
+        AND sh.activo = 1
+    )`),
+    'horarios_activos_count'
+  ]
+];
 
 const normalizarTexto = (value) => {
   if (value === undefined || value === null) return null;
@@ -183,6 +203,9 @@ export const OBRSedes_CTS = async (req, res) => {
 
     const { rows, count } = await SedesModel.findAndCountAll({
       where,
+      attributes: {
+        include: getHorariosSedeAttributes()
+      },
       limit: limitNumber,
       offset,
       order: [[safeOrderBy, safeOrderDirection]]
@@ -213,6 +236,9 @@ export const OBRSedes_CTS = async (req, res) => {
 export const OBRSedesActivas_CTS = async (req, res) => {
   try {
     const sedes = await SedesModel.findAll({
+      attributes: {
+        include: getHorariosSedeAttributes()
+      },
       where: {
         activo: 1
       },
@@ -269,7 +295,11 @@ export const OBRSedePorId_CTS = async (req, res) => {
   try {
     const { id } = req.params;
 
-    const sede = await SedesModel.findByPk(id);
+    const sede = await SedesModel.findByPk(id, {
+      attributes: {
+        include: getHorariosSedeAttributes()
+      }
+    });
 
     if (!sede) {
       return res.status(404).json({

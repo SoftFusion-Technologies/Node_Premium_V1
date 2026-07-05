@@ -12,18 +12,18 @@
  * Capa: Backend
  */
 
-import { Op }                       from 'sequelize';
-import dayjs                        from 'dayjs';
-import AgendaTurnosModel            from '../../Models/Agenda/MD_TB_AgendaTurnos.js';
-import AgendaHorariosSedeModel      from '../../Models/Agenda/MD_TB_AgendaHorariosSede.js';
-import AgendaTurnosReservasModel    from '../../Models/Agenda/MD_TB_AgendaTurnosReservas.js';
+import { Op } from 'sequelize';
+import dayjs from 'dayjs';
+import AgendaTurnosModel from '../../Models/Agenda/MD_TB_AgendaTurnos.js';
+import AgendaHorariosSedeModel from '../../Models/Agenda/MD_TB_AgendaHorariosSede.js';
+import AgendaTurnosReservasModel from '../../Models/Agenda/MD_TB_AgendaTurnosReservas.js';
 import AgendaTurnosListaEsperaModel from '../../Models/Agenda/MD_TB_AgendaTurnosListaEspera.js';
-import AlumnosMembresiasModel       from '../../Models/Alumno/MD_TB_AlumnosMembresias.js';
-import SedesModel                   from '../../Models/Sede/MD_TB_Sedes.js';
-import SedesHorariosModel           from '../../Models/Sede/MD_TB_SedesHorarios.js';
-import UsuariosModel                from '../../Models/Usuario/MD_TB_Usuarios.js';
-import AlumnosModel                 from '../../Models/Alumno/MD_TB_Alumnos.js';
-import db                           from '../../DataBase/db.js';
+import AlumnosMembresiasModel from '../../Models/Alumno/MD_TB_AlumnosMembresias.js';
+import SedesModel from '../../Models/Sede/MD_TB_Sedes.js';
+import SedesHorariosModel from '../../Models/Sede/MD_TB_SedesHorarios.js';
+import UsuariosModel from '../../Models/Usuario/MD_TB_Usuarios.js';
+import AlumnosModel from '../../Models/Alumno/MD_TB_Alumnos.js';
+import db from '../../DataBase/db.js';
 
 // ─── Helpers internos ─────────────────────────────────────────────────────────
 
@@ -33,15 +33,15 @@ import db                           from '../../DataBase/db.js';
  */
 const generarFranjasHorarias = (horaInicio, horaFin, duracionMinutos) => {
   const franjas = [];
-  let   cursor  = dayjs(`2000-01-01 ${horaInicio}`);
-  const fin     = dayjs(`2000-01-01 ${horaFin}`);
+  let cursor = dayjs(`2000-01-01 ${horaInicio}`);
+  const fin = dayjs(`2000-01-01 ${horaFin}`);
 
   while (cursor.isBefore(fin)) {
     const siguiente = cursor.add(duracionMinutos, 'minute');
     if (siguiente.isAfter(fin)) break;
     franjas.push({
       hora_inicio: cursor.format('HH:mm:ss'),
-      hora_fin:    siguiente.format('HH:mm:ss')
+      hora_fin: siguiente.format('HH:mm:ss')
     });
     cursor = siguiente;
   }
@@ -53,17 +53,22 @@ const generarFranjasHorarias = (horaInicio, horaFin, duracionMinutos) => {
  * Genera las fechas válidas dentro de un rango,
  * excluyendo días de semana y fechas específicas.
  */
-const generarFechasValidas = (fechaInicio, fechaFin, diasExcluidos = [], fechasExcluidas = []) => {
+const generarFechasValidas = (
+  fechaInicio,
+  fechaFin,
+  diasExcluidos = [],
+  fechasExcluidas = []
+) => {
   const fechas = [];
-  let   cursor = dayjs(fechaInicio);
-  const fin    = dayjs(fechaFin);
+  let cursor = dayjs(fechaInicio);
+  const fin = dayjs(fechaFin);
 
   while (cursor.isBefore(fin) || cursor.isSame(fin, 'day')) {
     // dayjs: 0=domingo, 1=lunes... El backend usa 1=Lunes...7=Domingo igual que la BD
     const diaBD = cursor.day() === 0 ? 7 : cursor.day();
     const clave = cursor.format('YYYY-MM-DD');
 
-    const esDiaExcluido   = diasExcluidos.includes(diaBD);
+    const esDiaExcluido = diasExcluidos.includes(diaBD);
     const esFechaExcluida = fechasExcluidas.includes(clave);
 
     if (!esDiaExcluido && !esFechaExcluida) {
@@ -84,11 +89,12 @@ const generarFechasValidas = (fechaInicio, fechaFin, diasExcluidos = [], fechasE
  */
 export const OBRS_Turnos_CTS = async (req, res) => {
   try {
-    const { sede_id, fecha, estado, profesor_id, fecha_desde, fecha_hasta } = req.query;
+    const { sede_id, fecha, estado, profesor_id, fecha_desde, fecha_hasta } =
+      req.query;
 
     const where = {};
-    if (sede_id)    where.sede_id    = sede_id;
-    if (estado)     where.estado     = estado;
+    if (sede_id) where.sede_id = sede_id;
+    if (estado) where.estado = estado;
     if (profesor_id) where.profesor_id = profesor_id;
 
     if (fecha) {
@@ -102,17 +108,24 @@ export const OBRS_Turnos_CTS = async (req, res) => {
     const turnos = await AgendaTurnosModel.findAll({
       where,
       include: [
-        { model: SedesModel,    as: 'sede',    attributes: ['id', 'nombre'] },
-        { model: UsuariosModel, as: 'profesor', attributes: ['id', 'nombre', 'apellido'] },
+        { model: SedesModel, as: 'sede', attributes: ['id', 'nombre'] },
         {
-          model:      AgendaTurnosReservasModel,
-          as:         'reservas',
+          model: UsuariosModel,
+          as: 'profesor',
+          attributes: ['id', 'nombre', 'apellido']
+        },
+        {
+          model: AgendaTurnosReservasModel,
+          as: 'reservas',
           attributes: ['id', 'alumno_id', 'estado', 'origen_reserva'],
-          where:      { estado: 'reservada' },
-          required:   false
+          where: { estado: 'reservada' },
+          required: false
         }
       ],
-      order: [['fecha', 'ASC'], ['hora_inicio', 'ASC']]
+      order: [
+        ['fecha', 'ASC'],
+        ['hora_inicio', 'ASC']
+      ]
     });
 
     return res.status(200).json(turnos);
@@ -132,35 +145,45 @@ export const OBRS_DetTurno_CTS = async (req, res) => {
 
     const turno = await AgendaTurnosModel.findByPk(id, {
       include: [
-        { model: SedesModel,    as: 'sede',    attributes: ['id', 'nombre'] },
-        { model: UsuariosModel, as: 'profesor', attributes: ['id', 'nombre', 'apellido'] },
+        { model: SedesModel, as: 'sede', attributes: ['id', 'nombre'] },
         {
-          model:    AgendaTurnosReservasModel,
-          as:       'reservas',
+          model: UsuariosModel,
+          as: 'profesor',
+          attributes: ['id', 'nombre', 'apellido']
+        },
+        {
+          model: AgendaTurnosReservasModel,
+          as: 'reservas',
           required: false,
           include: [
             {
-              model:      AlumnosModel,
-              as:         'alumno',
+              model: AlumnosModel,
+              as: 'alumno',
               attributes: ['id', 'nombre', 'apellido', 'telefono']
             }
           ]
         },
         {
-          model:    AgendaTurnosListaEsperaModel,
-          as:       'lista_espera',
+          model: AgendaTurnosListaEsperaModel,
+          as: 'lista_espera',
           required: false,
-          where:    { estado: 'esperando' },
+          where: { estado: 'esperando' },
           include: [
             {
-              model:      AlumnosModel,
-              as:         'alumno',
+              model: AlumnosModel,
+              as: 'alumno',
               attributes: ['id', 'nombre', 'apellido', 'telefono']
             }
           ]
         }
       ],
-      order: [[{ model: AgendaTurnosListaEsperaModel, as: 'lista_espera' }, 'posicion', 'ASC']]
+      order: [
+        [
+          { model: AgendaTurnosListaEsperaModel, as: 'lista_espera' },
+          'posicion',
+          'ASC'
+        ]
+      ]
     });
 
     if (!turno) {
@@ -193,12 +216,19 @@ export const CR_Turno_CTS = async (req, res) => {
     } = req.body;
 
     if (!sede_id || !fecha || !hora_inicio || !hora_fin) {
-      return res.status(400).json({ message: 'Faltan campos requeridos: sede_id, fecha, hora_inicio, hora_fin.' });
+      return res
+        .status(400)
+        .json({
+          message:
+            'Faltan campos requeridos: sede_id, fecha, hora_inicio, hora_fin.'
+        });
     }
 
     // Solo se pueden crear turnos de hoy en adelante (reloj del servidor)
     if (dayjs(fecha).isBefore(dayjs(), 'day')) {
-      return res.status(400).json({ message: 'No se pueden crear turnos en una fecha pasada.' });
+      return res
+        .status(400)
+        .json({ message: 'No se pueden crear turnos en una fecha pasada.' });
     }
 
     // Evitar duplicados: ya existe un turno para esa sede, fecha y horario
@@ -206,7 +236,11 @@ export const CR_Turno_CTS = async (req, res) => {
       where: { sede_id, fecha, hora_inicio }
     });
     if (turnoDuplicado) {
-      return res.status(400).json({ message: 'Ya existe un turno para esa sede, fecha y horario.' });
+      return res
+        .status(400)
+        .json({
+          message: 'Ya existe un turno para esa sede, fecha y horario.'
+        });
     }
 
     // Si viene de una plantilla, heredar nombre_clase si no se especificó
@@ -219,21 +253,27 @@ export const CR_Turno_CTS = async (req, res) => {
     const turno = await AgendaTurnosModel.create({
       horario_sede_id: horario_sede_id || null,
       sede_id,
-      profesor_id:     profesor_id    || null,
+      profesor_id: profesor_id || null,
       fecha,
       hora_inicio,
       hora_fin,
-      cupo_maximo:     cupo_maximo    || 6,
+      cupo_maximo: cupo_maximo || 6,
       cupos_reservados: 0,
-      nombre_clase:    nombreFinal,
-      estado:          'disponible',
-      observaciones:   observaciones  || null
+      nombre_clase: nombreFinal,
+      estado: 'disponible',
+      observaciones: observaciones || null
     });
 
-    return res.status(201).json({ message: 'Turno creado correctamente.', turno });
+    return res
+      .status(201)
+      .json({ message: 'Turno creado correctamente.', turno });
   } catch (error) {
     if (error.name === 'SequelizeUniqueConstraintError') {
-      return res.status(400).json({ message: 'Ya existe un turno para esa sede, fecha y horario.' });
+      return res
+        .status(400)
+        .json({
+          message: 'Ya existe un turno para esa sede, fecha y horario.'
+        });
     }
     console.error('[CR_Turno_CTS]', error);
     return res.status(500).json({ message: 'Error al crear el turno.' });
@@ -269,22 +309,45 @@ export const CR_TurnosMasivo_CTS = async (req, res) => {
       nombre_clase,
       fecha_inicio,
       fecha_fin,
-      dias_excluidos   = [],
+      dias_excluidos = [],
       fechas_excluidas = [],
       hora_inicio,
       hora_fin,
       duracion_minutos = 60,
-      cupo_maximo      = 6
+      cupo_maximo = 6,
+      crear_horarios_faltantes = true
     } = req.body;
 
-    if (!sede_ids?.length || !fecha_inicio || !fecha_fin || !hora_inicio || !hora_fin) {
-      return res.status(400).json({ message: 'Faltan campos requeridos: sede_ids, fecha_inicio, fecha_fin, hora_inicio, hora_fin.' });
+    if (
+      !sede_ids?.length ||
+      !fecha_inicio ||
+      !fecha_fin ||
+      !hora_inicio ||
+      !hora_fin
+    ) {
+      return res
+        .status(400)
+        .json({
+          message:
+            'Faltan campos requeridos: sede_ids, fecha_inicio, fecha_fin, hora_inicio, hora_fin.'
+        });
     }
 
     // Solo se pueden crear turnos de hoy en adelante (reloj del servidor)
     if (dayjs(fecha_inicio).isBefore(dayjs(), 'day')) {
-      return res.status(400).json({ message: 'La fecha de inicio no puede ser anterior a hoy.' });
+      return res
+        .status(400)
+        .json({ message: 'La fecha de inicio no puede ser anterior a hoy.' });
     }
+
+    const debeCrearHorariosFaltantes = ![false, 'false', 0, '0'].includes(
+      crear_horarios_faltantes
+    );
+
+    const normalizarHoraBD = (hora) => {
+      const texto = String(hora || '').trim();
+      return texto.length === 5 ? `${texto}:00` : texto;
+    };
 
     // Heredar nombre_clase de la plantilla si no se especificó
     let nombreFinal = nombre_clase || null;
@@ -293,11 +356,22 @@ export const CR_TurnosMasivo_CTS = async (req, res) => {
       if (plantilla) nombreFinal = plantilla.nombre_clase;
     }
 
-    const fechasValidas = generarFechasValidas(fecha_inicio, fecha_fin, dias_excluidos, fechas_excluidas);
-    const franjas       = generarFranjasHorarias(hora_inicio, hora_fin, duracion_minutos);
+    const fechasValidas = generarFechasValidas(
+      fecha_inicio,
+      fecha_fin,
+      dias_excluidos,
+      fechas_excluidas
+    );
+    const franjas = generarFranjasHorarias(
+      hora_inicio,
+      hora_fin,
+      duracion_minutos
+    );
 
     if (!fechasValidas.length || !franjas.length) {
-      return res.status(400).json({ message: 'El rango no generó ningún turno válido.' });
+      return res
+        .status(400)
+        .json({ message: 'El rango no generó ningún turno válido.' });
     }
 
     // Cargar horarios configurados para todas las sedes involucradas.
@@ -311,7 +385,66 @@ export const CR_TurnosMasivo_CTS = async (req, res) => {
     const horarioMap = {};
     for (const h of horariosRows) {
       if (!horarioMap[h.sede_id]) horarioMap[h.sede_id] = {};
-      horarioMap[h.sede_id][h.dia_semana] = { hora_inicio: h.hora_inicio, hora_fin: h.hora_fin };
+      horarioMap[h.sede_id][h.dia_semana] = {
+        hora_inicio: h.hora_inicio,
+        hora_fin: h.hora_fin
+      };
+    }
+
+    // Si una sede no tiene horario configurado para un día incluido en el rango,
+    // se crea automáticamente tomando el horario superior del formulario.
+    // Esto permite que la creación masiva inicialice la agenda y también deje
+    // persistido el horario operativo de la sede para futuras generaciones.
+    let horariosCreados = 0;
+    const diasNecesarios = [
+      ...new Set(
+        fechasValidas.map((fecha) => {
+          return dayjs(fecha).day() === 0 ? 7 : dayjs(fecha).day();
+        })
+      )
+    ];
+
+    if (debeCrearHorariosFaltantes) {
+      const horaInicioBase = normalizarHoraBD(hora_inicio);
+      const horaFinBase = normalizarHoraBD(hora_fin);
+
+      for (const sede_id of sede_ids) {
+        if (!horarioMap[sede_id]) horarioMap[sede_id] = {};
+
+        for (const dia_semana of diasNecesarios) {
+          if (horarioMap[sede_id][dia_semana]) continue;
+
+          const horarioExistente = await SedesHorariosModel.findOne({
+            where: {
+              sede_id,
+              dia_semana
+            }
+          });
+
+          if (horarioExistente) {
+            await horarioExistente.update({
+              hora_inicio: horaInicioBase,
+              hora_fin: horaFinBase,
+              activo: 1,
+              updated_at: new Date()
+            });
+          } else {
+            await SedesHorariosModel.create({
+              sede_id,
+              dia_semana,
+              hora_inicio: horaInicioBase,
+              hora_fin: horaFinBase,
+              activo: 1
+            });
+          }
+
+          horarioMap[sede_id][dia_semana] = {
+            hora_inicio: horaInicioBase,
+            hora_fin: horaFinBase
+          };
+          horariosCreados++;
+        }
+      }
     }
 
     // Buscar turnos ya existentes para las mismas sedes y fechas, para no
@@ -319,7 +452,7 @@ export const CR_TurnosMasivo_CTS = async (req, res) => {
     const turnosExistentes = await AgendaTurnosModel.findAll({
       where: {
         sede_id: { [Op.in]: sede_ids },
-        fecha:   { [Op.in]: fechasValidas }
+        fecha: { [Op.in]: fechasValidas }
       },
       attributes: ['sede_id', 'fecha', 'hora_inicio']
     });
@@ -331,11 +464,11 @@ export const CR_TurnosMasivo_CTS = async (req, res) => {
     // Armar todos los registros a insertar aplicando el horario de la sede por día.
     // Para cada (sede, fecha, franja):
     //   1. Busca el horario configurado para esa sede y ese día de la semana.
-    //   2. Si no existe horario → omite (ese día no está habilitado en la sede).
+    //   2. Si no existe horario y no se pidió crear faltantes → omite.
     //   3. Si la franja queda fuera del horario → omite (recorte por día).
     //   4. Si ya existe en BD → omite (duplicado).
     const registros = [];
-    let omitidos           = 0;
+    let omitidos = 0;
     let omitidosSinHorario = 0;
 
     for (const sede_id of sede_ids) {
@@ -343,7 +476,7 @@ export const CR_TurnosMasivo_CTS = async (req, res) => {
 
       for (const fecha of fechasValidas) {
         // dia_semana en formato BD: 1=Lun...7=Dom
-        const diaBD      = dayjs(fecha).day() === 0 ? 7 : dayjs(fecha).day();
+        const diaBD = dayjs(fecha).day() === 0 ? 7 : dayjs(fecha).day();
         const horarioDia = horariosSede[diaBD];
 
         if (!horarioDia) {
@@ -354,7 +487,10 @@ export const CR_TurnosMasivo_CTS = async (req, res) => {
 
         for (const franja of franjas) {
           // Recortar: la franja debe caer dentro del horario habilitado del día
-          if (franja.hora_inicio < horarioDia.hora_inicio || franja.hora_fin > horarioDia.hora_fin) {
+          if (
+            franja.hora_inicio < horarioDia.hora_inicio ||
+            franja.hora_fin > horarioDia.hora_fin
+          ) {
             omitidosSinHorario++;
             continue;
           }
@@ -366,16 +502,16 @@ export const CR_TurnosMasivo_CTS = async (req, res) => {
           }
 
           registros.push({
-            horario_sede_id:  horario_sede_id || null,
+            horario_sede_id: horario_sede_id || null,
             sede_id,
-            profesor_id:      profesor_id     || null,
+            profesor_id: profesor_id || null,
             fecha,
-            hora_inicio:      franja.hora_inicio,
-            hora_fin:         franja.hora_fin,
+            hora_inicio: franja.hora_inicio,
+            hora_fin: franja.hora_fin,
             cupo_maximo,
             cupos_reservados: 0,
-            nombre_clase:     nombreFinal,
-            estado:           'disponible'
+            nombre_clase: nombreFinal,
+            estado: 'disponible'
           });
         }
       }
@@ -383,7 +519,8 @@ export const CR_TurnosMasivo_CTS = async (req, res) => {
 
     if (!registros.length) {
       return res.status(400).json({
-        message: 'No se generó ningún turno válido. Verificá que las sedes tengan horarios configurados para los días seleccionados.'
+        message:
+          'No se generó ningún turno válido. Verificá que las sedes tengan horarios configurados para los días seleccionados.'
       });
     }
 
@@ -391,18 +528,29 @@ export const CR_TurnosMasivo_CTS = async (req, res) => {
     await AgendaTurnosModel.bulkCreate(registros);
 
     const partes = [`Se crearon ${registros.length} turnos correctamente.`];
-    if (omitidos > 0)           partes.push(`${omitidos} omitidos por ya existir.`);
-    if (omitidosSinHorario > 0) partes.push(`${omitidosSinHorario} omitidos por estar fuera del horario configurado de la sede.`);
+    if (omitidos > 0) partes.push(`${omitidos} omitidos por ya existir.`);
+    if (omitidosSinHorario > 0)
+      partes.push(
+        `${omitidosSinHorario} omitidos por estar fuera del horario configurado de la sede.`
+      );
+    if (horariosCreados > 0)
+      partes.push(`${horariosCreados} horarios de sede creados o reactivados.`);
 
     return res.status(201).json({
-      message:              partes.join(' '),
-      total:                registros.length,
+      message: partes.join(' '),
+      total: registros.length,
       omitidos,
-      omitidos_sin_horario: omitidosSinHorario
+      omitidos_sin_horario: omitidosSinHorario,
+      horarios_creados: horariosCreados
     });
   } catch (error) {
     if (error.name === 'SequelizeUniqueConstraintError') {
-      return res.status(400).json({ message: 'Alguno de los turnos a crear ya existe (misma sede, fecha y horario).' });
+      return res
+        .status(400)
+        .json({
+          message:
+            'Alguno de los turnos a crear ya existe (misma sede, fecha y horario).'
+        });
     }
     console.error('[CR_TurnosMasivo_CTS]', error);
     return res.status(500).json({ message: 'Error al crear los turnos.' });
@@ -431,44 +579,56 @@ export const UR_Turno_CTS = async (req, res) => {
       return res.status(404).json({ message: 'Turno no encontrado.' });
     }
 
-    const fechaFinal      = fecha       ?? turno.fecha;
+    const fechaFinal = fecha ?? turno.fecha;
     const horaInicioFinal = hora_inicio ?? turno.hora_inicio;
 
     // Solo se puede mover un turno a una fecha de hoy en adelante
     if (fecha && dayjs(fechaFinal).isBefore(dayjs(), 'day')) {
-      return res.status(400).json({ message: 'No se puede mover un turno a una fecha pasada.' });
+      return res
+        .status(400)
+        .json({ message: 'No se puede mover un turno a una fecha pasada.' });
     }
 
     // Evitar duplicados al mover el turno a otra fecha/horario ya ocupado
     if (fecha || hora_inicio) {
       const turnoDuplicado = await AgendaTurnosModel.findOne({
         where: {
-          sede_id:     turno.sede_id,
-          fecha:       fechaFinal,
+          sede_id: turno.sede_id,
+          fecha: fechaFinal,
           hora_inicio: horaInicioFinal,
-          id:          { [Op.ne]: turno.id }
+          id: { [Op.ne]: turno.id }
         }
       });
       if (turnoDuplicado) {
-        return res.status(400).json({ message: 'Ya existe un turno para esa sede, fecha y horario.' });
+        return res
+          .status(400)
+          .json({
+            message: 'Ya existe un turno para esa sede, fecha y horario.'
+          });
       }
     }
 
     await turno.update({
-      profesor_id:  profesor_id  ?? turno.profesor_id,
-      fecha:        fechaFinal,
-      hora_inicio:  horaInicioFinal,
-      hora_fin:     hora_fin     ?? turno.hora_fin,
-      cupo_maximo:  cupo_maximo  ?? turno.cupo_maximo,
+      profesor_id: profesor_id ?? turno.profesor_id,
+      fecha: fechaFinal,
+      hora_inicio: horaInicioFinal,
+      hora_fin: hora_fin ?? turno.hora_fin,
+      cupo_maximo: cupo_maximo ?? turno.cupo_maximo,
       nombre_clase: nombre_clase ?? turno.nombre_clase,
       observaciones: observaciones ?? turno.observaciones,
-      updated_at:   new Date()
+      updated_at: new Date()
     });
 
-    return res.status(200).json({ message: 'Turno actualizado correctamente.', turno });
+    return res
+      .status(200)
+      .json({ message: 'Turno actualizado correctamente.', turno });
   } catch (error) {
     if (error.name === 'SequelizeUniqueConstraintError') {
-      return res.status(400).json({ message: 'Ya existe un turno para esa sede, fecha y horario.' });
+      return res
+        .status(400)
+        .json({
+          message: 'Ya existe un turno para esa sede, fecha y horario.'
+        });
     }
     console.error('[UR_Turno_CTS]', error);
     return res.status(500).json({ message: 'Error al actualizar el turno.' });
@@ -486,7 +646,11 @@ export const UR_EstadoTurno_CTS = async (req, res) => {
 
     const estadosValidos = ['disponible', 'bloqueado', 'cancelado'];
     if (!estadosValidos.includes(estado)) {
-      return res.status(400).json({ message: `Estado inválido. Valores permitidos: ${estadosValidos.join(', ')}.` });
+      return res
+        .status(400)
+        .json({
+          message: `Estado inválido. Valores permitidos: ${estadosValidos.join(', ')}.`
+        });
     }
 
     const turno = await AgendaTurnosModel.findByPk(id);
@@ -496,14 +660,18 @@ export const UR_EstadoTurno_CTS = async (req, res) => {
 
     await turno.update({
       estado,
-      motivo_bloqueo: estado === 'bloqueado' ? (motivo_bloqueo || null) : null,
-      updated_at:     new Date()
+      motivo_bloqueo: estado === 'bloqueado' ? motivo_bloqueo || null : null,
+      updated_at: new Date()
     });
 
-    return res.status(200).json({ message: `Turno ${estado} correctamente.`, turno });
+    return res
+      .status(200)
+      .json({ message: `Turno ${estado} correctamente.`, turno });
   } catch (error) {
     console.error('[UR_EstadoTurno_CTS]', error);
-    return res.status(500).json({ message: 'Error al cambiar estado del turno.' });
+    return res
+      .status(500)
+      .json({ message: 'Error al cambiar estado del turno.' });
   }
 };
 
@@ -518,7 +686,9 @@ export const ER_Turno_CTS = async (req, res) => {
   try {
     const { id } = req.params;
 
-    const turno = await AgendaTurnosModel.findByPk(id, { transaction: transaccion });
+    const turno = await AgendaTurnosModel.findByPk(id, {
+      transaction: transaccion
+    });
     if (!turno) {
       await transaccion.rollback();
       return res.status(404).json({ message: 'Turno no encontrado.' });
@@ -528,23 +698,29 @@ export const ER_Turno_CTS = async (req, res) => {
     const inicioTurno = dayjs(`${turno.fecha} ${turno.hora_inicio}`);
     if (inicioTurno.isAfter(dayjs())) {
       const reservasActivas = await AgendaTurnosReservasModel.findAll({
-        where:       { turno_id: id, estado: 'reservada' },
+        where: { turno_id: id, estado: 'reservada' },
         transaction: transaccion
       });
 
       for (const reserva of reservasActivas) {
         if (!reserva.membresia_id) continue;
 
-        const membresia = await AlumnosMembresiasModel.findByPk(reserva.membresia_id, {
-          transaction: transaccion,
-          lock:        transaccion.LOCK.UPDATE
-        });
+        const membresia = await AlumnosMembresiasModel.findByPk(
+          reserva.membresia_id,
+          {
+            transaction: transaccion,
+            lock: transaccion.LOCK.UPDATE
+          }
+        );
         if (membresia) {
-          await membresia.update({
-            clases_usadas:      Math.max(0, membresia.clases_usadas - 1),
-            clases_disponibles: membresia.clases_disponibles + 1,
-            updated_at:         new Date()
-          }, { transaction: transaccion });
+          await membresia.update(
+            {
+              clases_usadas: Math.max(0, membresia.clases_usadas - 1),
+              clases_disponibles: membresia.clases_disponibles + 1,
+              updated_at: new Date()
+            },
+            { transaction: transaccion }
+          );
         }
       }
     }
@@ -570,10 +746,14 @@ export const ER_Turno_CTS = async (req, res) => {
 export const OBRS_TurnosAlumno_CTS = async (req, res) => {
   try {
     const alumno_id = req.alumno.id;
-    const sede_id   = req.alumno.sede_id;
+    const sede_id = req.alumno.sede_id;
 
     if (!sede_id) {
-      return res.status(400).json({ message: 'No tenés una sede asignada. Consultá con administración.' });
+      return res
+        .status(400)
+        .json({
+          message: 'No tenés una sede asignada. Consultá con administración.'
+        });
     }
 
     const { fecha_desde, fecha_hasta } = req.query;
@@ -581,16 +761,19 @@ export const OBRS_TurnosAlumno_CTS = async (req, res) => {
     // La fecha y hora de "ahora" se calculan con el reloj del servidor (nunca
     // con el del dispositivo del alumno). El piso de fecha nunca puede ser
     // anterior a hoy, sin importar qué fecha_desde mande el cliente.
-    const hoyServidor  = dayjs().format('YYYY-MM-DD');
+    const hoyServidor = dayjs().format('YYYY-MM-DD');
     const horaServidor = dayjs().format('HH:mm:ss');
-    const piso = fecha_desde && dayjs(fecha_desde).isAfter(hoyServidor) ? fecha_desde : hoyServidor;
+    const piso =
+      fecha_desde && dayjs(fecha_desde).isAfter(hoyServidor)
+        ? fecha_desde
+        : hoyServidor;
 
     // Obtener el vencimiento de la membresía activa del alumno para limitar el rango
     const membresia = await AlumnosMembresiasModel.findOne({
       where: {
         alumno_id,
-        estado:            'activa',
-        fecha_inicio:      { [Op.lte]: hoyServidor },
+        estado: 'activa',
+        fecha_inicio: { [Op.lte]: hoyServidor },
         fecha_vencimiento: { [Op.gte]: hoyServidor }
       },
       attributes: ['fecha_vencimiento']
@@ -601,7 +784,10 @@ export const OBRS_TurnosAlumno_CTS = async (req, res) => {
     // El techo es el mínimo entre fecha_hasta pedida y fecha_vencimiento
     let techo = fecha_hasta ?? null;
     if (fechaVencimiento) {
-      techo = techo && dayjs(techo).isBefore(fechaVencimiento) ? techo : fechaVencimiento;
+      techo =
+        techo && dayjs(techo).isBefore(fechaVencimiento)
+          ? techo
+          : fechaVencimiento;
     }
 
     const condicionesFecha = [{ fecha: { [Op.gte]: piso } }];
@@ -626,14 +812,23 @@ export const OBRS_TurnosAlumno_CTS = async (req, res) => {
     const turnos = await AgendaTurnosModel.findAll({
       where,
       include: [
-        { model: SedesModel,    as: 'sede',    attributes: ['id', 'nombre'] },
-        { model: UsuariosModel, as: 'profesor', attributes: ['id', 'nombre', 'apellido'] }
+        { model: SedesModel, as: 'sede', attributes: ['id', 'nombre'] },
+        {
+          model: UsuariosModel,
+          as: 'profesor',
+          attributes: ['id', 'nombre', 'apellido']
+        }
       ],
-      order: [['fecha', 'ASC'], ['hora_inicio', 'ASC']]
+      order: [
+        ['fecha', 'ASC'],
+        ['hora_inicio', 'ASC']
+      ]
     });
 
     // Incluir fecha_vencimiento para que el frontend pueda limitar la navegación
-    return res.status(200).json({ turnos, fecha_vencimiento: fechaVencimiento });
+    return res
+      .status(200)
+      .json({ turnos, fecha_vencimiento: fechaVencimiento });
   } catch (error) {
     console.error('[OBRS_TurnosAlumno_CTS]', error);
     return res.status(500).json({ message: 'Error al obtener turnos.' });
@@ -656,22 +851,28 @@ export const OBRS_TurnosAlumno_CTS = async (req, res) => {
 export const ER_TurnosMasivo_CTS = async (req, res) => {
   const transaccion = await db.transaction();
   try {
-    const { sede_ids, fecha_inicio, fecha_fin, hora_inicio, hora_fin } = req.body;
+    const { sede_ids, fecha_inicio, fecha_fin, hora_inicio, hora_fin } =
+      req.body;
 
     if (!sede_ids?.length || !fecha_inicio || !fecha_fin) {
       await transaccion.rollback();
-      return res.status(400).json({ message: 'Faltan campos requeridos: sede_ids, fecha_inicio, fecha_fin.' });
+      return res
+        .status(400)
+        .json({
+          message:
+            'Faltan campos requeridos: sede_ids, fecha_inicio, fecha_fin.'
+        });
     }
 
     const where = {
       sede_id: { [Op.in]: sede_ids },
-      fecha:   { [Op.between]: [fecha_inicio, fecha_fin] }
+      fecha: { [Op.between]: [fecha_inicio, fecha_fin] }
     };
 
     // Si se especifica rango horario, filtrar solo los turnos que estén dentro
     if (hora_inicio && hora_fin) {
       where.hora_inicio = { [Op.gte]: hora_inicio };
-      where.hora_fin    = { [Op.lte]: hora_fin };
+      where.hora_fin = { [Op.lte]: hora_fin };
     }
 
     const turnos = await AgendaTurnosModel.findAll({
@@ -682,11 +883,16 @@ export const ER_TurnosMasivo_CTS = async (req, res) => {
 
     if (turnos.length === 0) {
       await transaccion.rollback();
-      return res.status(404).json({ message: 'No se encontraron turnos en el rango indicado para las sedes seleccionadas.' });
+      return res
+        .status(404)
+        .json({
+          message:
+            'No se encontraron turnos en el rango indicado para las sedes seleccionadas.'
+        });
     }
 
     // Para los turnos futuros, restaurar créditos de los alumnos inscriptos
-    const ahora       = dayjs();
+    const ahora = dayjs();
     const turnosFuturos = turnos.filter((t) =>
       dayjs(`${t.fecha} ${t.hora_inicio}`).isAfter(ahora)
     );
@@ -696,24 +902,30 @@ export const ER_TurnosMasivo_CTS = async (req, res) => {
 
       const reservasActivas = await AgendaTurnosReservasModel.findAll({
         where: {
-          turno_id:    { [Op.in]: idsFuturos },
-          estado:      'reservada',
+          turno_id: { [Op.in]: idsFuturos },
+          estado: 'reservada',
           membresia_id: { [Op.ne]: null }
         },
         transaction: transaccion
       });
 
       for (const reserva of reservasActivas) {
-        const membresia = await AlumnosMembresiasModel.findByPk(reserva.membresia_id, {
-          transaction: transaccion,
-          lock:        transaccion.LOCK.UPDATE
-        });
+        const membresia = await AlumnosMembresiasModel.findByPk(
+          reserva.membresia_id,
+          {
+            transaction: transaccion,
+            lock: transaccion.LOCK.UPDATE
+          }
+        );
         if (membresia) {
-          await membresia.update({
-            clases_usadas:      Math.max(0, membresia.clases_usadas - 1),
-            clases_disponibles: membresia.clases_disponibles + 1,
-            updated_at:         new Date()
-          }, { transaction: transaccion });
+          await membresia.update(
+            {
+              clases_usadas: Math.max(0, membresia.clases_usadas - 1),
+              clases_disponibles: membresia.clases_disponibles + 1,
+              updated_at: new Date()
+            },
+            { transaction: transaccion }
+          );
         }
       }
     }
@@ -722,13 +934,14 @@ export const ER_TurnosMasivo_CTS = async (req, res) => {
     await AgendaTurnosModel.destroy({ where, transaction: transaccion });
     await transaccion.commit();
 
-    const descripcionRango = hora_inicio && hora_fin
-      ? ` en el horario ${hora_inicio} - ${hora_fin}`
-      : '';
+    const descripcionRango =
+      hora_inicio && hora_fin
+        ? ` en el horario ${hora_inicio} - ${hora_fin}`
+        : '';
 
     return res.status(200).json({
       message: `Se eliminaron ${turnos.length} turnos correctamente${descripcionRango}.`,
-      total:   turnos.length
+      total: turnos.length
     });
   } catch (error) {
     await transaccion.rollback();
@@ -736,4 +949,3 @@ export const ER_TurnosMasivo_CTS = async (req, res) => {
     return res.status(500).json({ message: 'Error al eliminar los turnos.' });
   }
 };
-

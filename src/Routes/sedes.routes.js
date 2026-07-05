@@ -35,6 +35,7 @@ import {
   OBRS_HorariosSedes_CTS,
   OBRS_HorarioSedePorId_CTS,
   CR_HorarioSede_CTS,
+  UR_AplicarHorariosGlobalesSedes_CTS,
   UR_HorarioSede_CTS,
   UR_ToggleHorarioSede_CTS,
   ER_HorarioSede_CTS
@@ -59,20 +60,23 @@ const router = express.Router();
 /*
  * Sergio Manrique - 2026/07/02 - Lista horarios de sedes (filtro opcional: sede_id, activo).
  */
-router.get(
-  '/sedes/horarios',
+router.get('/sedes/horarios', authenticateToken, OBRS_HorariosSedes_CTS);
+
+/*
+ * Benjamin Orellana - 2026/07/05 - Aplica una misma grilla horaria a todas las sedes o solo a las activas.
+ * IMPORTANTE: se declara antes de /sedes/horarios/:id para evitar conflictos de lectura humana.
+ */
+router.post(
+  '/sedes/horarios/global',
   authenticateToken,
-  OBRS_HorariosSedes_CTS
+  requireRolGlobal(['SUPER_ADMIN', 'DIRECCION']),
+  UR_AplicarHorariosGlobalesSedes_CTS
 );
 
 /*
  * Sergio Manrique - 2026/07/02 - Obtiene un horario por ID.
  */
-router.get(
-  '/sedes/horarios/:id',
-  authenticateToken,
-  OBRS_HorarioSedePorId_CTS
-);
+router.get('/sedes/horarios/:id', authenticateToken, OBRS_HorarioSedePorId_CTS);
 
 /*
  * Sergio Manrique - 2026/07/02 - Crea un horario para una sede y día.

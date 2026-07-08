@@ -49,6 +49,8 @@ import { initFinanzasRelaciones } from './src/Models/Finanzas/relacionesFinanzas
 import { initArcaRelaciones } from './src/Models/ARCA/relacionesARCA.js';
 // Benjamin Orellana - 2026/05/10 - Importa relaciones Sequelize del módulo Sistema.
 import { initSistemaRelaciones } from './src/Models/Sistema/relacionesSistema.js';
+// Benjamin Orellana - 2026/07/07 - Importa relaciones Sequelize del módulo Gastos.
+import { initGastosRelaciones } from './src/Models/Gastos/relacionesGastos.js';
 
 import { iniciarCronProcesarVencimientos } from './src/Jobs/JB_ProcesarVencimientos.js';
 
@@ -80,7 +82,11 @@ app.post('/login', loginUsuario);
 app.post('/alumnos/login', loginAlumnoNuevo);
 
 // Sergio Gustavo Manrique - 2026/06/11 - Cambio de contraseña obligatorio primer acceso alumno.
-app.post('/alumnos/login/cambiar-password', authenticateAlumnoToken, cambiarPasswordAlumno);
+app.post(
+  '/alumnos/login/cambiar-password',
+  authenticateAlumnoToken,
+  cambiarPasswordAlumno
+);
 
 // Benjamin Orellana - 2026/05/10 - Ruta protegida de prueba para validar JWT de usuario interno.
 app.get('/protected', authenticateToken, (req, res) => {
@@ -185,6 +191,8 @@ const startServer = async () => {
     initArcaRelaciones();
     // Benjamin Orellana - 2026/05/10 - Inicializa relaciones Sequelize del módulo Sistema antes de sincronizar modelos.
     initSistemaRelaciones();
+    // Benjamin Orellana - 2026/07/07 - Inicializa relaciones Sequelize del módulo Gastos antes de sincronizar modelos.
+    initGastosRelaciones();
 
     if (DB_SYNC) {
       await db.sync({

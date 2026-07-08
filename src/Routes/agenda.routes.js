@@ -28,6 +28,7 @@ import {
 
 import {
   OBRS_Turnos_CTS,
+  OBRS_TurnosAsistenciaDia_CTS,
   OBRS_DetTurno_CTS,
   CR_Turno_CTS,
   CR_TurnosMasivo_CTS,
@@ -40,6 +41,7 @@ import {
 
 import {
   OBRS_ReservasTurno_CTS,
+  OBRS_ClientesDisponiblesTurno_CTS,
   CR_ReservaAdmin_CTS,
   UR_AsistenciaAdmin_CTS,
   ER_ReservaAdmin_CTS,
@@ -143,6 +145,18 @@ router.get(
 );
 
 /*
+ * Sergio Manrique - 2026/07/05 - Turnos de un día (default hoy) en una sede,
+ * con alumnos inscriptos y su estado de asistencia, para el panel rápido.
+ * Query params: sede_id (requerido), fecha (opcional, default hoy).
+ */
+router.get(
+  '/agenda-admin/turnos-asistencia',
+  authenticateToken,
+  requireRolGlobal(ROLES_ADMIN),
+  OBRS_TurnosAsistenciaDia_CTS
+);
+
+/*
  * Sergio Manrique - 2026/06/23 - Crea un turno individual.
  */
 router.post(
@@ -223,6 +237,17 @@ router.get(
   authenticateToken,
   requireRolGlobal(ROLES_ADMIN),
   OBRS_ReservasTurno_CTS
+);
+
+/*
+ * Sergio Manrique - 2026/07/05 - Busca clientes de la sede de un turno para
+ * el buscador de "Apuntar cliente", con si se pueden inscribir y por qué no.
+ */
+router.get(
+  '/agenda-admin/turnos/:turno_id/clientes-disponibles',
+  authenticateToken,
+  requireRolGlobal(ROLES_ADMIN),
+  OBRS_ClientesDisponiblesTurno_CTS
 );
 
 /*

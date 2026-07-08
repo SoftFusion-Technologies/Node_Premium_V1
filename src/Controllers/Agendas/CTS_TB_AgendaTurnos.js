@@ -18,12 +18,68 @@ import AgendaTurnosModel from '../../Models/Agenda/MD_TB_AgendaTurnos.js';
 import AgendaHorariosSedeModel from '../../Models/Agenda/MD_TB_AgendaHorariosSede.js';
 import AgendaTurnosReservasModel from '../../Models/Agenda/MD_TB_AgendaTurnosReservas.js';
 import AgendaTurnosListaEsperaModel from '../../Models/Agenda/MD_TB_AgendaTurnosListaEspera.js';
-import AlumnosMembresiasModel from '../../Models/Alumno/MD_TB_AlumnosMembresias.js';
-import SedesModel from '../../Models/Sede/MD_TB_Sedes.js';
-import SedesHorariosModel from '../../Models/Sede/MD_TB_SedesHorarios.js';
-import UsuariosModel from '../../Models/Usuario/MD_TB_Usuarios.js';
-import AlumnosModel from '../../Models/Alumno/MD_TB_Alumnos.js';
-import db from '../../DataBase/db.js';
+import AlumnosMembresiasModel       from '../../Models/Alumno/MD_TB_AlumnosMembresias.js';
+import AlumnosAsistenciasModel      from '../../Models/Alumno/MD_TB_AlumnosAsistencias.js';
+import PagosMensualidadesModel      from '../../Models/Pago/MD_TB_PagosMensualidades.js';
+import SedesModel                   from '../../Models/Sede/MD_TB_Sedes.js';
+import SedesHorariosModel           from '../../Models/Sede/MD_TB_SedesHorarios.js';
+import UsuariosModel                from '../../Models/Usuario/MD_TB_Usuarios.js';
+import AlumnosModel                 from '../../Models/Alumno/MD_TB_Alumnos.js';
+import db                           from '../../DataBase/db.js';
+import { obtenerMinutosCancelacion } from './CTS_TB_AgendaTurnosReservas.js';
+
+// Días de anticipación para marcar el bono/membresía como "por vencer".
+const DIAS_ALERTA_VENCIMIENTO_MEMBRESIA = 3;
+
+/*
+ * Sergio Manrique - 2026/07/05
+ * Calcula los indicadores de estado de un alumno (bono por vencer, deuda)
+ * que se muestran como iconos en la lista de inscriptos del turno.
+ * Se resuelve por separado (no viene de GET /alumnos) porque ese endpoint
+ * tiene un campo de membresía con un bug conocido (ver comentario en
+ * OBRS_ClientesDisponiblesTurno_CTS de CTS_TB_AgendaTurnosReservas.js).
+ */
+const obtenerIndicadoresAlumno = async (alumnoId) => {
+  const hoy = new Date().toISOString().slice(0, 10);
+
+  const [membresia, deuda] = await Promise.all([
+    AlumnosMembresiasModel.findOne({
+      where: {
+        alumno_id: alumnoId,
+        estado:    'activa',
+        fecha_inicio:      { [Op.lte]: hoy },
+        fecha_vencimiento: { [Op.gt]:  hoy }
+      },
+      order: [['fecha_inicio', 'DESC'], ['id', 'DESC']]
+    }),
+    PagosMensualidadesModel.findOne({
+      where: {
+        alumno_id: alumnoId,
+        saldo:     { [Op.gt]: 0 },
+        estado:    { [Op.ne]: 'anulada' },
+        [Op.or]: [
+          { estado: 'vencida' },
+          {
+            fecha_vencimiento: { [Op.lt]: hoy },
+            estado:            { [Op.in]: ['pendiente', 'parcial'] }
+          }
+        ]
+      }
+    })
+  ]);
+
+  const diasParaVencer = membresia
+    ? dayjs(membresia.fecha_vencimiento).startOf('day').diff(dayjs(hoy).startOf('day'), 'day')
+    : null;
+
+  return {
+    dias_para_vencer_membresia:
+      diasParaVencer !== null && diasParaVencer <= DIAS_ALERTA_VENCIMIENTO_MEMBRESIA
+        ? diasParaVencer
+        : null,
+    tiene_deuda: !!deuda
+  };
+};
 
 // ─── Helpers internos ─────────────────────────────────────────────────────────
 
@@ -136,6 +192,74 @@ export const OBRS_Turnos_CTS = async (req, res) => {
 };
 
 /*
+ * Sergio Manrique - 2026/07/05
+ * Lista los turnos de un día (por defecto hoy) en una sede, con sus
+ * alumnos inscriptos y el estado de asistencia real de cada uno, para el
+ * panel rápido de "tomar asistencia". Los turnos sin reservas también se
+ * incluyen (para que se vea el horario igual, vacío).
+ */
+export const OBRS_TurnosAsistenciaDia_CTS = async (req, res) => {
+  try {
+    const { sede_id, fecha } = req.query;
+
+    if (!sede_id) {
+      return res.status(400).json({ message: 'Falta el parámetro sede_id.' });
+    }
+
+    const fechaConsulta = fecha || dayjs().format('YYYY-MM-DD');
+
+    const turnos = await AgendaTurnosModel.findAll({
+      where: {
+        sede_id,
+        fecha:  fechaConsulta,
+        estado: { [Op.ne]: 'cancelado' }
+      },
+      include: [
+        { model: UsuariosModel, as: 'profesor', attributes: ['id', 'nombre', 'apellido'] },
+        {
+          model:      AgendaTurnosReservasModel,
+          as:         'reservas',
+          where:      { estado: 'reservada' },
+          required:   false,
+          include: [
+            { model: AlumnosModel, as: 'alumno', attributes: ['id', 'nombre', 'apellido'] }
+          ]
+        }
+      ],
+      order: [['hora_inicio', 'ASC']]
+    });
+
+    const turnosPlanos = turnos.map((t) => t.toJSON());
+
+    // El estado real de asistencia vive en agenda_alumnos_asistencias, no en
+    // la reserva (ver UR_AsistenciaAdmin_CTS en CTS_TB_AgendaTurnosReservas.js
+    // para el porqué). Se resuelve todo en una sola consulta por reserva_id.
+    const reservaIds = turnosPlanos.flatMap((t) => (t.reservas || []).map((r) => r.id));
+
+    const asistencias = reservaIds.length
+      ? await AlumnosAsistenciasModel.findAll({
+          where: { reserva_id: { [Op.in]: reservaIds } }
+        })
+      : [];
+
+    const asistenciaPorReserva = new Map(asistencias.map((a) => [a.reserva_id, a]));
+
+    for (const turno of turnosPlanos) {
+      for (const reserva of turno.reservas || []) {
+        const asistencia = asistenciaPorReserva.get(reserva.id);
+        reserva.asistencia_id     = asistencia?.id ?? null;
+        reserva.asistencia_estado = asistencia?.estado ?? 'asistio';
+      }
+    }
+
+    return res.status(200).json({ status: 'success', data: turnosPlanos });
+  } catch (error) {
+    console.error('[OBRS_TurnosAsistenciaDia_CTS]', error);
+    return res.status(500).json({ message: 'Error al obtener los turnos del día.' });
+  }
+};
+
+/*
  * Sergio Manrique - 2026/06/23
  * Obtiene el detalle de un turno por ID con reservas y lista de espera.
  */
@@ -190,7 +314,26 @@ export const OBRS_DetTurno_CTS = async (req, res) => {
       return res.status(404).json({ message: 'Turno no encontrado.' });
     }
 
-    return res.status(200).json(turno);
+    const turnoPlano = turno.toJSON();
+
+    // Enriquece a cada alumno inscripto con los indicadores para los iconos
+    // de estado (bono por vencer, deuda). Solo se hace para los inscriptos
+    // (no lista de espera), que es donde se muestran esos iconos.
+    await Promise.all(
+      (turnoPlano.reservas || []).map(async (reserva) => {
+        if (!reserva.alumno) return;
+        const indicadores = await obtenerIndicadoresAlumno(reserva.alumno.id);
+        Object.assign(reserva.alumno, indicadores);
+      })
+    );
+
+    // Se expone el límite de minutos de cancelación anticipada para que el
+    // frontend pueda calcular, sin adivinar, si dar de baja a alguien ahora
+    // mismo devolvería el crédito (mismo cálculo exacto que hace el backend
+    // en ER_ReservaAdmin_CTS al confirmar la baja).
+    turnoPlano.minutos_cancelacion_anticipada = await obtenerMinutosCancelacion();
+
+    return res.status(200).json(turnoPlano);
   } catch (error) {
     console.error('[OBRS_DetTurno_CTS]', error);
     return res.status(500).json({ message: 'Error al obtener el turno.' });
@@ -768,7 +911,10 @@ export const OBRS_TurnosAlumno_CTS = async (req, res) => {
         ? fecha_desde
         : hoyServidor;
 
-    // Obtener el vencimiento de la membresía activa del alumno para limitar el rango
+    // Obtener el vencimiento de la membresía activa del alumno para limitar el
+    // rango. Si tiene varias membresías activas vigentes (ej. renovó antes de
+    // vencer), se usa la de vencimiento más lejano para no ocultarle turnos
+    // que sí podrá tomar con la membresía siguiente.
     const membresia = await AlumnosMembresiasModel.findOne({
       where: {
         alumno_id,
@@ -776,7 +922,8 @@ export const OBRS_TurnosAlumno_CTS = async (req, res) => {
         fecha_inicio: { [Op.lte]: hoyServidor },
         fecha_vencimiento: { [Op.gte]: hoyServidor }
       },
-      attributes: ['fecha_vencimiento']
+      attributes: ['fecha_vencimiento'],
+      order: [['fecha_vencimiento', 'DESC']]
     });
 
     const fechaVencimiento = membresia?.fecha_vencimiento ?? null;

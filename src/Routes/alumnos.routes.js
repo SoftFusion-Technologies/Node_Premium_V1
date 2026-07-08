@@ -90,6 +90,10 @@ import {
 } from '../Controllers/Alumno/CTS_TB_AlumnosMembresias.js';
 
 import {
+  OBRS_AsistenciasAlumno_CTS
+} from '../Controllers/Alumno/CTS_TB_AlumnosAsistencias.js';
+
+import {
   OBR_VencimientosAlumnoPlanesPagos_CTS,
   CR_GenerarMembresiaAlumnoPlanesPagos_CTS,
   CR_MarcarDeudaAlumnoPlanesPagos_CTS,
@@ -512,6 +516,22 @@ router.get(
     'PROFESOR'
   ]),
   OBR_AnamnesisActualPorAlumno_CTS
+);
+
+/*
+ * Sergio Manrique - 2026/07/08 - Historial de asistencias de un alumno.
+ */
+router.get(
+  '/alumnos/:alumno_id/asistencias',
+  authenticateToken,
+  requireRolGlobal([
+    'SUPER_ADMIN',
+    'DIRECCION',
+    'FRONT_COMERCIAL',
+    'COORD_SEDE',
+    'PROFESOR'
+  ]),
+  OBRS_AsistenciasAlumno_CTS
 );
 
 /*

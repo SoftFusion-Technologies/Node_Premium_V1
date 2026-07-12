@@ -90,7 +90,9 @@ import {
 } from '../Controllers/Alumno/CTS_TB_AlumnosMembresias.js';
 
 import {
-  OBRS_AsistenciasAlumno_CTS
+  OBRS_AsistenciasAlumno_CTS,
+  OBRS_EstadisticasAsistenciaAlumno_CTS,
+  OBRS_AlumnosInactivos_CTS
 } from '../Controllers/Alumno/CTS_TB_AlumnosAsistencias.js';
 
 import {
@@ -532,6 +534,39 @@ router.get(
     'PROFESOR'
   ]),
   OBRS_AsistenciasAlumno_CTS
+);
+
+/*
+ * Sergio Manrique - 2026/07/12 - Estadísticas de asistencia de un alumno
+ * (calculadas en backend), incluye alerta de inactividad.
+ */
+router.get(
+  '/alumnos/:alumno_id/asistencias/estadisticas',
+  authenticateToken,
+  requireRolGlobal([
+    'SUPER_ADMIN',
+    'DIRECCION',
+    'FRONT_COMERCIAL',
+    'COORD_SEDE',
+    'PROFESOR'
+  ]),
+  OBRS_EstadisticasAsistenciaAlumno_CTS
+);
+
+/*
+ * Sergio Manrique - 2026/07/12 - Listado de alumnos activos inactivos
+ * (sin asistencia hace más de N días). Base para un futuro panel de alertas.
+ */
+router.get(
+  '/alumnos-asistencias/inactivos',
+  authenticateToken,
+  requireRolGlobal([
+    'SUPER_ADMIN',
+    'DIRECCION',
+    'FRONT_COMERCIAL',
+    'COORD_SEDE'
+  ]),
+  OBRS_AlumnosInactivos_CTS
 );
 
 /*

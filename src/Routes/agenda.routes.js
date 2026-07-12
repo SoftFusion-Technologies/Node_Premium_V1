@@ -47,8 +47,7 @@ import {
   ER_ReservaAdmin_CTS,
   OBRS_MisReservas_CTS,
   CR_MiReserva_CTS,
-  ER_MiReserva_CTS,
-  UR_ReprogramarMiReserva_CTS
+  ER_MiReserva_CTS
 } from '../Controllers/Agendas/CTS_TB_AgendaTurnosReservas.js';
 
 import {
@@ -343,16 +342,6 @@ router.delete(
   '/agenda-alumno/mis-reservas/:id',
   authenticateAlumnoToken,
   ER_MiReserva_CTS
-);
-
-/*
- * Sergio Manrique - 2026/06/23 - Alumno reprograma su reserva a otro turno.
- * Valida tiempo mínimo en el turno original y disponibilidad en el destino.
- */
-router.patch(
-  '/agenda-alumno/mis-reservas/:id/reprogramar',
-  authenticateAlumnoToken,
-  UR_ReprogramarMiReserva_CTS
 );
 
 // ─── ALUMNO: Mi lista de espera ───────────────────────────────────────────────

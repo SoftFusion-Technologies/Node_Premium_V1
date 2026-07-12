@@ -819,27 +819,50 @@ export const UR_EstadoTurno_CTS = async (req, res) => {
 };
 
 /*
- * Sergio Manrique - 2026/06/23 / actualizado 2026/06/29
- * Elimina un turno y todas sus reservas (CASCADE en BD).
- * Si el turno es futuro, restaura los créditos de todos los alumnos inscriptos
- * que tengan membresía asociada, antes de eliminar.
+ * Sergio Manrique - 2026/06/23 / actualizado 2026/07/09
+ * Elimina un turno y todas sus reservas (CASCADE en BD hasta agenda_turnos_reservas
+ * y agenda_turnos_lista_espera).
+ *
+ * Devolución de créditos: mismo límite que la cancelación individual
+ * (sistema_configuracion, default 60'). Si al turno le faltan más minutos que
+ * ese límite, se devuelve el crédito siempre. Si le faltan menos (o ya pasó),
+ * la devolución es opcional: solo se hace si el body manda
+ * devolver_creditos_vencidos = true (lo decide el admin en el frontend).
+ *
+ * IMPORTANTE: alumnos_asistencias NO tiene CASCADE hacia agenda_turnos_reservas
+ * ni agenda_turnos (ON DELETE NO ACTION), así que hay que borrar esas filas acá
+ * a mano antes del destroy, o la eliminación de un turno con alumnos inscriptos
+ * falla con un error de restricción de clave foránea.
  */
 export const ER_Turno_CTS = async (req, res) => {
   const transaccion = await db.transaction();
   try {
     const { id } = req.params;
+    const { devolver_creditos_vencidos } = req.body;
 
+    // Bloquea la fila del turno para que un doble click (o dos pestañas)
+    // eliminando el mismo turno no calculen el reembolso dos veces sobre
+    // el mismo turno mientras ambas transacciones lo ven todavía "vivo".
     const turno = await AgendaTurnosModel.findByPk(id, {
-      transaction: transaccion
+      transaction: transaccion,
+      lock: transaccion.LOCK.UPDATE
     });
     if (!turno) {
       await transaccion.rollback();
       return res.status(404).json({ message: 'Turno no encontrado.' });
     }
 
-    // Restaurar créditos solo si el turno todavía no ocurrió
+    const minutosLimite = await obtenerMinutosCancelacion();
     const inicioTurno = dayjs(`${turno.fecha} ${turno.hora_inicio}`);
-    if (inicioTurno.isAfter(dayjs())) {
+    const minutosRestantes = inicioTurno.diff(dayjs(), 'minute');
+    // Dentro de la ventana de cancelación (o ya en curso/pasado): la
+    // devolución pasa a ser opcional en vez de automática.
+    const dentroVentana = minutosRestantes < minutosLimite;
+    const correspondeReembolso = !dentroVentana || devolver_creditos_vencidos === true;
+
+    let creditosDevueltos = 0;
+
+    if (correspondeReembolso) {
       const reservasActivas = await AgendaTurnosReservasModel.findAll({
         where: { turno_id: id, estado: 'reservada' },
         transaction: transaccion
@@ -864,14 +887,26 @@ export const ER_Turno_CTS = async (req, res) => {
             },
             { transaction: transaccion }
           );
+          creditosDevueltos++;
         }
       }
     }
 
+    // Ver comentario del encabezado: sin esto, el destroy falla si hay
+    // alumnos inscriptos (filas huérfanas en alumnos_asistencias).
+    await AlumnosAsistenciasModel.destroy({
+      where: { turno_id: id },
+      transaction: transaccion
+    });
+
     await turno.destroy({ transaction: transaccion });
     await transaccion.commit();
 
-    return res.status(200).json({ message: 'Turno eliminado correctamente.' });
+    return res.status(200).json({
+      message: 'Turno eliminado correctamente.',
+      dentro_ventana_cancelacion: dentroVentana,
+      creditos_devueltos: creditosDevueltos
+    });
   } catch (error) {
     await transaccion.rollback();
     console.error('[ER_Turno_CTS]', error);
@@ -983,7 +1018,7 @@ export const OBRS_TurnosAlumno_CTS = async (req, res) => {
 };
 
 /*
- * Sergio Manrique - 2026/06/24
+ * Sergio Manrique - 2026/06/24 / actualizado 2026/07/09
  * Eliminación masiva de turnos por rango de fechas, sedes y horario opcional.
  *
  * Body esperado:
@@ -992,14 +1027,33 @@ export const OBRS_TurnosAlumno_CTS = async (req, res) => {
  *   fecha_inicio: "2026-07-01",
  *   fecha_fin:    "2026-07-31",
  *   hora_inicio:  "08:00",   (opcional — si no viene, elimina el día completo)
- *   hora_fin:     "10:00"    (opcional)
+ *   hora_fin:     "10:00",   (opcional)
+ *   devolver_creditos_vencidos: false  (opcional, default false)
  * }
+ *
+ * Devolución de créditos: mismo criterio que ER_Turno_CTS. Los turnos con más
+ * minutos de anticipación que el límite configurado (sistema_configuracion,
+ * default 60') siempre devuelven el crédito. Los que están dentro de esa
+ * ventana (o ya pasaron) solo lo devuelven si devolver_creditos_vencidos
+ * viene en true — si un mismo rango de fechas/sedes mezcla turnos futuros
+ * lejanos con turnos que ya pasaron (ej. se borra el día completo a media
+ * tarde), cada uno se resuelve con su propio criterio, no todo o nada.
+ *
+ * IMPORTANTE: alumnos_asistencias NO tiene CASCADE hacia agenda_turnos_reservas
+ * ni agenda_turnos, así que hay que borrar esas filas acá a mano antes del
+ * destroy masivo (ver mismo comentario en ER_Turno_CTS).
  */
 export const ER_TurnosMasivo_CTS = async (req, res) => {
   const transaccion = await db.transaction();
   try {
-    const { sede_ids, fecha_inicio, fecha_fin, hora_inicio, hora_fin } =
-      req.body;
+    const {
+      sede_ids,
+      fecha_inicio,
+      fecha_fin,
+      hora_inicio,
+      hora_fin,
+      devolver_creditos_vencidos
+    } = req.body;
 
     if (!sede_ids?.length || !fecha_inicio || !fecha_fin) {
       await transaccion.rollback();
@@ -1022,10 +1076,14 @@ export const ER_TurnosMasivo_CTS = async (req, res) => {
       where.hora_fin = { [Op.lte]: hora_fin };
     }
 
+    // Bloquea las filas para que dos eliminaciones masivas superpuestas (o
+    // una masiva y una individual sobre el mismo turno) no calculen ambas el
+    // reembolso sobre el mismo turno todavía "vivo".
     const turnos = await AgendaTurnosModel.findAll({
       where,
       attributes: ['id', 'fecha', 'hora_inicio'],
-      transaction: transaccion
+      transaction: transaccion,
+      lock: transaccion.LOCK.UPDATE
     });
 
     if (turnos.length === 0) {
@@ -1038,18 +1096,39 @@ export const ER_TurnosMasivo_CTS = async (req, res) => {
         });
     }
 
-    // Para los turnos futuros, restaurar créditos de los alumnos inscriptos
+    const minutosLimite = await obtenerMinutosCancelacion();
     const ahora = dayjs();
-    const turnosFuturos = turnos.filter((t) =>
-      dayjs(`${t.fecha} ${t.hora_inicio}`).isAfter(ahora)
-    );
 
-    if (turnosFuturos.length > 0) {
-      const idsFuturos = turnosFuturos.map((t) => t.id);
+    // Turnos con más anticipación que el límite: reembolso siempre.
+    // Turnos dentro de la ventana (o ya pasados): reembolso opcional.
+    const turnosConReembolsoAutomatico = [];
+    const turnosDentroVentana = [];
 
+    for (const t of turnos) {
+      const minutosRestantes = dayjs(`${t.fecha} ${t.hora_inicio}`).diff(
+        ahora,
+        'minute'
+      );
+      if (minutosRestantes < minutosLimite) {
+        turnosDentroVentana.push(t);
+      } else {
+        turnosConReembolsoAutomatico.push(t);
+      }
+    }
+
+    const idsAReembolsar = [
+      ...turnosConReembolsoAutomatico.map((t) => t.id),
+      ...(devolver_creditos_vencidos === true
+        ? turnosDentroVentana.map((t) => t.id)
+        : [])
+    ];
+
+    let creditosDevueltos = 0;
+
+    if (idsAReembolsar.length > 0) {
       const reservasActivas = await AgendaTurnosReservasModel.findAll({
         where: {
-          turno_id: { [Op.in]: idsFuturos },
+          turno_id: { [Op.in]: idsAReembolsar },
           estado: 'reservada',
           membresia_id: { [Op.ne]: null }
         },
@@ -1073,9 +1152,18 @@ export const ER_TurnosMasivo_CTS = async (req, res) => {
             },
             { transaction: transaccion }
           );
+          creditosDevueltos++;
         }
       }
     }
+
+    // Ver comentario del encabezado: sin esto, el destroy falla si alguno de
+    // estos turnos tiene alumnos inscriptos (filas huérfanas en
+    // alumnos_asistencias).
+    await AlumnosAsistenciasModel.destroy({
+      where: { turno_id: { [Op.in]: turnos.map((t) => t.id) } },
+      transaction: transaccion
+    });
 
     // El CASCADE en BD elimina reservas y lista de espera automáticamente
     await AgendaTurnosModel.destroy({ where, transaction: transaccion });
@@ -1088,7 +1176,9 @@ export const ER_TurnosMasivo_CTS = async (req, res) => {
 
     return res.status(200).json({
       message: `Se eliminaron ${turnos.length} turnos correctamente${descripcionRango}.`,
-      total: turnos.length
+      total: turnos.length,
+      creditos_devueltos: creditosDevueltos,
+      turnos_dentro_ventana_cancelacion: turnosDentroVentana.length
     });
   } catch (error) {
     await transaccion.rollback();

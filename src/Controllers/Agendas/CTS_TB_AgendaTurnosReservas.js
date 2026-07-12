@@ -616,15 +616,18 @@ export const UR_AsistenciaAdmin_CTS = async (req, res) => {
 };
 
 /*
- * Sergio Manrique - 2026/06/23 / actualizado 2026/07/08
+ * Sergio Manrique - 2026/06/23 / actualizado 2026/07/09
  * Admin da de baja la reserva de un alumno. A diferencia de la cancelación
  * del propio alumno (ER_MiReserva_CTS), acá SÍ se permite dar de baja dentro
  * de la ventana de cancelación anticipada o incluso con la clase en curso
  * (es una gestión manual del admin, no un pedido de último momento del
- * alumno) — pero eso ya no devuelve el crédito, con el mismo límite de
- * minutos que usa la cancelación del alumno (sistema_configuracion,
- * default 60'). Solo se bloquea por completo una vez que la clase ya
- * terminó (fecha + hora_fin): ahí ni se puede dar de baja.
+ * alumno), con el mismo límite de minutos que usa la cancelación del alumno
+ * (sistema_configuracion, default 60'). Fuera de esa ventana el reembolso es
+ * automático. Dentro de la ventana (o con la clase ya en curso/pasada), el
+ * reembolso pasa a ser opcional: solo se hace si el body manda
+ * devolver_credito_vencido = true (lo decide el admin en el frontend).
+ * Solo se bloquea por completo una vez que la clase ya terminó
+ * (fecha + hora_fin): ahí ni se puede dar de baja.
  * Si la reserva sí da derecho a reembolso y hay lista de espera, promueve
  * al primero automáticamente al liberarse el cupo.
  */
@@ -632,7 +635,7 @@ export const ER_ReservaAdmin_CTS = async (req, res) => {
   const transaccion = await db.transaction();
   try {
     const { id } = req.params;
-    const { motivo_cancelacion } = req.body;
+    const { motivo_cancelacion, devolver_credito_vencido } = req.body;
 
     // Bloquea la reserva para que dos bajas simultáneas de la misma
     // inscripción (doble click, o el admin y un proceso automático a la vez)
@@ -668,14 +671,15 @@ export const ER_ReservaAdmin_CTS = async (req, res) => {
       return res.status(400).json({ message: 'No se puede dar de baja una reserva de una clase que ya finalizó.' });
     }
 
-    // Corresponde reembolso solo si se da de baja con más anticipación que
-    // el límite configurado (mismo límite que la cancelación del alumno).
-    // Dentro de esa ventana, o con la clase ya en curso, se puede dar de
-    // baja igual pero sin devolver el crédito.
+    // Fuera de la ventana de cancelación, el reembolso es automático. Dentro
+    // de esa ventana (o con la clase ya en curso), se puede dar de baja igual
+    // pero el reembolso pasa a ser opcional: solo se hace si el admin lo pidió
+    // explícitamente (devolver_credito_vencido).
     const minutosLimite    = await obtenerMinutosCancelacion();
     const inicioTurno      = dayjs(`${turno.fecha} ${turno.hora_inicio}`);
     const minutosRestantes = inicioTurno.diff(dayjs(), 'minute');
-    const correspondeReembolso = minutosRestantes >= minutosLimite;
+    const dentroVentana    = minutosRestantes < minutosLimite;
+    const correspondeReembolso = !dentroVentana || devolver_credito_vencido === true;
 
     await reserva.update({
       estado:             'cancelada',
@@ -1030,129 +1034,5 @@ export const ER_MiReserva_CTS = async (req, res) => {
     await transaccion.rollback();
     console.error('[ER_MiReserva_CTS]', error);
     return res.status(500).json({ message: 'Error al cancelar tu reserva.' });
-  }
-};
-
-/*
- * Sergio Manrique - 2026/06/23
- * Alumno reprograma su reserva a otro turno disponible.
- * Valida tiempo mínimo de cancelación en el turno original.
- * Cancela la reserva original y crea una nueva en el turno destino.
- */
-export const UR_ReprogramarMiReserva_CTS = async (req, res) => {
-  const transaccion = await db.transaction();
-  try {
-    const alumno_id          = req.alumno.id;
-    const sede_id            = req.alumno.sede_id;
-    const { id }             = req.params;
-    const { turno_destino_id } = req.body;
-
-    if (!turno_destino_id) {
-      await transaccion.rollback();
-      return res.status(400).json({ message: 'Falta el campo requerido: turno_destino_id.' });
-    }
-
-    const reserva = await AgendaTurnosReservasModel.findByPk(id, { transaction: transaccion });
-    if (!reserva || reserva.alumno_id !== alumno_id) {
-      await transaccion.rollback();
-      return res.status(404).json({ message: 'Reserva no encontrada.' });
-    }
-
-    if (reserva.estado !== 'reservada') {
-      await transaccion.rollback();
-      return res.status(400).json({ message: 'Solo podés reprogramar reservas activas.' });
-    }
-
-    const turnoOrigen = await AgendaTurnosModel.findByPk(reserva.turno_id, { transaction: transaccion });
-
-    // Bloquea la fila del turno destino para evitar que dos reprogramaciones
-    // concurrentes superen su cupo_maximo.
-    const turnoDestino = await AgendaTurnosModel.findByPk(turno_destino_id, {
-      transaction: transaccion,
-      lock:        transaccion.LOCK.UPDATE
-    });
-
-    if (!turnoDestino) {
-      await transaccion.rollback();
-      return res.status(404).json({ message: 'El turno destino no existe.' });
-    }
-
-    if (turnoDestino.sede_id !== sede_id) {
-      await transaccion.rollback();
-      return res.status(403).json({ message: 'No podés reprogramar a una clase de otra sede.' });
-    }
-
-    if (turnoDestino.estado === 'cancelado' || turnoDestino.estado === 'bloqueado') {
-      await transaccion.rollback();
-      return res.status(400).json({ message: `No podés reprogramar a un turno ${turnoDestino.estado}.` });
-    }
-
-    if (turnoDestino.cupos_reservados >= turnoDestino.cupo_maximo) {
-      await transaccion.rollback();
-      return res.status(400).json({ message: 'El turno destino no tiene cupos disponibles.' });
-    }
-
-    // Validar tiempo mínimo en el turno original (con el reloj del servidor)
-    const minutosLimite    = await obtenerMinutosCancelacion();
-    const inicioOrigen     = dayjs(`${turnoOrigen.fecha} ${turnoOrigen.hora_inicio}`);
-    const minutosRestantes = inicioOrigen.diff(dayjs(), 'minute');
-
-    if (minutosRestantes < minutosLimite) {
-      await transaccion.rollback();
-      return res.status(400).json({
-        message: `No podés reprogramar con menos de ${minutosLimite} minutos de anticipación.`
-      });
-    }
-
-    // Cancelar reserva original
-    await reserva.update({
-      estado:            'reprogramada',
-      fecha_cancelacion: new Date(),
-      updated_at:        new Date()
-    }, { transaction: transaccion });
-
-    // Eliminar la asistencia de la reserva original: se traslada al turno destino
-    await eliminarAsistenciaPorReserva(reserva.id, transaccion);
-
-    await turnoOrigen.update({
-      cupos_reservados: Math.max(0, turnoOrigen.cupos_reservados - 1),
-      estado:           'disponible',
-      updated_at:       new Date()
-    }, { transaction: transaccion });
-
-    // Crear nueva reserva en turno destino
-    const nuevaReserva = await AgendaTurnosReservasModel.create({
-      turno_id:       turno_destino_id,
-      alumno_id,
-      membresia_id:   reserva.membresia_id || null,
-      origen_reserva: 'alumno',
-      estado:         'reservada',
-      fecha_reserva:  new Date(),
-      observaciones:  `Reprogramada desde turno #${turnoOrigen.id}`
-    }, { transaction: transaccion });
-
-    // Crear asistencia en estado 'asistio' por defecto para la nueva reserva
-    await crearAsistenciaPorReserva(turnoDestino, nuevaReserva, transaccion);
-
-    await turnoDestino.update({
-      cupos_reservados: turnoDestino.cupos_reservados + 1,
-      estado:           turnoDestino.cupos_reservados + 1 >= turnoDestino.cupo_maximo ? 'completo' : 'disponible',
-      updated_at:       new Date()
-    }, { transaction: transaccion });
-
-    await transaccion.commit();
-
-    // Promover lista de espera del turno original (fuera de la transacción,
-    // ya con el cupo liberado confirmado)
-    await promoverListaEspera(turnoOrigen.id);
-
-    return res.status(200).json({
-      message:       'Reserva reprogramada correctamente.',
-      nueva_reserva: nuevaReserva
-    });
-  } catch (error) {
-    if (!transaccion.finished) await transaccion.rollback();
-    console.error('[UR_ReprogramarMiReserva_CTS]', error);
-    return res.status(500).json({ message: 'Error al reprogramar tu reserva.' });
   }
 };

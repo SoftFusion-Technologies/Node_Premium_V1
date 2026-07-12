@@ -34,6 +34,7 @@ import gastosRoutes from './gastos.routes.js';
 import finanzasRoutes from './finanzas.routes.js';
 import agendaRoutes from './agenda.routes.js';
 import sistemaRoutes from './sistema.routes.js';
+import dashboardRoutes from './dashboard.routes.js';
 
 const router = express.Router();
 
@@ -47,5 +48,6 @@ router.use(gastosRoutes);
 router.use(finanzasRoutes);
 router.use(agendaRoutes);
 router.use(sistemaRoutes);
+router.use(dashboardRoutes);
 
 export default router;

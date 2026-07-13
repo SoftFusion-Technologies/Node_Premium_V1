@@ -337,8 +337,7 @@ export const loginUsuario = async (req, res) => {
   }
 };
 
-/*
- * Benjamin Orellana - 2026/05/10 - Middleware para validar token de usuario interno.
+/* * Benjamin Orellana - 2026/05/10 - Middleware para validar token de usuario interno.
  */
 export const authenticateToken = async (req, res, next) => {
   try {

@@ -668,6 +668,27 @@ export const OBR_MensualidadesPorAlumno_CTS = async (req, res) => {
   }
 };
 
+// Benjamin Orellana - 2026/07/13 - Lista únicamente las mensualidades del
+// alumno autenticado en el portal, tomando el ID desde su token.
+export const OBR_MisMensualidades_CTS = async (req, res) => {
+  const alumnoId = req.alumno?.id || req.alumno?.alumno_id;
+
+  if (!esIdValido(alumnoId)) {
+    return responderError(
+      res,
+      401,
+      'No se pudo identificar al alumno autenticado.'
+    );
+  }
+
+  req.params = {
+    ...req.params,
+    alumno_id: Number(alumnoId)
+  };
+
+  return OBR_MensualidadesPorAlumno_CTS(req, res);
+};
+
 // Benjamin Orellana - 2026/05/29 - Lista mensualidades pendientes o parciales.
 export const OBR_MensualidadesPendientes_CTS = async (req, res) => {
   try {

@@ -8,7 +8,7 @@ import db from '../../DataBase/db.js';
 
 import AlumnosModel from '../../Models/Alumno/MD_TB_Alumnos.js';
 import AlumnosMembresiasModel from '../../Models/Alumno/MD_TB_AlumnosMembresias.js';
-import AlumnosContactosEmergenciaModel from "../../Models/Alumno/MD_TB_AlumnosContactosEmergencia.js";
+import AlumnosContactosEmergenciaModel from '../../Models/Alumno/MD_TB_AlumnosContactosEmergencia.js';
 import AlumnosAnamnesisModel from '../../Models/Alumno/MD_TB_AlumnosAnamnesis.js';
 import AlumnosLoginModel from '../../Models/Alumno/MD_TB_AlumnosLogin.js';
 import PlanesModel from '../../Models/Plan/MD_TB_Planes.js';
@@ -17,7 +17,12 @@ import SedesModel from '../../Models/Sede/MD_TB_Sedes.js';
 import UsuariosModel from '../../Models/Usuario/MD_TB_Usuarios.js';
 import UsuariosRolesModel from '../../Models/Usuario/MD_TB_UsuariosRoles.js';
 import { hashPassword } from '../../Security/auth.js';
-import { capitalizarTexto, normalizarEmail, normalizarTelefono, normalizarDni } from '../../utils/texto.utils.js';
+import {
+  capitalizarTexto,
+  normalizarEmail,
+  normalizarTelefono,
+  normalizarDni
+} from '../../utils/texto.utils.js';
 import bcrypt from 'bcryptjs';
 
 const ESTADOS_ALUMNO_VALIDOS = [
@@ -77,6 +82,34 @@ const construirWhereBusquedaAlumno = (search) => {
   };
 };
 
+/*
+ * Benjamin Orellana - 2026/07/13 - Construye un NOT EXISTS seguro para
+ * filtrar alumnos que todavía no poseen registros en una tabla relacionada.
+ * Se utilizan los nombres reales declarados por Sequelize para evitar
+ * acoplar el controlador a nombres físicos escritos manualmente.
+ */
+const construirFiltroSinRelacionAlumno = (
+  modeloRelacionado,
+  aliasRelacionado
+) => {
+  const queryGenerator = db.getQueryInterface().queryGenerator;
+  const tablaRelacionada = queryGenerator.quoteTable(
+    modeloRelacionado.getTableName()
+  );
+  const aliasPrincipal = queryGenerator.quoteIdentifier(AlumnosModel.name);
+  const aliasRelacion = queryGenerator.quoteIdentifier(aliasRelacionado);
+  const columnaIdAlumno = queryGenerator.quoteIdentifier('id');
+  const columnaAlumnoRelacion = queryGenerator.quoteIdentifier('alumno_id');
+
+  return db.literal(`
+    NOT EXISTS (
+      SELECT 1
+      FROM ${tablaRelacionada} AS ${aliasRelacion}
+      WHERE ${aliasRelacion}.${columnaAlumnoRelacion} = ${aliasPrincipal}.${columnaIdAlumno}
+    )
+  `);
+};
+
 const normalizarTexto = (value) => {
   if (value === undefined || value === null) return null;
 
@@ -84,7 +117,6 @@ const normalizarTexto = (value) => {
 
   return texto.length > 0 ? texto : null;
 };
-
 
 const normalizarFecha = (value) => {
   const texto = normalizarTexto(value);
@@ -177,7 +209,7 @@ const obtenerSedesPermitidasUsuario = (user) => {
 const usuarioPuedeOperarSede = (user, sedeId) => {
   if (usuarioEsGlobal(user)) return true;
 
-  if (!sedeId) return true; 
+  if (!sedeId) return true;
 
   const sedesPermitidas = obtenerSedesPermitidasUsuario(user);
 
@@ -354,7 +386,52 @@ const construirAlumnoRespuesta = async (alumno, transaction = null) => {
     contactos_emergencia: contactosEmergencia,
     membresias,
     membresia_actual: membresiaActiva,
-    anamnesis,
+    anamnesis
+  };
+};
+
+/*
+ * Benjamin Orellana - 2026/07/13 - Obtiene métricas reales de actividad para
+ * la ficha individual. Se consulta alumnos_asistencias y no las reservas:
+ * reservar consume una clase, pero la asistencia se contabiliza cuando existe
+ * el registro efectivo correspondiente.
+ */
+const obtenerResumenActividadAlumno = async (alumnoId, transaction = null) => {
+  const [resumen] = await db.query(
+    `
+      SELECT
+        COUNT(
+          CASE
+            WHEN aa.created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)
+            THEN 1
+          END
+        ) AS asistencias_30_dias,
+        MAX(aa.created_at) AS ultima_asistencia_real,
+        CASE
+          WHEN MAX(aa.created_at) IS NULL THEN NULL
+          ELSE GREATEST(
+            TIMESTAMPDIFF(DAY, DATE(MAX(aa.created_at)), CURDATE()),
+            0
+          )
+        END AS dias_sin_actividad
+      FROM alumnos_asistencias aa
+      WHERE aa.alumno_id = :alumnoId
+    `,
+    {
+      replacements: { alumnoId },
+      type: QueryTypes.SELECT,
+      transaction
+    }
+  );
+
+  return {
+    asistencias_30_dias: Number(resumen?.asistencias_30_dias || 0),
+    ultima_asistencia: resumen?.ultima_asistencia_real || null,
+    dias_sin_actividad:
+      resumen?.dias_sin_actividad === null ||
+      resumen?.dias_sin_actividad === undefined
+        ? null
+        : Number(resumen.dias_sin_actividad)
   };
 };
 
@@ -420,6 +497,7 @@ const buildAlumnoPayloadUpdate = (body = {}) => {
   setIfPresent(payload, body, 'localidad', normalizarTexto);
   setIfPresent(payload, body, 'provincia', normalizarTexto);
   setIfPresent(payload, body, 'fecha_inicio', normalizarFecha);
+  setIfPresent(payload, body, 'estado', normalizarTexto);
   setIfPresent(payload, body, 'observaciones_admin', normalizarTexto);
 
   if (Object.prototype.hasOwnProperty.call(body, 'acepta_terminos')) {
@@ -499,7 +577,10 @@ const verificarDniDuplicado = async (dni, alumnoIdExcluir = null) => {
   return AlumnosModel.findOne({ where });
 };
 
-const verificarUsuarioAppDisponible = async (usuarioAppId, alumnoIdExcluir = null) => {
+const verificarUsuarioAppDisponible = async (
+  usuarioAppId,
+  alumnoIdExcluir = null
+) => {
   if (!usuarioAppId) return null;
 
   const where = { usuario_app_id: usuarioAppId };
@@ -523,7 +604,11 @@ const verificarUsuarioLoginDuplicado = async ({ email, telefono }) => {
   });
 };
 
-const aplicarScopeSedesAlumnos = (where = {}, user = null, sedeIdQuery = null) => {
+const aplicarScopeSedesAlumnos = (
+  where = {},
+  user = null,
+  sedeIdQuery = null
+) => {
   if (usuarioEsGlobal(user)) {
     if (sedeIdQuery) {
       where.sede_id = Number(sedeIdQuery);
@@ -572,7 +657,11 @@ const buscarAlumnoPorIdConPermiso = async (id, user) => {
     typeof alumno.toJSON === 'function' ? alumno.toJSON() : alumno;
 
   if (!usuarioPuedeOperarSede(user, alumnoPlano.sede_id)) {
-    return { ok: false, status: 403, message: 'No tiene acceso al alumno indicado.' };
+    return {
+      ok: false,
+      status: 403,
+      message: 'No tiene acceso al alumno indicado.'
+    };
   }
 
   return { ok: true, alumno };
@@ -587,7 +676,12 @@ const buscarPlanActivo = async (planId, transaction = null) => {
   });
 };
 
-const buscarPrecioVigentePlan = async ({ planId, sedeId, fechaConsulta, transaction = null }) => {
+const buscarPrecioVigentePlan = async ({
+  planId,
+  sedeId,
+  fechaConsulta,
+  transaction = null
+}) => {
   const whereBase = {
     plan_id: planId,
     activo: 1,
@@ -601,7 +695,10 @@ const buscarPrecioVigentePlan = async ({ planId, sedeId, fechaConsulta, transact
   if (sedeId) {
     const precioSede = await PlanesPreciosModel.findOne({
       where: { ...whereBase, sede_id: sedeId },
-      order: [['fecha_desde', 'DESC'], ['id', 'DESC']],
+      order: [
+        ['fecha_desde', 'DESC'],
+        ['id', 'DESC']
+      ],
       transaction
     });
 
@@ -610,7 +707,10 @@ const buscarPrecioVigentePlan = async ({ planId, sedeId, fechaConsulta, transact
 
   return PlanesPreciosModel.findOne({
     where: { ...whereBase, sede_id: null },
-    order: [['fecha_desde', 'DESC'], ['id', 'DESC']],
+    order: [
+      ['fecha_desde', 'DESC'],
+      ['id', 'DESC']
+    ],
     transaction
   });
 };
@@ -670,31 +770,45 @@ const validarContactosEmergenciaPublico = (contactos = []) => {
     const numeroContacto = index + 1;
 
     if (!contacto.nombre) {
-      errores.push(`El nombre del contacto de emergencia ${numeroContacto} es obligatorio.`);
+      errores.push(
+        `El nombre del contacto de emergencia ${numeroContacto} es obligatorio.`
+      );
     }
 
     if (!contacto.telefono) {
-      errores.push(`El teléfono del contacto de emergencia ${numeroContacto} es obligatorio.`);
+      errores.push(
+        `El teléfono del contacto de emergencia ${numeroContacto} es obligatorio.`
+      );
     }
 
     if (contacto.nombre && contacto.nombre.length > 120) {
-      errores.push(`El nombre del contacto de emergencia ${numeroContacto} no puede superar los 120 caracteres.`);
+      errores.push(
+        `El nombre del contacto de emergencia ${numeroContacto} no puede superar los 120 caracteres.`
+      );
     }
 
     if (contacto.parentesco && contacto.parentesco.length > 80) {
-      errores.push(`El parentesco del contacto de emergencia ${numeroContacto} no puede superar los 80 caracteres.`);
+      errores.push(
+        `El parentesco del contacto de emergencia ${numeroContacto} no puede superar los 80 caracteres.`
+      );
     }
 
     if (contacto.telefono && contacto.telefono.length > 50) {
-      errores.push(`El teléfono del contacto de emergencia ${numeroContacto} no puede superar los 50 caracteres.`);
+      errores.push(
+        `El teléfono del contacto de emergencia ${numeroContacto} no puede superar los 50 caracteres.`
+      );
     }
 
     if (contacto.email && contacto.email.length > 150) {
-      errores.push(`El email del contacto de emergencia ${numeroContacto} no puede superar los 150 caracteres.`);
+      errores.push(
+        `El email del contacto de emergencia ${numeroContacto} no puede superar los 150 caracteres.`
+      );
     }
   });
 
-  const principalAsignado = contactos.some((contacto) => contacto.principal === 1);
+  const principalAsignado = contactos.some(
+    (contacto) => contacto.principal === 1
+  );
 
   if (!principalAsignado && contactos.length > 0) {
     contactos[0].principal = 1;
@@ -706,7 +820,9 @@ const validarContactosEmergenciaPublico = (contactos = []) => {
 const normalizarPrincipalContactosEmergenciaPublico = (contactos = []) => {
   if (!contactos.length) return contactos;
 
-  const principalIndex = contactos.findIndex((contacto) => contacto.principal === 1);
+  const principalIndex = contactos.findIndex(
+    (contacto) => contacto.principal === 1
+  );
   const indexPrincipalFinal = principalIndex >= 0 ? principalIndex : 0;
 
   return contactos.map((contacto, index) => ({
@@ -715,10 +831,21 @@ const normalizarPrincipalContactosEmergenciaPublico = (contactos = []) => {
   }));
 };
 
-const construirPayloadMembresiaPublica = ({ alumnoId, plan, sedeId, fechaInicio, precioVigente }) => {
+const construirPayloadMembresiaPublica = ({
+  alumnoId,
+  plan,
+  sedeId,
+  fechaInicio,
+  precioVigente
+}) => {
   const precioLista = precioVigente ? Number(precioVigente.precio || 0) : 0;
-  const clasesIncluidas = Number(plan.cantidad_clases_periodo ?? plan.clases_por_mes ?? 0);
-  const fechaVencimiento = construirFechaVencimientoMembresia(fechaInicio, plan.duracion_dias);
+  const clasesIncluidas = Number(
+    plan.cantidad_clases_periodo ?? plan.clases_por_mes ?? 0
+  );
+  const fechaVencimiento = construirFechaVencimientoMembresia(
+    fechaInicio,
+    plan.duracion_dias
+  );
 
   return {
     alumno_id: alumnoId,
@@ -750,7 +877,11 @@ const buscarAlumnoPorDniConPermiso = async (dni, user) => {
     typeof alumno.toJSON === 'function' ? alumno.toJSON() : alumno;
 
   if (!usuarioPuedeOperarSede(user, alumnoPlano.sede_id)) {
-    return { ok: false, status: 403, message: 'No tiene acceso al alumno indicado.' };
+    return {
+      ok: false,
+      status: 403,
+      message: 'No tiene acceso al alumno indicado.'
+    };
   }
 
   return { ok: true, alumno };
@@ -773,6 +904,10 @@ export const OBR_Alumnos_CTS = async (req, res) => {
       sede_id,
       estado,
       origen_registro,
+      sin_plan,
+      sin_anamnesis,
+      sin_contacto_emergencia,
+      sin_asistencias,
       page = 1,
       limit = 20,
       orderBy = 'created_at',
@@ -830,17 +965,62 @@ export const OBR_Alumnos_CTS = async (req, res) => {
       ];
     }
 
+    // Benjamin Orellana - 2026/07/13 - Filtros combinables de información pendiente.
+    if (normalizarTinyint(sin_plan, 0) === 1) {
+      where[Op.and] = [
+        ...(where[Op.and] || []),
+        construirFiltroSinRelacionAlumno(
+          AlumnosMembresiasModel,
+          'membresias_filtro'
+        )
+      ];
+    }
+
+    if (normalizarTinyint(sin_anamnesis, 0) === 1) {
+      where[Op.and] = [
+        ...(where[Op.and] || []),
+        construirFiltroSinRelacionAlumno(
+          AlumnosAnamnesisModel,
+          'anamnesis_filtro'
+        )
+      ];
+    }
+
+    if (normalizarTinyint(sin_contacto_emergencia, 0) === 1) {
+      where[Op.and] = [
+        ...(where[Op.and] || []),
+        construirFiltroSinRelacionAlumno(
+          AlumnosContactosEmergenciaModel,
+          'contactos_emergencia_filtro'
+        )
+      ];
+    }
+
+    if (normalizarTinyint(sin_asistencias, 0) === 1) {
+      where.ultima_asistencia = { [Op.is]: null };
+    }
+
     const pageNumber = Math.max(Number(page) || 1, 1);
     const limitNumber = Math.min(Math.max(Number(limit) || 20, 1), 200);
     const offset = (pageNumber - 1) * limitNumber;
 
     const allowedOrderFields = [
-      'id', 'nombre', 'apellido', 'dni', 'estado',
-      'fecha_inicio', 'ultima_asistencia', 'created_at', 'updated_at'
+      'id',
+      'nombre',
+      'apellido',
+      'dni',
+      'estado',
+      'fecha_inicio',
+      'ultima_asistencia',
+      'created_at',
+      'updated_at'
     ];
 
-    const safeOrderBy = allowedOrderFields.includes(orderBy) ? orderBy : 'created_at';
-    const safeOrderDirection = String(orderDirection).toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
+    const safeOrderBy = allowedOrderFields.includes(orderBy)
+      ? orderBy
+      : 'created_at';
+    const safeOrderDirection =
+      String(orderDirection).toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
 
     const { rows, count } = await AlumnosModel.findAndCountAll({
       where,
@@ -849,7 +1029,9 @@ export const OBR_Alumnos_CTS = async (req, res) => {
       order: [[safeOrderBy, safeOrderDirection]]
     });
 
-    const data = await Promise.all(rows.map((alumno) => construirAlumnoRespuesta(alumno)));
+    const data = await Promise.all(
+      rows.map((alumno) => construirAlumnoRespuesta(alumno))
+    );
 
     return res.status(200).json({
       ok: true,
@@ -899,7 +1081,23 @@ export const OBR_AlumnoPorDni_CTS = async (req, res) => {
       });
     }
 
-    const data = await construirAlumnoRespuesta(result.alumno);
+    const [datosAlumno, resumenActividad] = await Promise.all([
+      construirAlumnoRespuesta(result.alumno),
+      obtenerResumenActividadAlumno(result.alumno.id)
+    ]);
+
+    const data = {
+      ...datosAlumno,
+      ...resumenActividad,
+      ultima_asistencia:
+        resumenActividad.ultima_asistencia ||
+        datosAlumno.ultima_asistencia ||
+        null,
+      dias_sin_actividad:
+        resumenActividad.dias_sin_actividad ??
+        datosAlumno.dias_sin_actividad ??
+        null
+    };
 
     return res.status(200).json({
       ok: true,
@@ -932,7 +1130,23 @@ export const OBR_AlumnoPerfil_CTS = async (req, res) => {
       });
     }
 
-    const data = await construirAlumnoRespuesta(alumno);
+    const [datosAlumno, resumenActividad] = await Promise.all([
+      construirAlumnoRespuesta(alumno),
+      obtenerResumenActividadAlumno(alumno.id)
+    ]);
+
+    const data = {
+      ...datosAlumno,
+      ...resumenActividad,
+      ultima_asistencia:
+        resumenActividad.ultima_asistencia ||
+        datosAlumno.ultima_asistencia ||
+        null,
+      dias_sin_actividad:
+        resumenActividad.dias_sin_actividad ??
+        datosAlumno.dias_sin_actividad ??
+        null
+    };
 
     // Sergio Gustavo Manrique - 2026/06/11 - Verifica pendientes del alumno
     const pendientes = {
@@ -1030,7 +1244,9 @@ export const CR_Alumnos_CTS = async (req, res) => {
         });
       }
 
-      const usuarioAsignado = await verificarUsuarioAppDisponible(payload.usuario_app_id);
+      const usuarioAsignado = await verificarUsuarioAppDisponible(
+        payload.usuario_app_id
+      );
 
       if (usuarioAsignado) {
         await transaction.rollback();
@@ -1043,7 +1259,8 @@ export const CR_Alumnos_CTS = async (req, res) => {
     }
 
     if (payload.estado === 'activo') {
-      payload.usuario_validacion_id = req.user?.id || req.user?.usuario_id || null;
+      payload.usuario_validacion_id =
+        req.user?.id || req.user?.usuario_id || null;
     }
 
     const nuevoAlumno = await AlumnosModel.create(payload, { transaction });
@@ -1073,7 +1290,9 @@ export const CR_Alumnos_CTS = async (req, res) => {
         });
       }
 
-      const fechaInicio = normalizarFecha(bodyConIdsNormalizados.fecha_inicio) || obtenerFechaActualDateOnly();
+      const fechaInicio =
+        normalizarFecha(bodyConIdsNormalizados.fecha_inicio) ||
+        obtenerFechaActualDateOnly();
 
       if (!esFechaDateOnlyValida(fechaInicio)) {
         await transaction.rollback();
@@ -1096,7 +1315,8 @@ export const CR_Alumnos_CTS = async (req, res) => {
 
         return res.status(400).json({
           ok: false,
-          message: 'No hay un precio vigente para este plan en la sede indicada.'
+          message:
+            'No hay un precio vigente para este plan en la sede indicada.'
         });
       }
 
@@ -1132,7 +1352,6 @@ export const CR_Alumnos_CTS = async (req, res) => {
   }
 };
 
- 
 export const CR_Alumnos_Publico_CTS = async (req, res) => {
   const transaction = await db.transaction();
 
@@ -1212,10 +1431,7 @@ export const CR_Alumnos_Publico_CTS = async (req, res) => {
     }
 
     // Validar teléfono
-    if (
-      telefonoLimpio.length < 6 ||
-      telefonoLimpio.length > 20
-    ) {
+    if (telefonoLimpio.length < 6 || telefonoLimpio.length > 20) {
       await transaction.rollback();
 
       return res.status(400).json({
@@ -1237,18 +1453,17 @@ export const CR_Alumnos_Publico_CTS = async (req, res) => {
     }
 
     // Verificar duplicados en paralelo
-    const [existeDni, existeTelefono, existeEmail] =
-      await Promise.all([
-        AlumnosModel.findOne({
-          where: { dni: dniLimpio }
-        }),
-        AlumnosModel.findOne({
-          where: { telefono: telefonoLimpio }
-        }),
-        AlumnosModel.findOne({
-          where: { email: emailLimpio }
-        })
-      ]);
+    const [existeDni, existeTelefono, existeEmail] = await Promise.all([
+      AlumnosModel.findOne({
+        where: { dni: dniLimpio }
+      }),
+      AlumnosModel.findOne({
+        where: { telefono: telefonoLimpio }
+      }),
+      AlumnosModel.findOne({
+        where: { email: emailLimpio }
+      })
+    ]);
 
     if (existeDni) {
       await transaction.rollback();
@@ -1318,7 +1533,6 @@ export const CR_Alumnos_Publico_CTS = async (req, res) => {
         estado: nuevoAlumno.estado
       }
     });
-
   } catch (error) {
     if (transaction && !transaction.finished) {
       await transaction.rollback();
@@ -1363,6 +1577,17 @@ export const UR_Alumnos_CTS = async (req, res) => {
 
     const alumno = result.alumno;
     const payload = buildAlumnoPayloadUpdate(req.body);
+
+    // Benjamin Orellana - 2026/07/13 - El formulario administrativo puede
+    // cambiar el estado junto con los demás datos del alumno. Al activarlo se
+    // conservan las mismas reglas aplicadas por el endpoint específico.
+    if (payload.estado === 'activo') {
+      payload.usuario_validacion_id =
+        req.user?.id || req.user?.usuario_id || null;
+      payload.fecha_baja = null;
+      payload.motivo_baja = null;
+    }
+
     const errores = validarPayloadAlumno(payload, 'update');
 
     if (payload.sede_id && !usuarioPuedeOperarSede(req.user, payload.sede_id)) {
@@ -1494,7 +1719,8 @@ export const UR_EstadoAlumnos_CTS = async (req, res) => {
     const payload = { estado };
 
     if (estado === 'activo') {
-      payload.usuario_validacion_id = req.user?.id || req.user?.usuario_id || null;
+      payload.usuario_validacion_id =
+        req.user?.id || req.user?.usuario_id || null;
       payload.fecha_baja = null;
       payload.motivo_baja = null;
     }
@@ -1569,10 +1795,7 @@ export const UR_AlumnoPerfil_CTS = async (req, res) => {
     const localidadNormalizada = capitalizarTexto(localidad);
 
     // El email no puede modificarse
-    if (
-      emailNormalizado !==
-      normalizarEmail(alumno.email)
-    ) {
+    if (emailNormalizado !== normalizarEmail(alumno.email)) {
       return res.status(403).json({
         ok: false,
         message: 'No está permitido modificar el email.'
@@ -1597,10 +1820,7 @@ export const UR_AlumnoPerfil_CTS = async (req, res) => {
       });
     }
 
-    if (
-      telefonoNormalizado.length < 6 ||
-      telefonoNormalizado.length > 20
-    ) {
+    if (telefonoNormalizado.length < 6 || telefonoNormalizado.length > 20) {
       return res.status(400).json({
         ok: false,
         message: 'El teléfono ingresado no es válido.'
@@ -1665,7 +1885,6 @@ export const UR_AlumnoPerfil_CTS = async (req, res) => {
       message: 'Datos actualizados correctamente.',
       data
     });
-
   } catch (error) {
     console.error('Error UR_AlumnoPerfil_CTS:', error);
 
@@ -1747,8 +1966,11 @@ export const UR_CongelarAlumnos_CTS = async (req, res) => {
 
     await result.alumno.update({
       estado: 'congelado',
-      fecha_congelamiento_desde: req.body.fecha_congelamiento_desde || new Date(),
-      fecha_congelamiento_hasta: normalizarFecha(req.body.fecha_congelamiento_hasta),
+      fecha_congelamiento_desde:
+        req.body.fecha_congelamiento_desde || new Date(),
+      fecha_congelamiento_hasta: normalizarFecha(
+        req.body.fecha_congelamiento_hasta
+      ),
       motivo_congelamiento: normalizarTexto(req.body.motivo_congelamiento)
     });
 
@@ -1873,7 +2095,9 @@ export const UR_HabilitarAccesoAlumno_CTS = async (req, res) => {
     }
 
     const email = normalizarEmail(req.body.email || alumnoPlano.email);
-    const telefono = normalizarTelefono(req.body.telefono || alumnoPlano.telefono);
+    const telefono = normalizarTelefono(
+      req.body.telefono || alumnoPlano.telefono
+    );
 
     if (!email && !telefono) {
       await transaction.rollback();
@@ -1895,7 +2119,10 @@ export const UR_HabilitarAccesoAlumno_CTS = async (req, res) => {
       });
     }
 
-    const usuarioDuplicado = await verificarUsuarioLoginDuplicado({ email, telefono });
+    const usuarioDuplicado = await verificarUsuarioLoginDuplicado({
+      email,
+      telefono
+    });
 
     if (usuarioDuplicado) {
       await transaction.rollback();
@@ -1990,21 +2217,33 @@ export const DR_Alumnos_CTS = async (req, res) => {
      * Limpieza preventiva por si el mismo connection pool reutilizó
      * una conexión donde una ejecución anterior falló antes de dropear temporales.
      */
-    await db.query('DROP TEMPORARY TABLE IF EXISTS tmp_delete_alumno_membresias', {
-      transaction
-    });
-    await db.query('DROP TEMPORARY TABLE IF EXISTS tmp_delete_alumno_mensualidades', {
-      transaction
-    });
+    await db.query(
+      'DROP TEMPORARY TABLE IF EXISTS tmp_delete_alumno_membresias',
+      {
+        transaction
+      }
+    );
+    await db.query(
+      'DROP TEMPORARY TABLE IF EXISTS tmp_delete_alumno_mensualidades',
+      {
+        transaction
+      }
+    );
     await db.query('DROP TEMPORARY TABLE IF EXISTS tmp_delete_alumno_pagos', {
       transaction
     });
-    await db.query('DROP TEMPORARY TABLE IF EXISTS tmp_delete_alumno_anamnesis', {
-      transaction
-    });
-    await db.query('DROP TEMPORARY TABLE IF EXISTS tmp_delete_alumno_reservas', {
-      transaction
-    });
+    await db.query(
+      'DROP TEMPORARY TABLE IF EXISTS tmp_delete_alumno_anamnesis',
+      {
+        transaction
+      }
+    );
+    await db.query(
+      'DROP TEMPORARY TABLE IF EXISTS tmp_delete_alumno_reservas',
+      {
+        transaction
+      }
+    );
 
     /*
      * 1) Se congelan los IDs dependientes antes de borrar.
@@ -2390,21 +2629,33 @@ export const DR_Alumnos_CTS = async (req, res) => {
 
     await alumno.destroy({ transaction });
 
-    await db.query('DROP TEMPORARY TABLE IF EXISTS tmp_delete_alumno_reservas', {
-      transaction
-    });
-    await db.query('DROP TEMPORARY TABLE IF EXISTS tmp_delete_alumno_anamnesis', {
-      transaction
-    });
+    await db.query(
+      'DROP TEMPORARY TABLE IF EXISTS tmp_delete_alumno_reservas',
+      {
+        transaction
+      }
+    );
+    await db.query(
+      'DROP TEMPORARY TABLE IF EXISTS tmp_delete_alumno_anamnesis',
+      {
+        transaction
+      }
+    );
     await db.query('DROP TEMPORARY TABLE IF EXISTS tmp_delete_alumno_pagos', {
       transaction
     });
-    await db.query('DROP TEMPORARY TABLE IF EXISTS tmp_delete_alumno_mensualidades', {
-      transaction
-    });
-    await db.query('DROP TEMPORARY TABLE IF EXISTS tmp_delete_alumno_membresias', {
-      transaction
-    });
+    await db.query(
+      'DROP TEMPORARY TABLE IF EXISTS tmp_delete_alumno_mensualidades',
+      {
+        transaction
+      }
+    );
+    await db.query(
+      'DROP TEMPORARY TABLE IF EXISTS tmp_delete_alumno_membresias',
+      {
+        transaction
+      }
+    );
 
     await transaction.commit();
 

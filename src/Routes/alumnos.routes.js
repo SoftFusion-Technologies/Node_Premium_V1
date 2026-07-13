@@ -79,6 +79,7 @@ import {
   OBR_AlumnosMembresias_CTS,
   OBR_MembresiaPorId_CTS,
   OBR_MembresiasPorAlumno_CTS,
+  OBR_MisMembresias_CTS,
   OBR_MembresiaActivaAlumno_CTS,
   CR_AlumnosMembresias_CTS,
   UR_AlumnosMembresias_CTS,
@@ -92,6 +93,8 @@ import {
 import {
   OBRS_AsistenciasAlumno_CTS,
   OBRS_EstadisticasAsistenciaAlumno_CTS,
+  OBRS_MisAsistencias_CTS,
+  OBRS_MisEstadisticasAsistencia_CTS,
   OBRS_AlumnosInactivos_CTS
 } from '../Controllers/Alumno/CTS_TB_AlumnosAsistencias.js';
 
@@ -122,6 +125,28 @@ const router = express.Router();
 router.get('/alumnos/perfil', authenticateAlumnoToken, OBR_AlumnoPerfil_CTS);
 // Sergio Gustavo Manrique - 2026/06/11 - Actualiza datos personales del alumno autenticado
 router.patch('/alumnos/perfil', authenticateAlumnoToken, UR_AlumnoPerfil_CTS);
+
+/*
+ * Benjamin Orellana - 2026/07/13 - Historial y estadísticas propias para el
+ * portal. El controlador obtiene el alumno_id exclusivamente desde el token.
+ */
+router.get(
+  '/alumnos/perfil/asistencias',
+  authenticateAlumnoToken,
+  OBRS_MisAsistencias_CTS
+);
+
+router.get(
+  '/alumnos/perfil/asistencias/estadisticas',
+  authenticateAlumnoToken,
+  OBRS_MisEstadisticasAsistencia_CTS
+);
+
+router.get(
+  '/alumnos/perfil/membresias',
+  authenticateAlumnoToken,
+  OBR_MisMembresias_CTS
+);
 
 /*
  * Benjamin Orellana - 2026/05/26 - Lista alumnos con filtros, búsqueda y paginación.

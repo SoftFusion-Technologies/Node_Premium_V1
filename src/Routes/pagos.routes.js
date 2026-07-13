@@ -17,6 +17,7 @@ import express from 'express';
 
 // Benjamin Orellana - 2026/05/10 - Importa middlewares de seguridad para proteger rutas PREMIUM.
 import { authenticateToken } from '../Security/auth.js';
+import { authenticateAlumnoToken } from '../Security/authAlumno.js';
 
 import {
   OBR_PagosMediosPago_CTS,
@@ -34,6 +35,7 @@ import {
   OBR_PagosMensualidades_CTS,
   OBR_MensualidadPorId_CTS,
   OBR_MensualidadesPorAlumno_CTS,
+  OBR_MisMensualidades_CTS,
   OBR_MensualidadesPendientes_CTS,
   OBR_MensualidadesVencidas_CTS,
   OBR_AlumnosMorosos_CTS,
@@ -52,6 +54,7 @@ import {
   OBR_PagosPorAlumno_CTS,
   OBR_PagosPorMensualidad_CTS,
   OBR_HistorialPagosAlumno_CTS,
+  OBR_MiHistorialPagos_CTS,
   CR_Pagos_CTS,
   UR_Pagos_CTS,
   UR_ConfirmarPago_CTS,
@@ -65,9 +68,13 @@ import {
   OBR_PagosMetodosRecurrentes_CTS,
   OBR_MetodoRecurrentePorId_CTS,
   OBR_MetodosRecurrentesPorAlumno_CTS,
+  OBR_MisMetodosRecurrentes_CTS,
   CR_PagosMetodosRecurrentes_CTS,
+  CR_MiMetodoRecurrente_CTS,
   UR_PagosMetodosRecurrentes_CTS,
+  UR_MiMetodoRecurrente_CTS,
   UR_EstadoMetodoRecurrente_CTS,
+  UR_EstadoMiMetodoRecurrente_CTS,
   DR_PagosMetodosRecurrentes_CTS,
   ER_PagosMetodosRecurrentes_CTS
 } from '../Controllers/Pago/CTS_TB_PagosMetodosRecurrentes.js';
@@ -78,6 +85,56 @@ import {
 } from '../Controllers/Pago/CTS_TB_PagosRegistroOperativo.js';
 
 const router = express.Router();
+
+/*
+ * =========================================================
+ * PORTAL DEL ALUMNO - CONSULTA Y MÉTODO DE PAGO PROPIO
+ * =========================================================
+ * El alumno_id siempre se obtiene del token ALUMNO. No se acepta por URL ni
+ * por body, evitando que un alumno consulte o modifique información ajena.
+ */
+
+router.get(
+  '/alumnos/perfil/mensualidades',
+  authenticateAlumnoToken,
+  OBR_MisMensualidades_CTS
+);
+
+router.get(
+  '/alumnos/perfil/pagos-historial',
+  authenticateAlumnoToken,
+  OBR_MiHistorialPagos_CTS
+);
+
+router.get(
+  '/alumnos/perfil/medios-pago/activos',
+  authenticateAlumnoToken,
+  OBR_MediosPagoActivos_CTS
+);
+
+router.get(
+  '/alumnos/perfil/metodos-recurrentes',
+  authenticateAlumnoToken,
+  OBR_MisMetodosRecurrentes_CTS
+);
+
+router.post(
+  '/alumnos/perfil/metodos-recurrentes',
+  authenticateAlumnoToken,
+  CR_MiMetodoRecurrente_CTS
+);
+
+router.put(
+  '/alumnos/perfil/metodos-recurrentes/:id',
+  authenticateAlumnoToken,
+  UR_MiMetodoRecurrente_CTS
+);
+
+router.patch(
+  '/alumnos/perfil/metodos-recurrentes/:id/estado',
+  authenticateAlumnoToken,
+  UR_EstadoMiMetodoRecurrente_CTS
+);
 
 /*
  * =========================================================

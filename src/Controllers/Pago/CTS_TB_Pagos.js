@@ -1169,6 +1169,27 @@ export const OBR_HistorialPagosAlumno_CTS = async (req, res) => {
   }
 };
 
+// Benjamin Orellana - 2026/07/13 - Consulta segura del historial para el
+// portal del alumno. El ID se obtiene del token y nunca desde la URL.
+export const OBR_MiHistorialPagos_CTS = async (req, res) => {
+  const alumnoId = req.alumno?.id || req.alumno?.alumno_id;
+
+  if (!esIdValido(alumnoId)) {
+    return responderError(
+      res,
+      401,
+      'No se pudo identificar al alumno autenticado.'
+    );
+  }
+
+  req.params = {
+    ...req.params,
+    alumno_id: Number(alumnoId)
+  };
+
+  return OBR_HistorialPagosAlumno_CTS(req, res);
+};
+
 // Benjamin Orellana - 2026/05/30 - Crea un pago.
 export const CR_Pagos_CTS = async (req, res) => {
   const transaction = await db.transaction();

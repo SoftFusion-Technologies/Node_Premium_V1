@@ -798,6 +798,203 @@ export const UR_EstadoMetodoRecurrente_CTS = async (req, res) => {
   }
 };
 
+// Benjamin Orellana - 2026/07/13 - Obtiene el ID del alumno autenticado en el
+// portal. Estas operaciones nunca confían en un alumno_id enviado por cliente.
+const obtenerAlumnoAutenticadoId = (req) => {
+  const alumnoId = req.alumno?.id || req.alumno?.alumno_id;
+
+  return esIdValido(alumnoId) ? Number(alumnoId) : null;
+};
+
+const validarPropiedadMetodoRecurrente = async (metodoId, alumnoId) => {
+  if (!esIdValido(metodoId) || !esIdValido(alumnoId)) return null;
+
+  return PagosMetodosRecurrentesModel.findOne({
+    where: {
+      id: Number(metodoId),
+      alumno_id: Number(alumnoId)
+    },
+    attributes: ['id', 'alumno_id']
+  });
+};
+
+// Benjamin Orellana - 2026/07/13 - Lista los métodos recurrentes propios.
+export const OBR_MisMetodosRecurrentes_CTS = async (req, res) => {
+  const alumnoId = obtenerAlumnoAutenticadoId(req);
+
+  if (!alumnoId) {
+    return responderError(
+      res,
+      401,
+      'No se pudo identificar al alumno autenticado.'
+    );
+  }
+
+  req.params = {
+    ...req.params,
+    alumno_id: alumnoId
+  };
+
+  return OBR_MetodosRecurrentesPorAlumno_CTS(req, res);
+};
+
+// Benjamin Orellana - 2026/07/13 - Registra un método recurrente para el
+// alumno autenticado. El estado inicial se fuerza a activo.
+export const CR_MiMetodoRecurrente_CTS = async (req, res) => {
+  const alumnoId = obtenerAlumnoAutenticadoId(req);
+
+  if (!alumnoId) {
+    return responderError(
+      res,
+      401,
+      'No se pudo identificar al alumno autenticado.'
+    );
+  }
+
+  const camposPermitidos = [
+    'medio_pago_id',
+    'proveedor',
+    'customer_token',
+    'payment_method_token',
+    'marca_tarjeta',
+    'ultimos_cuatro',
+    'titular',
+    'fecha_alta'
+  ];
+
+  const datosMetodo = camposPermitidos.reduce((datos, campo) => {
+    if (req.body?.[campo] !== undefined) {
+      datos[campo] = req.body[campo];
+    }
+
+    return datos;
+  }, {});
+
+  req.body = {
+    ...datosMetodo,
+    alumno_id: alumnoId,
+    estado: 'activo',
+    fecha_baja: null,
+    motivo_baja: null
+  };
+
+  return CR_PagosMetodosRecurrentes_CTS(req, res);
+};
+
+// Benjamin Orellana - 2026/07/13 - Permite al alumno actualizar únicamente
+// los datos de su propio método recurrente.
+export const UR_MiMetodoRecurrente_CTS = async (req, res) => {
+  try {
+    const alumnoId = obtenerAlumnoAutenticadoId(req);
+
+    if (!alumnoId) {
+      return responderError(
+        res,
+        401,
+        'No se pudo identificar al alumno autenticado.'
+      );
+    }
+
+    const metodoPropio = await validarPropiedadMetodoRecurrente(
+      req.params?.id,
+      alumnoId
+    );
+
+    if (!metodoPropio) {
+      return responderError(
+        res,
+        404,
+        'No se encontró el método recurrente solicitado.'
+      );
+    }
+
+    const camposPermitidos = [
+      'medio_pago_id',
+      'proveedor',
+      'customer_token',
+      'payment_method_token',
+      'marca_tarjeta',
+      'ultimos_cuatro',
+      'titular'
+    ];
+
+    req.body = camposPermitidos.reduce((datos, campo) => {
+      if (req.body?.[campo] !== undefined) {
+        datos[campo] = req.body[campo];
+      }
+
+      return datos;
+    }, {});
+
+    return UR_PagosMetodosRecurrentes_CTS(req, res);
+  } catch (error) {
+    console.error('Error en UR_MiMetodoRecurrente_CTS:', error);
+
+    return responderError(
+      res,
+      500,
+      'Error interno al actualizar el método recurrente.'
+    );
+  }
+};
+
+// Benjamin Orellana - 2026/07/13 - El alumno puede activar o pausar sólo su
+// propio débito automático; no puede asignar estados administrativos.
+export const UR_EstadoMiMetodoRecurrente_CTS = async (req, res) => {
+  try {
+    const alumnoId = obtenerAlumnoAutenticadoId(req);
+
+    if (!alumnoId) {
+      return responderError(
+        res,
+        401,
+        'No se pudo identificar al alumno autenticado.'
+      );
+    }
+
+    const estado = String(req.body?.estado || '').toLowerCase();
+
+    if (!['activo', 'inactivo'].includes(estado)) {
+      return responderError(
+        res,
+        400,
+        'El alumno sólo puede activar o pausar el débito automático.'
+      );
+    }
+
+    const metodoPropio = await validarPropiedadMetodoRecurrente(
+      req.params?.id,
+      alumnoId
+    );
+
+    if (!metodoPropio) {
+      return responderError(
+        res,
+        404,
+        'No se encontró el método recurrente solicitado.'
+      );
+    }
+
+    req.body = {
+      estado,
+      motivo_baja:
+        estado === 'inactivo'
+          ? 'Método pausado por el alumno desde su portal.'
+          : null
+    };
+
+    return UR_EstadoMetodoRecurrente_CTS(req, res);
+  } catch (error) {
+    console.error('Error en UR_EstadoMiMetodoRecurrente_CTS:', error);
+
+    return responderError(
+      res,
+      500,
+      'Error interno al actualizar el estado del método recurrente.'
+    );
+  }
+};
+
 // Benjamin Orellana - 2026/05/30 - Baja lógica de método recurrente, cambia estado a eliminado.
 export const DR_PagosMetodosRecurrentes_CTS = async (req, res) => {
   const transaction = await db.transaction();

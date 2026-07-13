@@ -12,13 +12,13 @@
  * Capa: Backend
  */
 
-import AlumnosModel              from '../../Models/Alumno/MD_TB_Alumnos.js';
-import AlumnosAsistenciasModel   from '../../Models/Alumno/MD_TB_AlumnosAsistencias.js';
-import AgendaTurnosModel         from '../../Models/Agenda/MD_TB_AgendaTurnos.js';
-import SedesModel                from '../../Models/Sede/MD_TB_Sedes.js';
-import UsuariosModel             from '../../Models/Usuario/MD_TB_Usuarios.js';
-import db                        from '../../DataBase/db.js';
-import { QueryTypes }            from 'sequelize';
+import AlumnosModel from '../../Models/Alumno/MD_TB_Alumnos.js';
+import AlumnosAsistenciasModel from '../../Models/Alumno/MD_TB_AlumnosAsistencias.js';
+import AgendaTurnosModel from '../../Models/Agenda/MD_TB_AgendaTurnos.js';
+import SedesModel from '../../Models/Sede/MD_TB_Sedes.js';
+import UsuariosModel from '../../Models/Usuario/MD_TB_Usuarios.js';
+import db from '../../DataBase/db.js';
+import { QueryTypes } from 'sequelize';
 
 // Umbral por defecto (días) para considerar a un alumno activo como
 // "inactivo" por falta de asistencia. Coincide con lo pedido: alertar a
@@ -45,7 +45,9 @@ export const OBRS_AsistenciasAlumno_CTS = async (req, res) => {
   try {
     const { alumno_id } = req.params;
 
-    const alumno = await AlumnosModel.findByPk(alumno_id, { attributes: ['id'] });
+    const alumno = await AlumnosModel.findByPk(alumno_id, {
+      attributes: ['id']
+    });
     if (!alumno) {
       return res.status(404).json({ message: 'Alumno no encontrado.' });
     }
@@ -53,18 +55,63 @@ export const OBRS_AsistenciasAlumno_CTS = async (req, res) => {
     const asistencias = await AlumnosAsistenciasModel.findAll({
       where: { alumno_id },
       include: [
-        { model: SedesModel,        as: 'sede',           attributes: ['id', 'nombre'] },
-        { model: AgendaTurnosModel, as: 'turno',           attributes: ['id', 'nombre_clase', 'hora_inicio', 'hora_fin'] },
-        { model: UsuariosModel,     as: 'registrado_por',  attributes: ['id', 'nombre', 'apellido'] }
+        { model: SedesModel, as: 'sede', attributes: ['id', 'nombre'] },
+        {
+          model: AgendaTurnosModel,
+          as: 'turno',
+          attributes: ['id', 'nombre_clase', 'hora_inicio', 'hora_fin']
+        },
+        {
+          model: UsuariosModel,
+          as: 'registrado_por',
+          attributes: ['id', 'nombre', 'apellido']
+        }
       ],
-      order: [['fecha', 'DESC'], ['hora_registro', 'DESC']]
+      order: [
+        ['fecha', 'DESC'],
+        ['hora_registro', 'DESC']
+      ]
     });
 
-    return res.status(200).json({ status: 'success', data: asistencias, total: asistencias.length });
+    return res
+      .status(200)
+      .json({
+        status: 'success',
+        data: asistencias,
+        total: asistencias.length
+      });
   } catch (error) {
     console.error('[OBRS_AsistenciasAlumno_CTS]', error);
-    return res.status(500).json({ message: 'Error al obtener las asistencias del alumno.' });
+    return res
+      .status(500)
+      .json({ message: 'Error al obtener las asistencias del alumno.' });
   }
+};
+
+/*
+ * Benjamin Orellana - 2026/07/13
+ * Historial propio para el portal del alumno. El alumno_id se obtiene del
+ * token ALUMNO para impedir consultas sobre historiales ajenos.
+ */
+export const OBRS_MisAsistencias_CTS = async (req, res) => {
+  const alumnoId = req.alumno?.id || req.alumno?.alumno_id;
+
+  if (
+    !alumnoId ||
+    !Number.isInteger(Number(alumnoId)) ||
+    Number(alumnoId) <= 0
+  ) {
+    return res.status(401).json({
+      message: 'No se pudo identificar al alumno autenticado.'
+    });
+  }
+
+  req.params = {
+    ...req.params,
+    alumno_id: Number(alumnoId)
+  };
+
+  return OBRS_AsistenciasAlumno_CTS(req, res);
 };
 
 /*
@@ -84,7 +131,9 @@ export const OBRS_EstadisticasAsistenciaAlumno_CTS = async (req, res) => {
     const { alumno_id } = req.params;
     const umbralDias = parsearUmbralDias(req.query.umbral_dias);
 
-    const alumno = await AlumnosModel.findByPk(alumno_id, { attributes: ['id', 'estado', 'fecha_inicio'] });
+    const alumno = await AlumnosModel.findByPk(alumno_id, {
+      attributes: ['id', 'estado', 'fecha_inicio']
+    });
     if (!alumno) {
       return res.status(404).json({ message: 'Alumno no encontrado.' });
     }
@@ -92,9 +141,16 @@ export const OBRS_EstadisticasAsistenciaAlumno_CTS = async (req, res) => {
     const asistencias = await AlumnosAsistenciasModel.findAll({
       where: { alumno_id },
       include: [
-        { model: AgendaTurnosModel, as: 'turno', attributes: ['id', 'nombre_clase'] }
+        {
+          model: AgendaTurnosModel,
+          as: 'turno',
+          attributes: ['id', 'nombre_clase']
+        }
       ],
-      order: [['fecha', 'DESC'], ['hora_registro', 'DESC']]
+      order: [
+        ['fecha', 'DESC'],
+        ['hora_registro', 'DESC']
+      ]
     });
 
     const hoy = new Date();
@@ -108,14 +164,18 @@ export const OBRS_EstadisticasAsistenciaAlumno_CTS = async (req, res) => {
 
     const ultimaAsistio = asistencias.find((a) => a.estado === 'asistio');
     const diasSinActividad = ultimaAsistio
-      ? Math.floor((hoy - new Date(ultimaAsistio.fecha)) / (1000 * 60 * 60 * 24))
+      ? Math.floor(
+          (hoy - new Date(ultimaAsistio.fecha)) / (1000 * 60 * 60 * 24)
+        )
       : null;
 
     // Si nunca asistió, "días sin actividad" se cuenta desde su fecha de
     // alta (fecha_inicio), no desde el epoch. Evita marcar como "inactivo"
     // a un alumno recién dado de alta que todavía no tuvo su primera clase.
     const diasDesdeAlta = alumno.fecha_inicio
-      ? Math.floor((hoy - new Date(alumno.fecha_inicio)) / (1000 * 60 * 60 * 24))
+      ? Math.floor(
+          (hoy - new Date(alumno.fecha_inicio)) / (1000 * 60 * 60 * 24)
+        )
       : null;
 
     // Racha: cuenta desde el registro más reciente hacia atrás mientras sea
@@ -133,14 +193,15 @@ export const OBRS_EstadisticasAsistenciaAlumno_CTS = async (req, res) => {
     const asistenciasVentana = asistencias.filter(
       (a) => a.estado === 'asistio' && new Date(a.fecha) >= inicioVentana
     ).length;
-    const frecuenciaSemanalReal = Math.round((asistenciasVentana / SEMANAS_VENTANA) * 10) / 10;
+    const frecuenciaSemanalReal =
+      Math.round((asistenciasVentana / SEMANAS_VENTANA) * 10) / 10;
 
     const alumnoActivo = alumno.estado === 'activo';
-    const alertaInactividad = alumnoActivo && (
-      diasSinActividad !== null
+    const alertaInactividad =
+      alumnoActivo &&
+      (diasSinActividad !== null
         ? diasSinActividad > umbralDias
-        : (diasDesdeAlta !== null && diasDesdeAlta > umbralDias)
-    );
+        : diasDesdeAlta !== null && diasDesdeAlta > umbralDias);
 
     return res.status(200).json({
       status: 'success',
@@ -152,9 +213,10 @@ export const OBRS_EstadisticasAsistenciaAlumno_CTS = async (req, res) => {
         ultima_asistencia: ultimaAsistio?.fecha || null,
         ultima_clase: ultimaAsistio?.turno?.nombre_clase || null,
         racha_actual: racha,
-        porcentaje_asistencia: totalContableMes > 0
-          ? Math.round((asistenciasMes / totalContableMes) * 100)
-          : 0,
+        porcentaje_asistencia:
+          totalContableMes > 0
+            ? Math.round((asistenciasMes / totalContableMes) * 100)
+            : 0,
         frecuencia_semanal_real: frecuenciaSemanalReal,
         alerta_inactividad: alertaInactividad,
         umbral_dias: umbralDias
@@ -162,8 +224,38 @@ export const OBRS_EstadisticasAsistenciaAlumno_CTS = async (req, res) => {
     });
   } catch (error) {
     console.error('[OBRS_EstadisticasAsistenciaAlumno_CTS]', error);
-    return res.status(500).json({ message: 'Error al calcular las estadísticas de asistencia del alumno.' });
+    return res
+      .status(500)
+      .json({
+        message: 'Error al calcular las estadísticas de asistencia del alumno.'
+      });
   }
+};
+
+/*
+ * Benjamin Orellana - 2026/07/13
+ * Estadísticas propias para el portal del alumno. Reutiliza el cálculo
+ * administrativo, pero fuerza el ID proveniente de la sesión autenticada.
+ */
+export const OBRS_MisEstadisticasAsistencia_CTS = async (req, res) => {
+  const alumnoId = req.alumno?.id || req.alumno?.alumno_id;
+
+  if (
+    !alumnoId ||
+    !Number.isInteger(Number(alumnoId)) ||
+    Number(alumnoId) <= 0
+  ) {
+    return res.status(401).json({
+      message: 'No se pudo identificar al alumno autenticado.'
+    });
+  }
+
+  req.params = {
+    ...req.params,
+    alumno_id: Number(alumnoId)
+  };
+
+  return OBRS_EstadisticasAsistenciaAlumno_CTS(req, res);
 };
 
 /*
@@ -211,9 +303,18 @@ export const OBRS_AlumnosInactivos_CTS = async (req, res) => {
       }
     );
 
-    return res.status(200).json({ status: 'success', data: alumnos, total: alumnos.length, umbral_dias: umbralDias });
+    return res
+      .status(200)
+      .json({
+        status: 'success',
+        data: alumnos,
+        total: alumnos.length,
+        umbral_dias: umbralDias
+      });
   } catch (error) {
     console.error('[OBRS_AlumnosInactivos_CTS]', error);
-    return res.status(500).json({ message: 'Error al obtener el listado de alumnos inactivos.' });
+    return res
+      .status(500)
+      .json({ message: 'Error al obtener el listado de alumnos inactivos.' });
   }
 };

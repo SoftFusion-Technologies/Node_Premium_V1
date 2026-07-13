@@ -553,6 +553,26 @@ export const OBR_MembresiasPorAlumno_CTS = async (req, res) => {
   }
 };
 
+// Benjamin Orellana - 2026/07/13 - Lista el historial de membresías del
+// alumno autenticado. El ID se toma del token ALUMNO y no desde la URL.
+export const OBR_MisMembresias_CTS = async (req, res) => {
+  const alumnoId = req.alumno?.id || req.alumno?.alumno_id;
+
+  if (!esIdValido(alumnoId)) {
+    return responderError(
+      res,
+      401,
+      'No se pudo identificar al alumno autenticado.'
+    );
+  }
+
+  req.params = {
+    ...req.params,
+    alumno_id: Number(alumnoId)
+  };
+
+  return OBR_MembresiasPorAlumno_CTS(req, res);
+};
 
 // Benjamin Orellana - 2026/06/15 - Obtiene la membresía operativa vigente de un alumno.
 export const OBR_MembresiaActivaAlumno_CTS = async (req, res) => {

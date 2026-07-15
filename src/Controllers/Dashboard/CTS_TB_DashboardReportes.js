@@ -166,9 +166,20 @@ export const OBR_DashboardCortesActividad_CTS = async (req, res) => {
         const facturacionAcumuladaMesAnterior = Number(fila.facturacion_acumulada_mes_anterior) || 0;
 
         const variacion = activos - activosMesAnterior;
-        const variacionFacturacionPct = facturacionAcumuladaMesAnterior > 0
-          ? Math.round(((facturacionAcumulada - facturacionAcumuladaMesAnterior) / facturacionAcumuladaMesAnterior) * 10000) / 100
-          : null;
+
+        // Si el mes anterior facturó $0 en este corte, no se puede sacar un
+        // % de variación (división por cero) — pero si este mes ya hay
+        // facturación y antes no había nada, es un caso claro de "arrancó
+        // de cero", así que se marca directamente como adelantado en vez
+        // de devolver null (que se veía como "—" sin sentido).
+        let variacionFacturacionPct = null;
+        if (facturacionAcumuladaMesAnterior > 0) {
+          variacionFacturacionPct = Math.round(
+            ((facturacionAcumulada - facturacionAcumuladaMesAnterior) / facturacionAcumuladaMesAnterior) * 10000
+          ) / 100;
+        } else if (facturacionAcumulada > 0) {
+          variacionFacturacionPct = UMBRAL_SEMAFORO;
+        }
 
         sedesMap.get(fila.sede_id).cortes.push({
           clave: bloque.clave,

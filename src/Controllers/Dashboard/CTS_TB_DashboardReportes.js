@@ -34,7 +34,7 @@ const resolverRangoMes = (query = {}) => {
 
 /*
  * Sergio Manrique - 2026/07/12
- * Dado un año/mes y un día de corte (10, 20 o null para "fin de mes"),
+ * Dado un año/mes y un día de corte (10, 20, 25 o null para "fin de mes"),
  * arma la fecha del corte, la fecha del mismo corte un mes atrás y el
  * primer día de cada uno de esos dos meses (para acumular facturación
  * desde el inicio del mes hasta el corte).
@@ -79,12 +79,13 @@ const estadoPorVariacionFacturacion = (variacionPct) => {
 const CORTES_ACTIVIDAD = [
   { clave: '10', etiqueta: 'Día 10', dia: 10 },
   { clave: '20', etiqueta: 'Día 20', dia: 20 },
+  { clave: '25', etiqueta: 'Día 25', dia: 25 },
   { clave: 'fin_mes', etiqueta: 'Fin de mes', dia: null }
 ];
 
 /*
  * Sergio Manrique - 2026/07/12
- * Por cada sede y cada corte del mes (10 / 20 / fin de mes): cantidad de
+ * Por cada sede y cada corte del mes (10 / 20 / 25 / fin de mes): cantidad de
  * alumnos activos a esa fecha, comparado contra el mismo corte del mes
  * anterior (variación + semáforo), facturación acumulada desde el inicio
  * del mes hasta el corte (comparada también contra el mes anterior) y %

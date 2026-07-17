@@ -252,6 +252,56 @@ export const OBRS_TurnosAsistenciaDia_CTS = async (req, res) => {
       }
     }
 
+    // Sergio Manrique - 2026/07/14 - Estadísticas de historial por alumno
+    // (última asistencia, asistencias del mes y frecuencia semanal real),
+    // para mostrarlas en la fila de cada alumno del panel de asistencia.
+    // Se resuelve con una sola consulta de todo el historial de asistencia
+    // de los alumnos que aparecen hoy, y se calcula todo en memoria.
+    const alumnoIds = [
+      ...new Set(
+        turnosPlanos.flatMap((t) => (t.reservas || []).map((r) => r.alumno?.id).filter(Boolean))
+      )
+    ];
+
+    const historialPorAlumno = new Map();
+    if (alumnoIds.length) {
+      const historial = await AlumnosAsistenciasModel.findAll({
+        where: { alumno_id: { [Op.in]: alumnoIds } },
+        order: [['fecha', 'DESC']]
+      });
+      for (const registro of historial) {
+        if (!historialPorAlumno.has(registro.alumno_id)) {
+          historialPorAlumno.set(registro.alumno_id, []);
+        }
+        historialPorAlumno.get(registro.alumno_id).push(registro);
+      }
+    }
+
+    const hoyDate = new Date(fechaConsulta);
+    const inicioMes = new Date(hoyDate.getFullYear(), hoyDate.getMonth(), 1);
+    const SEMANAS_VENTANA = 8;
+    const inicioVentana = new Date(hoyDate);
+    inicioVentana.setDate(inicioVentana.getDate() - SEMANAS_VENTANA * 7);
+
+    for (const turno of turnosPlanos) {
+      for (const reserva of turno.reservas || []) {
+        const alumnoId = reserva.alumno?.id;
+        const historialAlumno = historialPorAlumno.get(alumnoId) || [];
+
+        const ultimaAsistio = historialAlumno.find((a) => a.estado === 'asistio');
+        const asistenciasMes = historialAlumno.filter(
+          (a) => a.estado === 'asistio' && new Date(a.fecha) >= inicioMes
+        ).length;
+        const asistenciasVentana = historialAlumno.filter(
+          (a) => a.estado === 'asistio' && new Date(a.fecha) >= inicioVentana
+        ).length;
+
+        reserva.ultima_asistencia      = ultimaAsistio?.fecha ?? null;
+        reserva.asistencias_mes        = asistenciasMes;
+        reserva.frecuencia_semanal_real = Math.round((asistenciasVentana / SEMANAS_VENTANA) * 10) / 10;
+      }
+    }
+
     return res.status(200).json({ status: 'success', data: turnosPlanos });
   } catch (error) {
     console.error('[OBRS_TurnosAsistenciaDia_CTS]', error);

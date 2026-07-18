@@ -11,6 +11,26 @@
 import { QueryTypes } from 'sequelize';
 
 import db from '../../DataBase/db.js';
+import { obtenerCotizacionUsdVigente } from '../Finanzas/CTS_TB_FinanzasCotizacionesUsd.js';
+
+const TIPOS_DOLAR_VALIDOS = ['oficial', 'blue'];
+
+// Sergio Manrique - 2026/07/17 - Fecha de hoy (horario Argentina) en formato
+// YYYY-MM-DD, para saber si el mes consultado ya terminó o está en curso.
+const resolverFechaHoy = () => {
+  const partes = new Intl.DateTimeFormat('es-AR', {
+    timeZone: 'America/Argentina/Buenos_Aires',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  }).formatToParts(new Date());
+
+  const year = partes.find((parte) => parte.type === 'year')?.value;
+  const month = partes.find((parte) => parte.type === 'month')?.value;
+  const day = partes.find((parte) => parte.type === 'day')?.value;
+
+  return `${year}-${month}-${day}`;
+};
 
 /*
  * Sergio Manrique - 2026/07/12
@@ -214,11 +234,26 @@ export const OBR_DashboardCortesActividad_CTS = async (req, res) => {
 /*
  * Sergio Manrique - 2026/07/12
  * Cierre mensual por sede: cuotas cobradas, cupo, ocupación, altas, bajas,
- * churn, LTV, facturación bruta/neta, gastos, ticket promedio, margen neto
- * y punto de equilibrio — mismas fórmulas que usa el cliente en su planilla
- * (LTV = ticket promedio / churn; punto de equilibrio = gastos / ticket
- * promedio). CAC y facturación en USD siguen sin poder calcularse: no hay
- * datos suficientes en el modelo actual (ver `no_disponible`).
+ * churn, LTV, facturación bruta/neta (+ en USD), gastos, ticket promedio,
+ * margen neto y punto de equilibrio — mismas fórmulas que usa el cliente en
+ * su planilla (LTV = ticket promedio / churn; punto de equilibrio = gastos /
+ * ticket promedio; facturación neta USD = facturación neta / venta de la
+ * cotización vigente al cierre del mes, según finanzas_cotizaciones_usd).
+ *
+ * Ticket promedio = facturación bruta (TODO lo vendido: cuotas + productos
+ * sueltos) / cantidad de cuotas cobradas en el período. El cliente confirmó
+ * (2026/07/17) que el divisor son las cuotas, no la cantidad total de
+ * ventas/pagos: una venta suelta (agua, barrita, etc.) suma a la
+ * facturación bruta pero NO cuenta como cuota. Por eso `cuotas_mensuales`
+ * filtra `mensualidad_id IS NOT NULL` (los pagos sin mensualidad asociada
+ * son ventas sueltas, no cuotas de socio).
+ *
+ * CAC Marketing = (gastos tipo Publicidad + Agencia) / altas del mes.
+ * CAC Comercial = (gastos tipo Publicidad + Agencia + Front Comercial) /
+ * altas del mes. Fórmulas y nombres de tipo de gasto confirmados por el
+ * cliente (2026/07/17) — ver src/DataBase/sql/2026_07_17_gastos_tipos_cac.sql
+ * para dar de alta esos 3 tipos de gasto en un entorno nuevo. Da `null` si
+ * no hubo altas en el período (no por falta de datos del modelo).
  */
 export const OBR_DashboardCierreMensual_CTS = async (req, res) => {
   try {
@@ -229,6 +264,22 @@ export const OBR_DashboardCierreMensual_CTS = async (req, res) => {
     }
 
     const sedeId = req.query.sede_id ? Number(req.query.sede_id) : null;
+
+    const tipoDolar = TIPOS_DOLAR_VALIDOS.includes(req.query.tipo_dolar)
+      ? req.query.tipo_dolar
+      : 'oficial';
+
+    // La cotización que corresponde a "la facturación de este mes" es la
+    // vigente al último día del mes consultado (o la del día de hoy, si se
+    // está mirando el mes en curso todavía sin terminar).
+    const fechaCotizacion = rango.hasta < resolverFechaHoy()
+      ? rango.hasta
+      : resolverFechaHoy();
+
+    const cotizacionUsd = await obtenerCotizacionUsdVigente({
+      fecha: fechaCotizacion,
+      tipo: tipoDolar
+    });
 
     const rows = await db.query(
       `
@@ -248,13 +299,24 @@ export const OBR_DashboardCierreMensual_CTS = async (req, res) => {
             AND (a.fecha_baja IS NULL OR a.fecha_baja >= :desde)) AS alumnos_inicio_mes,
         (SELECT COUNT(*) FROM pagos_pagos p
           WHERE p.sede_id = s.id AND p.estado = 'confirmado'
+            AND p.mensualidad_id IS NOT NULL
             AND DATE(p.fecha_pago) BETWEEN :desde AND :hasta) AS cuotas_mensuales,
         (SELECT COALESCE(SUM(p.monto), 0) FROM pagos_pagos p
           WHERE p.sede_id = s.id AND p.estado = 'confirmado'
             AND DATE(p.fecha_pago) BETWEEN :desde AND :hasta) AS facturacion_bruta,
         (SELECT COALESCE(SUM(g.importe_total), 0) FROM gastos_gastos g
           WHERE g.sede_id = s.id AND g.estado <> 'anulado'
-            AND g.fecha_gasto BETWEEN :desde AND :hasta) AS gastos
+            AND g.fecha_gasto BETWEEN :desde AND :hasta) AS gastos,
+        (SELECT COALESCE(SUM(g.importe_total), 0) FROM gastos_gastos g
+          INNER JOIN gastos_tipos t ON t.id = g.tipo_gasto_id
+          WHERE g.sede_id = s.id AND g.estado <> 'anulado'
+            AND t.nombre IN ('Publicidad', 'Agencia')
+            AND g.fecha_gasto BETWEEN :desde AND :hasta) AS gasto_marketing,
+        (SELECT COALESCE(SUM(g.importe_total), 0) FROM gastos_gastos g
+          INNER JOIN gastos_tipos t ON t.id = g.tipo_gasto_id
+          WHERE g.sede_id = s.id AND g.estado <> 'anulado'
+            AND t.nombre = 'Front Comercial'
+            AND g.fecha_gasto BETWEEN :desde AND :hasta) AS gasto_front_comercial
       FROM sedes_sedes s
       WHERE s.activo = 1
         ${sedeId ? 'AND s.id = :sede_id' : ''}
@@ -275,6 +337,9 @@ export const OBR_DashboardCierreMensual_CTS = async (req, res) => {
       const bajasMensuales = Number(fila.bajas_mensuales) || 0;
       const facturacionBruta = Number(fila.facturacion_bruta) || 0;
       const gastos = Number(fila.gastos) || 0;
+      const gastoMarketing = Number(fila.gasto_marketing) || 0;
+      const gastoFrontComercial = Number(fila.gasto_front_comercial) || 0;
+      const altasMensuales = Number(fila.altas_mensuales) || 0;
       const cuotasMensuales = Number(fila.cuotas_mensuales) || 0;
       const facturacionNeta = facturacionBruta - gastos;
 
@@ -295,6 +360,24 @@ export const OBR_DashboardCierreMensual_CTS = async (req, res) => {
         ? Math.round((gastos / ticketPromedio) * 100) / 100
         : null;
 
+      // Facturación neta convertida a USD con la cotización de venta del
+      // dólar vigente al cierre del mes (o de hoy, si el mes sigue en curso).
+      const facturacionNetaUsd = cotizacionUsd
+        ? Math.round((facturacionNeta / Number(cotizacionUsd.venta)) * 100) / 100
+        : null;
+
+      // CAC Marketing = (Publicidad + Agencia) / altas del mes: evalúa el
+      // trabajo de la agencia. CAC Comercial = eso + Front Comercial: cuánto
+      // cuesta realmente incorporar un alumno. Fórmulas confirmadas por el
+      // cliente (2026/07/17). Requiere que los gastos ya estén cargados con
+      // sede y tipo ('Publicidad'/'Agencia'/'Front Comercial') asignados.
+      const cacMarketing = altasMensuales > 0
+        ? Math.round((gastoMarketing / altasMensuales) * 100) / 100
+        : null;
+      const cacComercial = altasMensuales > 0
+        ? Math.round(((gastoMarketing + gastoFrontComercial) / altasMensuales) * 100) / 100
+        : null;
+
       return {
         sede_id: fila.sede_id,
         sede: fila.sede,
@@ -312,12 +395,10 @@ export const OBR_DashboardCierreMensual_CTS = async (req, res) => {
         ticket_promedio: ticketPromedio,
         margen_neto: facturacionBruta > 0 ? Math.round((facturacionNeta / facturacionBruta) * 10000) / 100 : null,
         punto_equilibrio: puntoEquilibrio,
-        // No hay datos suficientes en el modelo actual para calcular estos:
-        // CAC requiere vincular gasto de marketing con altas captadas,
-        // facturación en USD requiere una fuente de cotización de dólar.
-        cac: null,
-        facturacion_neta_usd: null,
-        no_disponible: ['cac', 'facturacion_neta_usd']
+        facturacion_neta_usd: facturacionNetaUsd,
+        cac_marketing: cacMarketing,
+        cac_comercial: cacComercial,
+        no_disponible: []
       };
     });
 
@@ -325,6 +406,17 @@ export const OBR_DashboardCierreMensual_CTS = async (req, res) => {
       ok: true,
       message: 'Cierre mensual por sede obtenido correctamente.',
       filtros: { anio: rango.anio, mes: rango.mes, sede_id: sedeId },
+      // Cotización usada para pasar facturación_neta_usd a dólares. Si es
+      // null, no se pudo calcular facturacion_neta_usd (no hay cotización
+      // capturada todavía hasta esa fecha).
+      cotizacion_usd: cotizacionUsd
+        ? {
+            tipo: tipoDolar,
+            fecha: cotizacionUsd.fecha,
+            compra: Number(cotizacionUsd.compra),
+            venta: Number(cotizacionUsd.venta)
+          }
+        : null,
       data
     });
   } catch (error) {

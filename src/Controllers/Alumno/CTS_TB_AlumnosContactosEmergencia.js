@@ -698,14 +698,24 @@ export const CR_MiContactoEmergencia_CTS = async (req, res) => {
       transaction
     });
 
+    // Si el alumno ya marcó explícitamente algún contacto del lote como
+    // principal, se respeta esa elección. Solo se asume "el primero es
+    // principal por defecto" cuando nadie eligió ninguno (evita pisar la
+    // elección real del usuario con la del índice 0 del array).
+    const algunoMarcadoComoPrincipal = contactosInput.some(
+      (contacto) => normalizarPrincipal(contacto.principal, 0) === 1
+    );
+
     // Preparar los datos para bulkCreate
     const contactosParaCrear = contactosInput.map((contacto, index) => {
       const payload = buildContactoPayload(contacto, 'create');
+      const esPrincipalPorDefecto =
+        totalContactos === 0 && !algunoMarcadoComoPrincipal && index === 0;
+
       return {
         ...payload,
         alumno_id: Number(alumnoId),
-        // El primer contacto es principal si no hay ninguno
-        principal: totalContactos === 0 && index === 0 ? 1 : payload.principal
+        principal: esPrincipalPorDefecto ? 1 : payload.principal
       };
     });
 

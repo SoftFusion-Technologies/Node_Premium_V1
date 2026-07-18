@@ -29,8 +29,22 @@ import {
   DR_FinanzasMovimientos_CTS,
   ER_FinanzasMovimientos_CTS
 } from '../Controllers/Finanzas/CTS_TB_FinanzasMovimientos.js';
+import { OBR_CotizacionUsdVigente_CTS } from '../Controllers/Finanzas/CTS_TB_FinanzasCotizacionesUsd.js';
 
 const router = express.Router();
+
+/*
+ * =========================================================
+ * FINANZAS - COTIZACIÓN USD
+ * =========================================================
+ */
+
+// Sergio Manrique - 2026/07/17 - Cotización vigente (oficial o blue) a una fecha dada, o a hoy si no se especifica.
+router.get(
+  '/finanzas-cotizaciones-usd/vigente',
+  authenticateToken,
+  OBR_CotizacionUsdVigente_CTS
+);
 
 /*
  * =========================================================

@@ -26,7 +26,7 @@ import SedesHorariosModel           from '../../Models/Sede/MD_TB_SedesHorarios.
 import UsuariosModel                from '../../Models/Usuario/MD_TB_Usuarios.js';
 import AlumnosModel                 from '../../Models/Alumno/MD_TB_Alumnos.js';
 import db                           from '../../DataBase/db.js';
-import { obtenerMinutosCancelacion } from './CTS_TB_AgendaTurnosReservas.js';
+import { obtenerMinutosCancelacion, marcarAsistenciaComoCancelada } from './CTS_TB_AgendaTurnosReservas.js';
 
 // Días de anticipación para marcar el bono/membresía como "por vencer".
 const DIAS_ALERTA_VENCIMIENTO_MEMBRESIA = 3;
@@ -829,16 +829,28 @@ export const UR_Turno_CTS = async (req, res) => {
 };
 
 /*
- * Sergio Manrique - 2026/06/23
+ * Sergio Manrique - 2026/06/23 / corregido 2026/07/18
  * Cambia el estado de un turno: bloquear, cancelar, disponible.
+ *
+ * Al pasar a 'bloqueado' o 'cancelado', el turno deja de aceptar gente —
+ * pero antes se dejaban las reservas activas tal cual estaban ('reservada',
+ * como si nada), sin devolver el crédito, y encima si alguien cancelaba esa
+ * reserva individual después, el turno volvía solo a 'disponible', pisando
+ * la decisión del admin. Ahora, al bloquear/cancelar, se cancelan todas las
+ * reservas activas del turno (mismo criterio de reembolso que ER_Turno_CTS:
+ * automático fuera de la ventana de cancelación, opcional adentro vía
+ * devolver_creditos_vencidos) y se limpia también la lista de espera, que
+ * ya no tiene sentido para un turno que no va a liberar más cupos.
  */
 export const UR_EstadoTurno_CTS = async (req, res) => {
+  const transaccion = await db.transaction();
   try {
     const { id } = req.params;
-    const { estado, motivo_bloqueo } = req.body;
+    const { estado, motivo_bloqueo, devolver_creditos_vencidos } = req.body;
 
     const estadosValidos = ['disponible', 'bloqueado', 'cancelado'];
     if (!estadosValidos.includes(estado)) {
+      await transaccion.rollback();
       return res
         .status(400)
         .json({
@@ -846,21 +858,99 @@ export const UR_EstadoTurno_CTS = async (req, res) => {
         });
     }
 
-    const turno = await AgendaTurnosModel.findByPk(id);
+    const turno = await AgendaTurnosModel.findByPk(id, {
+      transaction: transaccion,
+      lock: transaccion.LOCK.UPDATE
+    });
     if (!turno) {
+      await transaccion.rollback();
       return res.status(404).json({ message: 'Turno no encontrado.' });
     }
 
-    await turno.update({
-      estado,
-      motivo_bloqueo: estado === 'bloqueado' ? motivo_bloqueo || null : null,
-      updated_at: new Date()
-    });
+    let reservasCanceladas = 0;
+    let creditosDevueltos = 0;
 
-    return res
-      .status(200)
-      .json({ message: `Turno ${estado} correctamente.`, turno });
+    if (estado === 'bloqueado' || estado === 'cancelado') {
+      const minutosLimite    = await obtenerMinutosCancelacion();
+      const inicioTurno      = dayjs(`${turno.fecha} ${turno.hora_inicio}`);
+      const minutosRestantes = inicioTurno.diff(dayjs(), 'minute');
+      const dentroVentana    = minutosRestantes < minutosLimite;
+      const correspondeReembolso = !dentroVentana || devolver_creditos_vencidos === true;
+
+      const reservasActivas = await AgendaTurnosReservasModel.findAll({
+        where:       { turno_id: id, estado: 'reservada' },
+        transaction: transaccion,
+        lock:        transaccion.LOCK.UPDATE
+      });
+
+      for (const reserva of reservasActivas) {
+        await reserva.update({
+          estado:             'cancelada',
+          fecha_cancelacion:  new Date(),
+          motivo_cancelacion: estado === 'bloqueado'
+            ? 'Turno bloqueado por administración'
+            : 'Turno cancelado por administración',
+          updated_at:         new Date()
+        }, { transaction: transaccion });
+
+        await marcarAsistenciaComoCancelada(
+          reserva.id,
+          transaccion,
+          req.user?.id ?? req.user?.usuario_id ?? null
+        );
+
+        if (reserva.membresia_id && correspondeReembolso) {
+          const membresia = await AlumnosMembresiasModel.findByPk(reserva.membresia_id, {
+            transaction: transaccion,
+            lock:        transaccion.LOCK.UPDATE
+          });
+          if (membresia) {
+            await membresia.update({
+              clases_usadas:      Math.max(0, membresia.clases_usadas - 1),
+              clases_disponibles: membresia.clases_disponibles + 1,
+              updated_at:         new Date()
+            }, { transaction: transaccion });
+            creditosDevueltos++;
+          }
+        }
+        reservasCanceladas++;
+      }
+
+      // La lista de espera de un turno bloqueado/cancelado ya no tiene
+      // sentido: no va a liberar más cupos. Se marca como cancelada (no se
+      // borra, queda como historial) en vez de dejarla "esperando" para
+      // siempre sin que nada la vaya a promover.
+      await AgendaTurnosListaEsperaModel.update(
+        { estado: 'cancelado', fecha_resolucion: new Date(), updated_at: new Date() },
+        { where: { turno_id: id, estado: 'esperando' }, transaction: transaccion }
+      );
+
+      await turno.update({
+        estado,
+        motivo_bloqueo:    estado === 'bloqueado' ? motivo_bloqueo || null : null,
+        cupos_reservados:  0,
+        updated_at:        new Date()
+      }, { transaction: transaccion });
+    } else {
+      // Reabrir el turno ('disponible'): no hay reservas que tocar, porque
+      // mientras estuvo bloqueado/cancelado no se pudo inscribir nadie.
+      await turno.update({
+        estado,
+        motivo_bloqueo: null,
+        updated_at:     new Date()
+      }, { transaction: transaccion });
+    }
+
+    await transaccion.commit();
+
+    return res.status(200).json({
+      message:              `Turno ${estado} correctamente.`,
+      turno,
+      reservas_canceladas:  reservasCanceladas,
+      creditos_devueltos:   creditosDevueltos
+    });
   } catch (error) {
+    await transaccion.rollback();
     console.error('[UR_EstadoTurno_CTS]', error);
     return res
       .status(500)

@@ -56,6 +56,10 @@ export const ER_ListaEspera_CTS = async (req, res) => {
       return res.status(404).json({ message: 'Entrada en lista de espera no encontrada.' });
     }
 
+    if (entrada.estado !== 'esperando') {
+      return res.status(400).json({ message: 'Solo se pueden remover entradas activas de la lista de espera.' });
+    }
+
     const { turno_id, posicion } = entrada;
 
     await entrada.update({ estado: 'cancelado', fecha_resolucion: new Date(), updated_at: new Date() });

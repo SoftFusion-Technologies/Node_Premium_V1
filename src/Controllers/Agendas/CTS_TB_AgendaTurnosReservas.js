@@ -9,7 +9,9 @@
  * Incluye inscripción de alumnos, cancelación con tiempo límite,
  * reprogramación y marcado de asistencia. Al inscribir se crea
  * automáticamente el registro de asistencia en estado 'asistio';
- * al cancelar/anular la inscripción, ese registro se elimina.
+ * al cancelar/anular la inscripción, ese registro pasa a estado 'cancelo'
+ * (no se borra), para que quede en el historial del alumno si canceló él
+ * mismo o si lo dio de baja el admin.
  *
  * Tema: Controladores - Agenda
  * Capa: Backend
@@ -70,14 +72,28 @@ const crearAsistenciaPorReserva = async (turno, reserva, transaccion) => {
 };
 
 /*
- * Elimina el registro de asistencia asociado a una reserva cancelada.
- * Al anular la inscripción, es como si la asistencia nunca hubiese existido.
+ * Marca como 'cancelo' el registro de asistencia asociado a una reserva
+ * anulada, en vez de borrarlo: así queda constancia en el historial del
+ * alumno (perfil > Asistencias) de que canceló esa clase, ya sea que lo
+ * haya hecho él mismo o el admin en su nombre.
+ *
+ * Si el alumno se vuelve a inscribir más adelante, esa nueva inscripción
+ * crea una reserva y una fila de asistencia completamente aparte (con su
+ * propio reserva_id) — este registro cancelado no se toca ni bloquea nada,
+ * queda como historial.
  */
-const eliminarAsistenciaPorReserva = async (reserva_id, transaccion) => {
-  await AlumnosAsistenciasModel.destroy({
-    where:       { reserva_id },
-    transaction: transaccion
-  });
+export const marcarAsistenciaComoCancelada = async (reserva_id, transaccion, registrado_por_id = null) => {
+  await AlumnosAsistenciasModel.update(
+    {
+      estado:             'cancelo',
+      registrado_por_id,
+      updated_at:         new Date()
+    },
+    {
+      where:       { reserva_id },
+      transaction: transaccion
+    }
+  );
 };
 
 /*
@@ -688,8 +704,13 @@ export const ER_ReservaAdmin_CTS = async (req, res) => {
       updated_at:         new Date()
     }, { transaction: transaccion });
 
-    // Eliminar el registro de asistencia: la inscripción fue anulada
-    await eliminarAsistenciaPorReserva(reserva.id, transaccion);
+    // Marcar la asistencia como cancelada (no se borra): queda en el
+    // historial que el admin dio de baja esta inscripción.
+    await marcarAsistenciaComoCancelada(
+      reserva.id,
+      transaccion,
+      req.user?.id ?? req.user?.usuario_id ?? null
+    );
 
     // Liberar cupo en el turno
     await turno.update({
@@ -895,6 +916,22 @@ export const CR_MiReserva_CTS = async (req, res) => {
     // para evitar que dos alumnos reciban la misma posición).
     // No se descuentan créditos hasta que se concrete la inscripción efectiva.
     if (turno.cupos_reservados >= turno.cupo_maximo) {
+      // Evita duplicarlo en la lista de espera si ya está anotado (doble
+      // click, reintento de red, dos pestañas): sin este chequeo quedaba
+      // dos veces, con dos posiciones distintas.
+      const yaEnEspera = await AgendaTurnosListaEsperaModel.findOne({
+        where:       { turno_id, alumno_id, estado: 'esperando' },
+        transaction: transaccion
+      });
+      if (yaEnEspera) {
+        await transaccion.rollback();
+        return res.status(200).json({
+          message:   `Ya estás en la lista de espera de este turno (posición ${yaEnEspera.posicion}).`,
+          en_espera: true,
+          posicion:  yaEnEspera.posicion
+        });
+      }
+
       const posicionActual = await AgendaTurnosListaEsperaModel.count({
         where:       { turno_id, estado: 'esperando' },
         transaction: transaccion
@@ -998,8 +1035,10 @@ export const ER_MiReserva_CTS = async (req, res) => {
       updated_at:        new Date()
     }, { transaction: transaccion });
 
-    // Eliminar el registro de asistencia: la inscripción fue anulada
-    await eliminarAsistenciaPorReserva(reserva.id, transaccion);
+    // Marcar la asistencia como cancelada (no se borra): queda en el
+    // historial que el alumno canceló él mismo (sin registrado_por_id,
+    // ningún miembro del staff intervino en esta cancelación).
+    await marcarAsistenciaComoCancelada(reserva.id, transaccion);
 
     // Liberar cupo
     await turno.update({

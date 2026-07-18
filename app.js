@@ -10,7 +10,7 @@ import path from 'path';
 import db from './src/DataBase/db.js';
 
 // Benjamin Orellana - 2026/04/14 - Se elimina configuración hardcodeada de MySQL y se reutilizan variables centralizadas.
-import { PORT, DB_SYNC, DB_ALTER } from './src/DataBase/config.js';
+import { PORT } from './src/DataBase/config.js';
 
 // Benjamin Orellana - 2026/05/10 - Importa rutas centralizadas del backend PREMIUM.
 // Sergio Gustavo Manrique - 2026/06/25 - Refactor: routes.js monolítico dividido
@@ -57,8 +57,10 @@ import { initCatalogoRelaciones } from './src/Models/Catalogo/relacionesCatalogo
 import { initCobroCajaRelaciones } from './src/Models/Cobro/relacionesCobroCaja.js';
 
 import { iniciarCronProcesarVencimientos } from './src/Jobs/JB_ProcesarVencimientos.js';
+import { iniciarCronCotizacionUsd } from './src/Jobs/JB_CotizacionUsd.js';
 
 iniciarCronProcesarVencimientos();
+iniciarCronCotizacionUsd();
 
 const app = express();
 

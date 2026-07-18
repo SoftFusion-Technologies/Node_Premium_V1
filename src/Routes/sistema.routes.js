@@ -18,6 +18,7 @@ import express from 'express';
 import { authenticateToken, requireRolGlobal } from '../Security/auth.js';
 
 import { PR_ProcesarVencimientos_CTS } from '../Controllers/Sistema/CTS_ProcesarVencimientos.js';
+import { PR_CapturarCotizacionesUsd_CTS } from '../Controllers/Finanzas/CTS_TB_FinanzasCotizacionesUsd.js';
 
 const router = express.Router();
 
@@ -33,6 +34,14 @@ router.post(
   authenticateToken,
   requireRolGlobal(['SUPER_ADMIN', 'DIRECCION']),
   PR_ProcesarVencimientos_CTS
+);
+
+// Sergio Manrique - 2026/07/17 - Disparo manual de la captura de cotización USD (oficial + blue), por si el cron falló o hace falta forzar una recaptura.
+router.post(
+  '/sistema/capturar-cotizacion-usd',
+  authenticateToken,
+  requireRolGlobal(['SUPER_ADMIN', 'DIRECCION']),
+  PR_CapturarCotizacionesUsd_CTS
 );
 
 export default router;

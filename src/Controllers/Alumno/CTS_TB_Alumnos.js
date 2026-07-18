@@ -1479,28 +1479,18 @@ export const CR_Alumnos_Publico_CTS = async (req, res) => {
       });
     }
 
-    if (!email?.trim()) {
-      await transaction.rollback();
-
-      return res.status(400).json({
-        ok: false,
-        field: 'email',
-        message: 'El email es obligatorio.'
-      });
-    }
-
     // Normalización
     const nombreLimpio = capitalizarTexto(nombre);
     const apellidoLimpio = capitalizarTexto(apellido);
 
     const dniLimpio = normalizarDni(dni);
     const telefonoLimpio = normalizarTelefono(telefono);
-    const emailLimpio = normalizarEmail(email);
+    const emailLimpio = email?.trim() ? normalizarEmail(email) : null;
 
-    // Validar email
+    // Validar email (el campo es opcional; solo se valida el formato si se ingresó)
     const regexEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-    if (!regexEmail.test(emailLimpio)) {
+    if (emailLimpio && !regexEmail.test(emailLimpio)) {
       await transaction.rollback();
 
       return res.status(400).json({
@@ -1540,9 +1530,11 @@ export const CR_Alumnos_Publico_CTS = async (req, res) => {
       AlumnosModel.findOne({
         where: { telefono: telefonoLimpio }
       }),
-      AlumnosModel.findOne({
-        where: { email: emailLimpio }
-      })
+      emailLimpio
+        ? AlumnosModel.findOne({
+            where: { email: emailLimpio }
+          })
+        : null
     ]);
 
     if (existeDni) {
@@ -1843,10 +1835,11 @@ export const UR_AlumnoPerfil_CTS = async (req, res) => {
       fecha_nacimiento
     } = req.body;
 
-    // Campos obligatorios
+    // Campos obligatorios (el email es opcional: el alumno puede no tener uno
+    // cargado desde el registro público, y el campo queda deshabilitado en
+    // el formulario de todos modos, así que nunca se actualiza acá).
     if (
       !telefono?.trim() ||
-      !email?.trim() ||
       !domicilio?.trim() ||
       !localidad?.trim() ||
       !provincia?.trim() ||
@@ -1868,24 +1861,28 @@ export const UR_AlumnoPerfil_CTS = async (req, res) => {
     }
 
     // Normalización
-    const emailNormalizado = normalizarEmail(email);
+    const emailNormalizado = email?.trim() ? normalizarEmail(email) : null;
     const telefonoNormalizado = normalizarTelefono(telefono);
 
     const domicilioNormalizado = capitalizarTexto(domicilio);
     const localidadNormalizada = capitalizarTexto(localidad);
 
-    // El email no puede modificarse
-    if (emailNormalizado !== normalizarEmail(alumno.email)) {
+    // El email no puede modificarse (solo se valida si el alumno ya tenía uno
+    // cargado; si nunca cargó email no hay nada que comparar)
+    if (
+      alumno.email &&
+      emailNormalizado !== normalizarEmail(alumno.email)
+    ) {
       return res.status(403).json({
         ok: false,
         message: 'No está permitido modificar el email.'
       });
     }
 
-    // Validar formato de email
+    // Validar formato de email (si se envió uno)
     const regexEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-    if (!regexEmail.test(emailNormalizado)) {
+    if (emailNormalizado && !regexEmail.test(emailNormalizado)) {
       return res.status(400).json({
         ok: false,
         message: 'El email ingresado no es válido.'

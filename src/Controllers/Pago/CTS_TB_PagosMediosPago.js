@@ -21,6 +21,8 @@ const CAMPOS_ORDEN_VALIDOS = [
   'tipo',
   'requiere_comprobante',
   'requiere_validacion',
+  'orden',
+  'impacta_caja',
   'activo',
   'created_at',
   'updated_at'
@@ -39,6 +41,18 @@ const obtenerPaginacion = (query) => {
 const esTinyintValido = (valor) => {
   return valor === 0 || valor === 1 || valor === '0' || valor === '1';
 };
+
+const normalizarCodigo = (valor) =>
+  String(valor || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 50);
+
+const esMedioInterno = (medio) =>
+  String(medio?.codigo || '').toUpperCase() === 'SALDO_FAVOR';
 
 // Benjamin Orellana - 2026/05/29 - Arma respuesta estándar de error.
 const responderError = (res, status, message, data = null) => {
@@ -63,11 +77,7 @@ const validarPayloadMedioPago = (body, esCreacion = true) => {
     }
   }
 
-  if (esCreacion || body.codigo !== undefined) {
-    if (!body.codigo || String(body.codigo).trim() === '') {
-      errores.push('El campo codigo es obligatorio.');
-    }
-
+  if (body.codigo !== undefined) {
     if (body.codigo && String(body.codigo).length > 50) {
       errores.push('El campo codigo no puede superar los 50 caracteres.');
     }
@@ -99,6 +109,17 @@ const validarPayloadMedioPago = (body, esCreacion = true) => {
     errores.push('El campo activo debe ser 0 o 1.');
   }
 
+  if (body.impacta_caja !== undefined && !esTinyintValido(body.impacta_caja)) {
+    errores.push('El campo impacta_caja debe ser 0 o 1.');
+  }
+
+  if (body.orden !== undefined) {
+    const orden = Number(body.orden);
+    if (!Number.isInteger(orden) || orden < 0 || orden > 9999) {
+      errores.push('El campo orden debe ser un entero entre 0 y 9999.');
+    }
+  }
+
   return errores;
 };
 
@@ -113,8 +134,8 @@ export const OBR_PagosMediosPago_CTS = async (req, res) => {
       activo,
       requiere_comprobante,
       requiere_validacion,
-      order_by = 'id',
-      order_direction = 'DESC'
+      order_by = 'orden',
+      order_direction = 'ASC'
     } = req.query;
 
     const where = {};
@@ -172,7 +193,7 @@ export const OBR_PagosMediosPago_CTS = async (req, res) => {
 
     const campoOrden = CAMPOS_ORDEN_VALIDOS.includes(order_by)
       ? order_by
-      : 'id';
+      : 'orden';
     const direccionOrden =
       String(order_direction).toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
 
@@ -257,10 +278,7 @@ export const OBR_MediosPagoActivos_CTS = async (req, res) => {
 
     const mediosPago = await PagosMediosPagoModel.findAll({
       where,
-      order: [
-        ['nombre', 'ASC'],
-        ['id', 'ASC']
-      ]
+      order: [['orden', 'ASC'], ['nombre', 'ASC'], ['id', 'ASC']]
     });
 
     return res.status(200).json({
@@ -297,10 +315,16 @@ export const CR_PagosMediosPago_CTS = async (req, res) => {
       tipo,
       requiere_comprobante,
       requiere_validacion,
+      orden,
+      impacta_caja,
       activo
     } = req.body;
 
-    const codigoNormalizado = String(codigo).trim();
+    const codigoNormalizado = normalizarCodigo(codigo || nombre);
+    if (!codigoNormalizado) {
+      await transaction.rollback();
+      return responderError(res, 400, 'No se pudo generar el código del medio de pago.');
+    }
 
     const codigoExistente = await PagosMediosPagoModel.findOne({
       where: {
@@ -327,6 +351,8 @@ export const CR_PagosMediosPago_CTS = async (req, res) => {
           requiere_comprobante !== undefined ? Number(requiere_comprobante) : 0,
         requiere_validacion:
           requiere_validacion !== undefined ? Number(requiere_validacion) : 0,
+        orden: orden !== undefined ? Number(orden) : 100,
+        impacta_caja: impacta_caja !== undefined ? Number(impacta_caja) : 1,
         activo: activo !== undefined ? Number(activo) : 1
       },
       { transaction }
@@ -383,6 +409,20 @@ export const UR_PagosMediosPago_CTS = async (req, res) => {
 
     const datosActualizar = {};
 
+    if (esMedioInterno(medioPago)) {
+      const intentaAlterarProtegidos =
+        (req.body.codigo !== undefined && normalizarCodigo(req.body.codigo) !== 'SALDO_FAVOR') ||
+        (req.body.tipo !== undefined && req.body.tipo !== 'otro') ||
+        (req.body.requiere_comprobante !== undefined && Number(req.body.requiere_comprobante) !== 0) ||
+        (req.body.requiere_validacion !== undefined && Number(req.body.requiere_validacion) !== 0) ||
+        (req.body.activo !== undefined && Number(req.body.activo) !== 1) ||
+        (req.body.impacta_caja !== undefined && Number(req.body.impacta_caja) !== 0);
+      if (intentaAlterarProtegidos) {
+        await transaction.rollback();
+        return responderError(res, 409, 'Saldo a favor es un medio interno protegido.');
+      }
+    }
+
     if (req.body.nombre !== undefined) {
       datosActualizar.nombre = String(req.body.nombre).trim();
     }
@@ -426,6 +466,15 @@ export const UR_PagosMediosPago_CTS = async (req, res) => {
       datosActualizar.requiere_validacion = Number(
         req.body.requiere_validacion
       );
+    }
+
+
+    if (req.body.orden !== undefined) {
+      datosActualizar.orden = Number(req.body.orden);
+    }
+
+    if (req.body.impacta_caja !== undefined) {
+      datosActualizar.impacta_caja = Number(req.body.impacta_caja);
     }
 
     if (req.body.activo !== undefined) {
@@ -492,6 +541,11 @@ export const UR_EstadoMedioPago_CTS = async (req, res) => {
       );
     }
 
+    if (esMedioInterno(medioPago) && Number(activo) !== 1) {
+      await transaction.rollback();
+      return responderError(res, 409, 'Saldo a favor no puede desactivarse.');
+    }
+
     await medioPago.update(
       {
         activo: Number(activo),
@@ -541,6 +595,11 @@ export const DR_PagosMediosPago_CTS = async (req, res) => {
       );
     }
 
+    if (esMedioInterno(medioPago)) {
+      await transaction.rollback();
+      return responderError(res, 409, 'Saldo a favor no puede desactivarse.');
+    }
+
     await medioPago.update(
       {
         activo: 0,
@@ -586,6 +645,11 @@ export const ER_PagosMediosPago_CTS = async (req, res) => {
         404,
         'No se encontró el medio de pago solicitado.'
       );
+    }
+
+    if (esMedioInterno(medioPago)) {
+      await transaction.rollback();
+      return responderError(res, 409, 'Saldo a favor no puede eliminarse.');
     }
 
     await medioPago.destroy({ transaction });

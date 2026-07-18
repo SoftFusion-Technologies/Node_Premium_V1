@@ -9,6 +9,7 @@ import UsuariosSedesModel from '../../Models/Usuario/MD_TB_UsuariosSedes.js';
 import UsuariosModel from '../../Models/Usuario/MD_TB_Usuarios.js';
 import UsuariosRolesModel from '../../Models/Usuario/MD_TB_UsuariosRoles.js';
 import SedesModel from '../../Models/Sede/MD_TB_Sedes.js';
+import { obtenerPerfilAccesoSede } from '../../utils/usuariosAcceso.utils.js';
 
 const ESTADOS_ACTIVO_VALIDOS = [0, 1];
 
@@ -126,17 +127,17 @@ const buildUsuariosSedesPayload = (body = {}, modo = 'create') => {
 
     puede_operar: normalizarBooleanToTinyint(
       body.puede_operar,
-      modo === 'create' ? 1 : undefined
+      undefined
     ),
 
     puede_ver_reportes: normalizarBooleanToTinyint(
       body.puede_ver_reportes,
-      modo === 'create' ? 0 : undefined
+      undefined
     ),
 
     puede_ver_finanzas: normalizarBooleanToTinyint(
       body.puede_ver_finanzas,
-      modo === 'create' ? 0 : undefined
+      undefined
     )
   };
 
@@ -497,18 +498,25 @@ export const CR_UsuariosSedes_CTS = async (req, res) => {
       });
     }
 
-    if (payload.rol_id) {
-      const rol = await validarRolExistente(payload.rol_id);
+    const rolAsignacion = await validarRolExistente(
+      payload.rol_id || usuario.rol_id
+    );
 
-      if (!rol) {
-        await transaction.rollback();
+    if (!rolAsignacion) {
+      await transaction.rollback();
 
-        return res.status(400).json({
-          ok: false,
-          message: 'El rol indicado no existe o está inactivo.'
-        });
-      }
+      return res.status(400).json({
+        ok: false,
+        message: 'El rol indicado no existe o está inactivo.'
+      });
     }
+
+    const perfilAcceso = obtenerPerfilAccesoSede(rolAsignacion.codigo);
+
+    payload.rol_id = rolAsignacion.id;
+    payload.puede_operar ??= perfilAcceso.puede_operar ? 1 : 0;
+    payload.puede_ver_reportes ??= perfilAcceso.puede_ver_reportes ? 1 : 0;
+    payload.puede_ver_finanzas ??= perfilAcceso.puede_ver_finanzas ? 1 : 0;
 
     const asignacionExistente = await UsuariosSedesModel.findOne({
       where: {
@@ -641,6 +649,18 @@ export const UR_UsuariosSedes_CTS = async (req, res) => {
 
     delete payload.usuario_id;
     delete payload.sede_id;
+
+    if (
+      Number(asignacion.es_sede_principal) === 1 &&
+      payload.puede_operar === 0
+    ) {
+      await transaction.rollback();
+
+      return res.status(400).json({
+        ok: false,
+        message: 'La sede principal debe conservar el permiso para operar.'
+      });
+    }
 
     if (payload.rol_id) {
       const rol = await validarRolExistente(payload.rol_id);
@@ -825,17 +845,13 @@ export const UR_EstadoUsuariosSedes_CTS = async (req, res) => {
     }
 
     if (activoNormalizado === 0 && Number(asignacion.es_sede_principal) === 1) {
-      await UsuariosModel.update(
-        {
-          sede_principal_id: null
-        },
-        {
-          where: {
-            id: asignacion.usuario_id
-          },
-          transaction
-        }
-      );
+      await transaction.rollback();
+
+      return res.status(400).json({
+        ok: false,
+        message:
+          'No se puede inactivar la sede principal. Marcá primero otra sede como principal.'
+      });
     }
 
     await asignacion.update(
@@ -900,21 +916,14 @@ export const DR_UsuariosSedes_CTS = async (req, res) => {
         ? asignacion.toJSON()
         : { ...asignacion };
 
-    /*
-     * Benjamin Orellana - 2026/06/07 - Si se elimina la sede principal, limpia la referencia principal del usuario.
-     */
     if (Number(asignacionPlano.es_sede_principal) === 1) {
-      await UsuariosModel.update(
-        {
-          sede_principal_id: null
-        },
-        {
-          where: {
-            id: asignacionPlano.usuario_id
-          },
-          transaction
-        }
-      );
+      await transaction.rollback();
+
+      return res.status(400).json({
+        ok: false,
+        message:
+          'No se puede quitar la sede principal. Marcá primero otra sede como principal.'
+      });
     }
 
     /*

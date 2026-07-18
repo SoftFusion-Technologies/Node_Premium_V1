@@ -51,6 +51,10 @@ import { initArcaRelaciones } from './src/Models/ARCA/relacionesARCA.js';
 import { initSistemaRelaciones } from './src/Models/Sistema/relacionesSistema.js';
 // Benjamin Orellana - 2026/07/07 - Importa relaciones Sequelize del módulo Gastos.
 import { initGastosRelaciones } from './src/Models/Gastos/relacionesGastos.js';
+// Benjamin Orellana - 2026/07/14 - Importa relaciones Sequelize del catálogo comercial.
+import { initCatalogoRelaciones } from './src/Models/Catalogo/relacionesCatalogo.js';
+// Benjamin Orellana - 2026/07/14 - Importa relaciones transaccionales de Cobros y Caja.
+import { initCobroCajaRelaciones } from './src/Models/Cobro/relacionesCobroCaja.js';
 
 import { iniciarCronProcesarVencimientos } from './src/Jobs/JB_ProcesarVencimientos.js';
 
@@ -193,6 +197,10 @@ const startServer = async () => {
     initSistemaRelaciones();
     // Benjamin Orellana - 2026/07/07 - Inicializa relaciones Sequelize del módulo Gastos antes de sincronizar modelos.
     initGastosRelaciones();
+    // Benjamin Orellana - 2026/07/14 - Inicializa relaciones de servicios, productos, precios y stock.
+    initCatalogoRelaciones();
+    // Benjamin Orellana - 2026/07/14 - Inicializa relaciones de cobros, pagos aplicados y caja.
+    initCobroCajaRelaciones();
 
     if (DB_SYNC) {
       await db.sync({

@@ -622,7 +622,8 @@ export const OBR_MensualidadesPorAlumno_CTS = async (req, res) => {
     }
 
     const where = {
-      alumno_id: Number(alumno_id)
+      alumno_id: Number(alumno_id),
+      sede_id: Number(req.financial_sede_id)
     };
 
     if (estado !== undefined) {

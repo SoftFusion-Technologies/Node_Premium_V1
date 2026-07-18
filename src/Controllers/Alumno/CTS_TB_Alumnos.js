@@ -1059,6 +1059,86 @@ export const OBR_Alumnos_CTS = async (req, res) => {
 };
 
 /*
+ * Benjamin Orellana - 2026/07/13 - Lista de alumnos para el selector
+ * de Nuevo Cobro. Evita cargar membresías, anamnesis y demás relaciones que
+ * no son necesarias durante la búsqueda.
+ */
+export const OBR_AlumnosSelectorCobro_CTS = async (req, res) => {
+  try {
+    if (!validarRolLecturaAlumnos(req.user)) {
+      return res.status(403).json({
+        ok: false,
+        message: 'No tiene permisos para consultar alumnos.'
+      });
+    }
+
+    const { q, sede_id, page = 1, limit = 40 } = req.query;
+    const where = {};
+    const scope = aplicarScopeSedesAlumnos(where, req.user, sede_id);
+
+    if (!scope.ok) {
+      return res.status(scope.status).json({
+        ok: false,
+        message: scope.message
+      });
+    }
+
+    const search = normalizarTexto(q);
+
+    if (search) {
+      where[Op.and] = [
+        ...(where[Op.and] || []),
+        construirWhereBusquedaAlumno(search)
+      ];
+    }
+
+    const pageNumber = Math.max(Number(page) || 1, 1);
+    const limitNumber = Math.min(Math.max(Number(limit) || 40, 1), 100);
+    const offset = (pageNumber - 1) * limitNumber;
+
+    const { rows, count } = await AlumnosModel.findAndCountAll({
+      where,
+      attributes: [
+        'id',
+        'sede_id',
+        'nombre',
+        'apellido',
+        'dni',
+        'telefono',
+        'email',
+        'estado'
+      ],
+      limit: limitNumber,
+      offset,
+      order: [
+        ['apellido', 'ASC'],
+        ['nombre', 'ASC'],
+        ['id', 'ASC']
+      ]
+    });
+
+    return res.status(200).json({
+      ok: true,
+      message: 'Alumnos disponibles para cobro obtenidos correctamente.',
+      total: count,
+      page: pageNumber,
+      limit: limitNumber,
+      total_pages: Math.ceil(count / limitNumber),
+      data: rows.map((alumno) =>
+        typeof alumno.toJSON === 'function' ? alumno.toJSON() : alumno
+      )
+    });
+  } catch (error) {
+    console.error('Error OBR_AlumnosSelectorCobro_CTS:', error);
+
+    return res.status(500).json({
+      ok: false,
+      message: 'Error al obtener los alumnos disponibles para el cobro.'
+    });
+  }
+};
+
+/*
  * Benjamin Orellana - 2026/05/26 - Obtiene un alumno por DNI.
  */
 export const OBR_AlumnoPorDni_CTS = async (req, res) => {

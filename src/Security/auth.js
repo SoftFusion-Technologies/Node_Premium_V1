@@ -16,6 +16,8 @@ import { Op } from 'sequelize';
 
 import UsuariosModel from '../Models/Usuario/MD_TB_Usuarios.js';
 import UsuariosRolesModel from '../Models/Usuario/MD_TB_UsuariosRoles.js';
+import UsuariosPermisosModel from '../Models/Usuario/MD_TB_UsuariosPermisos.js';
+import UsuariosRolesPermisosModel from '../Models/Usuario/MD_TB_UsuariosRolesPermisos.js';
 import UsuariosSedesModel from '../Models/Usuario/MD_TB_UsuariosSedes.js';
 import SedesModel from '../Models/Sede/MD_TB_Sedes.js';
 
@@ -87,7 +89,60 @@ const buscarRolPorId = async (rolId) => {
   return UsuariosRolesModel.findByPk(rolId);
 };
 
-const buscarSedesUsuario = async (usuarioId) => {
+const buscarContextoRoles = async (rolIdsBase = []) => {
+  const rolIds = [...new Set(rolIdsBase.map(Number).filter(Boolean))];
+
+  if (!rolIds.length) {
+    return {
+      rolesPorId: new Map(),
+      permisosPorRolId: new Map()
+    };
+  }
+
+  const [roles, relaciones] = await Promise.all([
+    UsuariosRolesModel.findAll({
+      where: { id: { [Op.in]: rolIds }, activo: 1 }
+    }),
+    UsuariosRolesPermisosModel.findAll({
+      where: { rol_id: { [Op.in]: rolIds } },
+      attributes: ['rol_id', 'permiso_id']
+    })
+  ]);
+
+  const permisoIds = [
+    ...new Set(relaciones.map((item) => Number(item.permiso_id)).filter(Boolean))
+  ];
+  const permisos = permisoIds.length
+    ? await UsuariosPermisosModel.findAll({
+        where: { id: { [Op.in]: permisoIds }, activo: 1 },
+        attributes: ['id', 'codigo']
+      })
+    : [];
+  const permisosPorId = new Map(
+    permisos.map((item) => [Number(item.id), String(item.codigo)])
+  );
+  const permisosPorRolId = new Map(rolIds.map((id) => [id, []]));
+
+  relaciones.forEach((item) => {
+    const codigo = permisosPorId.get(Number(item.permiso_id));
+    const rolId = Number(item.rol_id);
+
+    if (!codigo || !permisosPorRolId.has(rolId)) return;
+    permisosPorRolId.get(rolId).push(codigo);
+  });
+
+  return {
+    rolesPorId: new Map(
+      roles.map((item) => {
+        const rolPlano = typeof item.toJSON === 'function' ? item.toJSON() : item;
+        return [Number(rolPlano.id), rolPlano];
+      })
+    ),
+    permisosPorRolId
+  };
+};
+
+const buscarSedesUsuario = async (usuarioId, rolGlobalId = null) => {
   const asignaciones = await UsuariosSedesModel.findAll({
     where: {
       usuario_id: usuarioId,
@@ -103,25 +158,33 @@ const buscarSedesUsuario = async (usuarioId) => {
   if (!asignaciones.length) return [];
 
   const sedeIds = asignaciones.map((item) => item.sede_id);
+  const rolIds = [
+    Number(rolGlobalId),
+    ...asignaciones.map((item) => Number(item.rol_id || rolGlobalId))
+  ].filter(Boolean);
 
-  const sedes = await SedesModel.findAll({
-    where: {
-      id: {
-        [Op.in]: sedeIds
-      }
-    },
-    attributes: [
-      'id',
-      'nombre',
-      'codigo',
-      'domicilio',
-      'localidad',
-      'provincia',
-      'telefono',
-      'email',
-      'activo'
-    ]
-  });
+  const [sedes, contextoRoles] = await Promise.all([
+    SedesModel.findAll({
+      where: {
+        id: {
+          [Op.in]: sedeIds
+        },
+        activo: 1
+      },
+      attributes: [
+        'id',
+        'nombre',
+        'codigo',
+        'domicilio',
+        'localidad',
+        'provincia',
+        'telefono',
+        'email',
+        'activo'
+      ]
+    }),
+    buscarContextoRoles(rolIds)
+  ]);
 
   const sedesPorId = new Map(
     sedes.map((sede) => {
@@ -143,11 +206,25 @@ const buscarSedesUsuario = async (usuarioId) => {
 
       if (!sede) return null;
 
+      const rolEfectivoId = Number(asignacionPlano.rol_id || rolGlobalId);
+      const rolEfectivo = contextoRoles.rolesPorId.get(rolEfectivoId) || null;
+      const permisosGlobales =
+        contextoRoles.permisosPorRolId.get(Number(rolGlobalId)) || [];
+      const permisosRolSede =
+        contextoRoles.permisosPorRolId.get(rolEfectivoId) || [];
+      const permisosEfectivos = asignacionPlano.rol_id
+        ? permisosRolSede.filter((codigo) => permisosGlobales.includes(codigo))
+        : permisosGlobales;
+
       return {
         ...sede,
         asignacion: {
           id: asignacionPlano.id,
           rol_id: asignacionPlano.rol_id,
+          rol_efectivo_id: rolEfectivoId || null,
+          rol_codigo: rolEfectivo?.codigo || null,
+          rol_nombre: rolEfectivo?.nombre || null,
+          permisos: permisosEfectivos,
           es_sede_principal: Boolean(asignacionPlano.es_sede_principal),
           puede_operar: Boolean(asignacionPlano.puede_operar),
           puede_ver_reportes: Boolean(asignacionPlano.puede_ver_reportes),
@@ -168,7 +245,12 @@ const construirUsuarioSeguro = async (usuario, ultimoLoginOverride = null) => {
   const rol = await buscarRolPorId(usuarioPlano.rol_id);
   const rolPlano = rol && typeof rol.toJSON === 'function' ? rol.toJSON() : rol;
 
-  const sedes = await buscarSedesUsuario(usuarioPlano.id);
+  const [sedes, contextoRolGlobal] = await Promise.all([
+    buscarSedesUsuario(usuarioPlano.id, usuarioPlano.rol_id),
+    buscarContextoRoles([usuarioPlano.rol_id])
+  ]);
+  const permisos =
+    contextoRolGlobal.permisosPorRolId.get(Number(usuarioPlano.rol_id)) || [];
 
   return {
     id: usuarioPlano.id,
@@ -190,6 +272,7 @@ const construirUsuarioSeguro = async (usuario, ultimoLoginOverride = null) => {
         }
       : null,
     rol_codigo: rolPlano?.codigo || null,
+    permisos,
     sedes
   };
 };
@@ -463,6 +546,68 @@ export const requireRolGlobal = (rolesPermitidos = []) => {
   };
 };
 
+const obtenerSedeIdRequest = (req) => {
+  const valor =
+    req.params.sede_id ||
+    req.params.sedeId ||
+    req.query.sede_id ||
+    req.body?.sede_id;
+
+  const sedeId = Number(valor);
+  return Number.isFinite(sedeId) && sedeId > 0 ? sedeId : null;
+};
+
+/*
+ * RBAC PREMIUM: exige al menos uno de los permisos indicados. Cuando la
+ * petición informa sede, se evalúa el rol efectivo de usuarios_sedes; sin
+ * sede se utiliza el rol global del usuario. Los roles globales no dependen
+ * de una asignación local y mantienen acceso total.
+ */
+export const requirePermission = (permisosRequeridos = []) => {
+  const requeridos = (Array.isArray(permisosRequeridos)
+    ? permisosRequeridos
+    : [permisosRequeridos]
+  )
+    .map((item) => String(item || '').trim())
+    .filter(Boolean);
+
+  return (req, res, next) => {
+    if (!req.user) {
+      return res.status(401).json({
+        ok: false,
+        code: 'USER_NOT_AUTHENTICATED',
+        message: 'Usuario no autenticado.'
+      });
+    }
+
+    if (!requeridos.length || ROLES_GLOBAL_ACCESS.includes(req.user.rol_codigo)) {
+      return next();
+    }
+
+    const sedeId = obtenerSedeIdRequest(req);
+    const sedeAsignada = sedeId
+      ? req.user.sedes?.find((sede) => Number(sede.id) === sedeId)
+      : null;
+    const permisosEfectivos = sedeAsignada
+      ? sedeAsignada.asignacion?.permisos || []
+      : req.user.permisos || [];
+    const autorizado = requeridos.some((codigo) =>
+      permisosEfectivos.includes(codigo)
+    );
+
+    if (!autorizado) {
+      return res.status(403).json({
+        ok: false,
+        code: 'PERMISSION_DENIED',
+        message: 'No tiene permisos para realizar esta acción.',
+        permisos_requeridos: requeridos
+      });
+    }
+
+    return next();
+  };
+};
+
 /*
  * Benjamin Orellana - 2026/05/26 - Middleware para validar existencia de sede y acceso del usuario a una sede.
  */
@@ -475,12 +620,7 @@ export const requireSedeAccess = async (req, res, next) => {
       });
     }
 
-    const sedeId = Number(
-      req.params.sede_id ||
-        req.params.sedeId ||
-        req.query.sede_id ||
-        req.body.sede_id
-    );
+    const sedeId = obtenerSedeIdRequest(req);
 
     if (!sedeId || Number.isNaN(sedeId) || sedeId <= 0) {
       return res.status(400).json({
@@ -552,12 +692,7 @@ export const requireFinanzasSede = (req, res, next) => {
     return next();
   }
 
-  const sedeId = Number(
-    req.params.sede_id ||
-      req.params.sedeId ||
-      req.query.sede_id ||
-      req.body.sede_id
-  );
+  const sedeId = obtenerSedeIdRequest(req);
 
   if (!sedeId) {
     return res.status(400).json({

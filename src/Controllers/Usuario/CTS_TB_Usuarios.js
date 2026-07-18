@@ -11,10 +11,24 @@ import UsuariosRolesModel from '../../Models/Usuario/MD_TB_UsuariosRoles.js';
 import UsuariosSedesModel from '../../Models/Usuario/MD_TB_UsuariosSedes.js';
 import SedesModel from '../../Models/Sede/MD_TB_Sedes.js';
 import { hashPassword } from '../../Security/auth.js';
+import { obtenerPerfilAccesoSede } from '../../utils/usuariosAcceso.utils.js';
 
 const ESTADOS_USUARIO_VALIDOS = ['activo', 'inactivo', 'bloqueado'];
 const ROLES_PROTEGIDOS = ['SUPER_ADMIN'];
 const ROLES_GLOBALES = ['SUPER_ADMIN', 'DIRECCION'];
+
+const obtenerSedesPermitidasUsuario = (user) => {
+  if (!user || !Array.isArray(user.sedes)) return [];
+
+  return user.sedes
+    .filter(
+      (sede) =>
+        sede?.asignacion?.activo !== false &&
+        sede?.asignacion?.puede_operar !== false
+    )
+    .map((sede) => Number(sede.id || sede.sede_id))
+    .filter(Boolean);
+};
 
 const normalizarTexto = (value) => {
   if (value === undefined || value === null) return null;
@@ -330,8 +344,13 @@ const verificarEmailDuplicado = async (email, usuarioIdExcluir = null) => {
   return UsuariosModel.findOne({ where });
 };
 
-const prepararAsignacionesSedes = (body = {}, sedePrincipalId = null) => {
+const prepararAsignacionesSedes = (
+  body = {},
+  sedePrincipalId = null,
+  rolCodigo = null
+) => {
   const asignaciones = [];
+  const perfilAcceso = obtenerPerfilAccesoSede(rolCodigo);
 
   if (Array.isArray(body.sedes)) {
     body.sedes.forEach((item) => {
@@ -353,16 +372,25 @@ const prepararAsignacionesSedes = (body = {}, sedePrincipalId = null) => {
           normalizarBoolean(item?.es_sede_principal, false),
         puede_operar:
           typeof item === 'object' && item !== null
-            ? normalizarBoolean(item.puede_operar, true)
-            : true,
+            ? normalizarBoolean(
+                item.puede_operar,
+                perfilAcceso.puede_operar
+              )
+            : perfilAcceso.puede_operar,
         puede_ver_reportes:
           typeof item === 'object' && item !== null
-            ? normalizarBoolean(item.puede_ver_reportes, false)
-            : false,
+            ? normalizarBoolean(
+                item.puede_ver_reportes,
+                perfilAcceso.puede_ver_reportes
+              )
+            : perfilAcceso.puede_ver_reportes,
         puede_ver_finanzas:
           typeof item === 'object' && item !== null
-            ? normalizarBoolean(item.puede_ver_finanzas, false)
-            : false
+            ? normalizarBoolean(
+                item.puede_ver_finanzas,
+                perfilAcceso.puede_ver_finanzas
+              )
+            : perfilAcceso.puede_ver_finanzas
       });
     });
   }
@@ -377,9 +405,9 @@ const prepararAsignacionesSedes = (body = {}, sedePrincipalId = null) => {
       sede_id: Number(sedePrincipalId),
       rol_id: null,
       es_sede_principal: true,
-      puede_operar: true,
-      puede_ver_reportes: true,
-      puede_ver_finanzas: false
+      puede_operar: perfilAcceso.puede_operar,
+      puede_ver_reportes: perfilAcceso.puede_ver_reportes,
+      puede_ver_finanzas: perfilAcceso.puede_ver_finanzas
     });
   }
 
@@ -629,6 +657,123 @@ export const OBR_Usuarios_CTS = async (req, res) => {
 };
 
 /*
+ * Benjamin Orellana - 2026/07/13 - Lista mínima de usuarios activos para el
+ * selector de empleado de Nuevo Cobro. No expone password_hash, permisos ni
+ * datos administrativos innecesarios.
+ */
+export const OBR_UsuariosSelectorCobro_CTS = async (req, res) => {
+  try {
+    const { q, sede_id, page = 1, limit = 40 } = req.query;
+    const where = { estado: 'activo' };
+    const usuarioGlobal = ROLES_GLOBALES.includes(req.user?.rol_codigo);
+    const sedesPermitidas = obtenerSedesPermitidasUsuario(req.user);
+    let sedesFiltro = [];
+
+    if (usuarioGlobal) {
+      if (sede_id) sedesFiltro = [Number(sede_id)];
+    } else {
+      if (!sedesPermitidas.length) {
+        return res.status(403).json({
+          ok: false,
+          message:
+            'El usuario no tiene sedes asignadas para consultar empleados.'
+        });
+      }
+
+      if (sede_id && !sedesPermitidas.includes(Number(sede_id))) {
+        return res.status(403).json({
+          ok: false,
+          message: 'No tiene acceso a la sede indicada.'
+        });
+      }
+
+      sedesFiltro = sede_id ? [Number(sede_id)] : sedesPermitidas;
+    }
+
+    if (sedesFiltro.length > 0) {
+      const asignaciones = await UsuariosSedesModel.findAll({
+        where: {
+          sede_id: { [Op.in]: sedesFiltro },
+          activo: 1
+        },
+        attributes: ['usuario_id']
+      });
+
+      const usuariosAsignadosIds = asignaciones.map((item) => item.usuario_id);
+
+      where[Op.and] = [
+        {
+          [Op.or]: [
+            { id: { [Op.in]: usuariosAsignadosIds } },
+            { sede_principal_id: { [Op.in]: sedesFiltro } }
+          ]
+        }
+      ];
+    }
+
+    const search = normalizarTexto(q);
+
+    if (search) {
+      where[Op.and] = [
+        ...(where[Op.and] || []),
+        {
+          [Op.or]: [
+            { nombre: { [Op.like]: `%${search}%` } },
+            { apellido: { [Op.like]: `%${search}%` } },
+            { email: { [Op.like]: `%${search}%` } },
+            { telefono: { [Op.like]: `%${search}%` } }
+          ]
+        }
+      ];
+    }
+
+    const pageNumber = Math.max(Number(page) || 1, 1);
+    const limitNumber = Math.min(Math.max(Number(limit) || 40, 1), 100);
+    const offset = (pageNumber - 1) * limitNumber;
+
+    const { rows, count } = await UsuariosModel.findAndCountAll({
+      where,
+      attributes: [
+        'id',
+        'rol_id',
+        'sede_principal_id',
+        'nombre',
+        'apellido',
+        'email',
+        'telefono',
+        'estado'
+      ],
+      limit: limitNumber,
+      offset,
+      order: [
+        ['apellido', 'ASC'],
+        ['nombre', 'ASC'],
+        ['id', 'ASC']
+      ]
+    });
+
+    return res.status(200).json({
+      ok: true,
+      message: 'Empleados disponibles para cobro obtenidos correctamente.',
+      total: count,
+      page: pageNumber,
+      limit: limitNumber,
+      total_pages: Math.ceil(count / limitNumber),
+      data: rows.map((usuario) =>
+        typeof usuario.toJSON === 'function' ? usuario.toJSON() : usuario
+      )
+    });
+  } catch (error) {
+    console.error('Error OBR_UsuariosSelectorCobro_CTS:', error);
+
+    return res.status(500).json({
+      ok: false,
+      message: 'Error al obtener los empleados disponibles para el cobro.'
+    });
+  }
+};
+
+/*
  * Benjamin Orellana - 2026/05/10 - Obtiene el perfil del usuario autenticado.
  */
 export const OBR_UsuarioPerfil_CTS = async (req, res) => {
@@ -649,6 +794,12 @@ export const OBR_UsuarioPerfil_CTS = async (req, res) => {
     }
 
     const data = await construirUsuarioRespuesta(usuario);
+
+    // El contexto autenticado ya contiene permisos globales y permisos por
+    // sede calculados por Security/auth.js. Se reutiliza para que login y
+    // /usuarios/perfil entreguen exactamente la misma autorización efectiva.
+    data.permisos = Array.isArray(req.user?.permisos) ? req.user.permisos : [];
+    data.sedes = Array.isArray(req.user?.sedes) ? req.user.sedes : data.sedes;
 
     return res.status(200).json({
       ok: true,
@@ -792,7 +943,8 @@ export const CR_Usuarios_CTS = async (req, res) => {
 
     const asignaciones = prepararAsignacionesSedes(
       req.body,
-      payload.sede_principal_id
+      payload.sede_principal_id,
+      rol.codigo
     );
 
     await crearAsignacionesSedesIniciales({
@@ -862,6 +1014,7 @@ export const UR_Usuarios_CTS = async (req, res) => {
 
     const payload = buildUsuarioPayload(req.body, 'update');
     const errores = validarPayloadUsuario(payload, 'update');
+    let rolDestino = await obtenerRolUsuario(usuario.rol_id);
 
     if (errores.length > 0) {
       await transaction.rollback();
@@ -912,6 +1065,8 @@ export const UR_Usuarios_CTS = async (req, res) => {
           message: 'Solo un SUPER_ADMIN puede asignar un rol protegido.'
         });
       }
+
+      rolDestino = rol;
     } else {
       delete payload.rol_id;
     }
@@ -979,17 +1134,17 @@ export const UR_Usuarios_CTS = async (req, res) => {
           }
         );
       } else {
+        const perfilAcceso = obtenerPerfilAccesoSede(rolDestino?.codigo);
+
         await UsuariosSedesModel.create(
           {
             usuario_id: usuario.id,
             sede_id: payload.sede_principal_id,
             rol_id: usuario.rol_id,
             es_sede_principal: 1,
-            puede_operar: 1,
-            puede_ver_reportes: 1,
-            puede_ver_finanzas: ROLES_GLOBALES.includes(req.user?.rol_codigo)
-              ? 1
-              : 0,
+            puede_operar: perfilAcceso.puede_operar ? 1 : 0,
+            puede_ver_reportes: perfilAcceso.puede_ver_reportes ? 1 : 0,
+            puede_ver_finanzas: perfilAcceso.puede_ver_finanzas ? 1 : 0,
             activo: 1
           },
           {

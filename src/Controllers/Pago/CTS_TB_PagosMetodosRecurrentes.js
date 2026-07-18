@@ -241,6 +241,7 @@ export const OBR_PagosMetodosRecurrentes_CTS = async (req, res) => {
     const {
       q,
       alumno_id,
+      sede_id,
       medio_pago_id,
       proveedor,
       marca_tarjeta,
@@ -253,6 +254,18 @@ export const OBR_PagosMetodosRecurrentes_CTS = async (req, res) => {
     } = req.query;
 
     const where = {};
+
+    if (!esIdValido(sede_id)) {
+      return responderError(res, 400, 'Debe indicar una sede válida.');
+    }
+
+    const alumnosSede = await AlumnosModel.findAll({
+      where: { sede_id: Number(sede_id) },
+      attributes: ['id']
+    });
+    where.alumno_id = {
+      [Op.in]: alumnosSede.map((alumno) => Number(alumno.id))
+    };
 
     if (q && String(q).trim() !== '') {
       where[Op.or] = [
@@ -273,7 +286,15 @@ export const OBR_PagosMetodosRecurrentes_CTS = async (req, res) => {
         );
       }
 
-      where.alumno_id = Number(alumno_id);
+      const alumnoId = Number(alumno_id);
+      if (!alumnosSede.some((alumno) => Number(alumno.id) === alumnoId)) {
+        return responderError(
+          res,
+          403,
+          'El alumno indicado no pertenece a la sede seleccionada.'
+        );
+      }
+      where.alumno_id = alumnoId;
     }
 
     if (medio_pago_id !== undefined) {

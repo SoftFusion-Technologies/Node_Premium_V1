@@ -16,8 +16,14 @@
 import express from 'express';
 
 // Benjamin Orellana - 2026/05/10 - Importa middlewares de seguridad para proteger rutas PREMIUM.
-import { authenticateToken } from '../Security/auth.js';
+import { authenticateToken, requirePermission } from '../Security/auth.js';
 import { authenticateAlumnoToken } from '../Security/authAlumno.js';
+import {
+  requireFinancialScope,
+  sourceBody,
+  sourceParam,
+  sourceQuery
+} from '../Security/financialScope.js';
 
 import {
   OBR_PagosMediosPago_CTS,
@@ -85,6 +91,50 @@ import {
 } from '../Controllers/Pago/CTS_TB_PagosRegistroOperativo.js';
 
 const router = express.Router();
+const seguridadPagosVer = [authenticateToken, requirePermission('pagos.ver')];
+const seguridadPagosGestionar = [
+  authenticateToken,
+  requirePermission('pagos.gestionar')
+];
+const seguridadDeudasVer = [authenticateToken, requirePermission('deudas.ver')];
+const seguridadDeudasGestionar = [
+  authenticateToken,
+  requirePermission('deudas.gestionar')
+];
+const seguridadMediosVer = [
+  authenticateToken,
+  requirePermission(['medios_pago.ver', 'cobros.registrar'])
+];
+const seguridadMediosConfigurar = [
+  authenticateToken,
+  requirePermission('medios_pago.configurar')
+];
+
+const alcanceLista = (permission) =>
+  requireFinancialScope({
+    sources: [sourceQuery('sede')],
+    permission
+  });
+const alcanceAlumno = (permission) =>
+  requireFinancialScope({
+    sources: [sourceParam('alumno', 'alumno_id')],
+    permission
+  });
+const alcanceMensualidad = (permission, key = 'id') =>
+  requireFinancialScope({
+    sources: [sourceParam('mensualidad', key)],
+    permission
+  });
+const alcancePago = (permission) =>
+  requireFinancialScope({
+    sources: [sourceParam('pago')],
+    permission
+  });
+const alcanceRecurrente = (permission) =>
+  requireFinancialScope({
+    sources: [sourceParam('metodo_recurrente')],
+    permission
+  });
 
 /*
  * =========================================================
@@ -142,37 +192,37 @@ router.patch(
  * =========================================================
  */
 
-router.get('/pagos-medios-pago', authenticateToken, OBR_PagosMediosPago_CTS);
+router.get('/pagos-medios-pago', ...seguridadMediosVer, OBR_PagosMediosPago_CTS);
 
 router.get(
   '/pagos-medios-pago/activos',
-  authenticateToken,
+  ...seguridadMediosVer,
   OBR_MediosPagoActivos_CTS
 );
 
-router.get('/pagos-medios-pago/:id', authenticateToken, OBR_MedioPagoPorId_CTS);
+router.get('/pagos-medios-pago/:id', ...seguridadMediosVer, OBR_MedioPagoPorId_CTS);
 
-router.post('/pagos-medios-pago', authenticateToken, CR_PagosMediosPago_CTS);
+router.post('/pagos-medios-pago', ...seguridadMediosConfigurar, CR_PagosMediosPago_CTS);
 
-router.put('/pagos-medios-pago/:id', authenticateToken, UR_PagosMediosPago_CTS);
+router.put('/pagos-medios-pago/:id', ...seguridadMediosConfigurar, UR_PagosMediosPago_CTS);
 
 router.patch(
   '/pagos-medios-pago/:id/estado',
-  authenticateToken,
+  ...seguridadMediosConfigurar,
   UR_EstadoMedioPago_CTS
 );
 
 // Benjamin Orellana - 2026/05/29 - Baja lógica del medio de pago, mantiene el registro en la tabla.
 router.put(
   '/pagos-medios-pago/:id/desactivar',
-  authenticateToken,
+  ...seguridadMediosConfigurar,
   DR_PagosMediosPago_CTS
 );
 
 // Benjamin Orellana - 2026/05/29 - Eliminación física del medio de pago.
 router.delete(
   '/pagos-medios-pago/:id',
-  authenticateToken,
+  ...seguridadMediosConfigurar,
   ER_PagosMediosPago_CTS
 );
 
@@ -187,7 +237,8 @@ router.delete(
  */
 router.get(
   '/pagos-mensualidades',
-  authenticateToken,
+  ...seguridadPagosVer,
+  alcanceLista('pagos.ver'),
   OBR_PagosMensualidades_CTS
 );
 
@@ -196,7 +247,8 @@ router.get(
  */
 router.get(
   '/pagos-mensualidades/pendientes',
-  authenticateToken,
+  ...seguridadDeudasVer,
+  alcanceLista('deudas.ver'),
   OBR_MensualidadesPendientes_CTS
 );
 
@@ -205,7 +257,8 @@ router.get(
  */
 router.get(
   '/pagos-mensualidades/vencidas',
-  authenticateToken,
+  ...seguridadDeudasVer,
+  alcanceLista('deudas.ver'),
   OBR_MensualidadesVencidas_CTS
 );
 
@@ -214,7 +267,8 @@ router.get(
  */
 router.get(
   '/pagos-mensualidades/morosos',
-  authenticateToken,
+  ...seguridadDeudasVer,
+  alcanceLista('deudas.ver'),
   OBR_AlumnosMorosos_CTS
 );
 
@@ -223,7 +277,8 @@ router.get(
  */
 router.get(
   '/alumnos/:alumno_id/mensualidades',
-  authenticateToken,
+  ...seguridadPagosVer,
+  alcanceAlumno('pagos.ver'),
   OBR_MensualidadesPorAlumno_CTS
 );
 
@@ -232,7 +287,8 @@ router.get(
  */
 router.get(
   '/pagos-mensualidades/:id',
-  authenticateToken,
+  ...seguridadPagosVer,
+  alcanceMensualidad('pagos.ver'),
   OBR_MensualidadPorId_CTS
 );
 
@@ -241,7 +297,15 @@ router.get(
  */
 router.post(
   '/pagos-mensualidades',
-  authenticateToken,
+  ...seguridadDeudasGestionar,
+  requireFinancialScope({
+    sources: [
+      sourceBody('sede'),
+      sourceBody('alumno', 'alumno_id'),
+      sourceBody('membresia', 'membresia_id')
+    ],
+    permission: 'deudas.gestionar'
+  }),
   CR_PagosMensualidades_CTS
 );
 
@@ -250,7 +314,11 @@ router.post(
  */
 router.post(
   '/pagos-mensualidades/generar-desde-membresia/:membresia_id',
-  authenticateToken,
+  ...seguridadDeudasGestionar,
+  requireFinancialScope({
+    sources: [sourceParam('membresia', 'membresia_id')],
+    permission: 'deudas.gestionar'
+  }),
   CR_GenerarMensualidadDesdeMembresia_CTS
 );
 
@@ -259,7 +327,16 @@ router.post(
  */
 router.put(
   '/pagos-mensualidades/:id',
-  authenticateToken,
+  ...seguridadDeudasGestionar,
+  requireFinancialScope({
+    sources: [
+      sourceParam('mensualidad'),
+      sourceBody('sede'),
+      sourceBody('alumno', 'alumno_id'),
+      sourceBody('membresia', 'membresia_id')
+    ],
+    permission: 'deudas.gestionar'
+  }),
   UR_PagosMensualidades_CTS
 );
 
@@ -268,7 +345,8 @@ router.put(
  */
 router.patch(
   '/pagos-mensualidades/:id/estado',
-  authenticateToken,
+  ...seguridadDeudasGestionar,
+  alcanceMensualidad('deudas.gestionar'),
   UR_EstadoMensualidad_CTS
 );
 
@@ -277,7 +355,8 @@ router.patch(
  */
 router.patch(
   '/pagos-mensualidades/:id/vencida',
-  authenticateToken,
+  ...seguridadDeudasGestionar,
+  alcanceMensualidad('deudas.gestionar'),
   UR_MarcarMensualidadVencida_CTS
 );
 
@@ -286,7 +365,8 @@ router.patch(
  */
 router.put(
   '/pagos-mensualidades/:id/anular',
-  authenticateToken,
+  ...seguridadDeudasGestionar,
+  alcanceMensualidad('deudas.gestionar'),
   DR_PagosMensualidades_CTS
 );
 
@@ -295,7 +375,8 @@ router.put(
  */
 router.delete(
   '/pagos-mensualidades/:id',
-  authenticateToken,
+  ...seguridadDeudasGestionar,
+  alcanceMensualidad('deudas.gestionar'),
   ER_PagosMensualidades_CTS
 );
 
@@ -305,43 +386,71 @@ router.delete(
  * =========================================================
  */
 
-router.get('/pagos', authenticateToken, OBR_Pagos_CTS);
+router.get('/pagos', ...seguridadPagosVer, alcanceLista('pagos.ver'), OBR_Pagos_CTS);
 
-router.get('/pagos/:id', authenticateToken, OBR_PagoPorId_CTS);
+router.get('/pagos/:id', ...seguridadPagosVer, alcancePago('pagos.ver'), OBR_PagoPorId_CTS);
 
 router.get(
   '/alumnos/:alumno_id/pagos',
-  authenticateToken,
+  ...seguridadPagosVer,
+  alcanceAlumno('pagos.ver'),
   OBR_PagosPorAlumno_CTS
 );
 
 router.get(
   '/alumnos/:alumno_id/pagos-historial',
-  authenticateToken,
+  ...seguridadPagosVer,
+  alcanceAlumno('pagos.ver'),
   OBR_HistorialPagosAlumno_CTS
 );
 
 router.get(
   '/pagos-mensualidades/:mensualidad_id/pagos',
-  authenticateToken,
+  ...seguridadPagosVer,
+  alcanceMensualidad('pagos.ver', 'mensualidad_id'),
   OBR_PagosPorMensualidad_CTS
 );
 
-router.post('/pagos', authenticateToken, CR_Pagos_CTS);
+router.post(
+  '/pagos',
+  ...seguridadPagosGestionar,
+  requireFinancialScope({
+    sources: [
+      sourceBody('sede'),
+      sourceBody('alumno', 'alumno_id'),
+      sourceBody('mensualidad', 'mensualidad_id')
+    ],
+    permission: 'pagos.gestionar'
+  }),
+  CR_Pagos_CTS
+);
 
-router.put('/pagos/:id', authenticateToken, UR_Pagos_CTS);
+router.put(
+  '/pagos/:id',
+  ...seguridadPagosGestionar,
+  requireFinancialScope({
+    sources: [
+      sourceParam('pago'),
+      sourceBody('sede'),
+      sourceBody('alumno', 'alumno_id'),
+      sourceBody('mensualidad', 'mensualidad_id')
+    ],
+    permission: 'pagos.gestionar'
+  }),
+  UR_Pagos_CTS
+);
 
-router.put('/pagos/:id/confirmar', authenticateToken, UR_ConfirmarPago_CTS);
+router.put('/pagos/:id/confirmar', ...seguridadPagosGestionar, alcancePago('pagos.gestionar'), UR_ConfirmarPago_CTS);
 
-router.put('/pagos/:id/rechazar', authenticateToken, UR_RechazarPago_CTS);
+router.put('/pagos/:id/rechazar', ...seguridadPagosGestionar, alcancePago('pagos.gestionar'), UR_RechazarPago_CTS);
 
-router.put('/pagos/:id/anular', authenticateToken, UR_AnularPago_CTS);
+router.put('/pagos/:id/anular', ...seguridadPagosGestionar, alcancePago('pagos.gestionar'), UR_AnularPago_CTS);
 
 // Benjamin Orellana - 2026/05/30 - Baja lógica del pago, cambia estado a anulado.
-router.put('/pagos/:id/desactivar', authenticateToken, DR_Pagos_CTS);
+router.put('/pagos/:id/desactivar', ...seguridadPagosGestionar, alcancePago('pagos.gestionar'), DR_Pagos_CTS);
 
 // Benjamin Orellana - 2026/05/30 - Eliminación física del pago.
-router.delete('/pagos/:id', authenticateToken, ER_Pagos_CTS);
+router.delete('/pagos/:id', ...seguridadPagosGestionar, alcancePago('pagos.gestionar'), ER_Pagos_CTS);
 
 /*
  * =========================================================
@@ -351,51 +460,68 @@ router.delete('/pagos/:id', authenticateToken, ER_Pagos_CTS);
 
 router.get(
   '/pagos-metodos-recurrentes',
-  authenticateToken,
+  ...seguridadPagosVer,
+  alcanceLista('pagos.ver'),
   OBR_PagosMetodosRecurrentes_CTS
 );
 
 router.get(
   '/alumnos/:alumno_id/metodos-recurrentes',
-  authenticateToken,
+  ...seguridadPagosVer,
+  alcanceAlumno('pagos.ver'),
   OBR_MetodosRecurrentesPorAlumno_CTS
 );
 
 router.get(
   '/pagos-metodos-recurrentes/:id',
-  authenticateToken,
+  ...seguridadPagosVer,
+  alcanceRecurrente('pagos.ver'),
   OBR_MetodoRecurrentePorId_CTS
 );
 
 router.post(
   '/pagos-metodos-recurrentes',
-  authenticateToken,
+  ...seguridadPagosGestionar,
+  requireFinancialScope({
+    sources: [sourceBody('alumno', 'alumno_id')],
+    permission: 'pagos.gestionar'
+  }),
   CR_PagosMetodosRecurrentes_CTS
 );
 
 router.put(
   '/pagos-metodos-recurrentes/:id',
-  authenticateToken,
+  ...seguridadPagosGestionar,
+  requireFinancialScope({
+    sources: [
+      sourceParam('metodo_recurrente'),
+      sourceBody('alumno', 'alumno_id')
+    ],
+    permission: 'pagos.gestionar'
+  }),
   UR_PagosMetodosRecurrentes_CTS
 );
 
 router.patch(
   '/pagos-metodos-recurrentes/:id/estado',
-  authenticateToken,
+  ...seguridadPagosGestionar,
+  alcanceRecurrente('pagos.gestionar'),
   UR_EstadoMetodoRecurrente_CTS
 );
 
 // Benjamin Orellana - 2026/05/30 - Baja lógica del método recurrente, cambia estado a eliminado.
 router.put(
   '/pagos-metodos-recurrentes/:id/desactivar',
-  authenticateToken,
+  ...seguridadPagosGestionar,
+  alcanceRecurrente('pagos.gestionar'),
   DR_PagosMetodosRecurrentes_CTS
 );
 
 // Benjamin Orellana - 2026/05/30 - Eliminación física del método recurrente.
 router.delete(
   '/pagos-metodos-recurrentes/:id',
-  authenticateToken,
+  ...seguridadPagosGestionar,
+  alcanceRecurrente('pagos.gestionar'),
   ER_PagosMetodosRecurrentes_CTS
 );
 
@@ -407,20 +533,40 @@ router.delete(
 
 router.post(
   '/pagos/registrar-operativo',
-  authenticateToken,
+  ...seguridadPagosGestionar,
+  requireFinancialScope({
+    sources: [
+      sourceBody('sede'),
+      sourceBody('alumno', 'alumno_id'),
+      sourceBody('mensualidad', 'mensualidad_id')
+    ],
+    permission: 'pagos.gestionar'
+  }),
   CR_RegistrarPagoOperativo_CTS
 );
 
 router.post(
   '/alumnos/:alumno_id/registrar-pago',
-  authenticateToken,
+  ...seguridadPagosGestionar,
+  requireFinancialScope({
+    sources: [
+      sourceParam('alumno', 'alumno_id'),
+      sourceBody('sede'),
+      sourceBody('mensualidad', 'mensualidad_id')
+    ],
+    permission: 'pagos.gestionar'
+  }),
   CR_RegistrarPagoOperativo_CTS
 );
 
 // Benjamin Orellana - 2026/06/15 - Renueva la membresía del alumno creando nuevo período, mensualidad y pago.
 router.post(
   '/alumnos/:alumno_id/renovar-membresia',
-  authenticateToken,
+  ...seguridadPagosGestionar,
+  requireFinancialScope({
+    sources: [sourceParam('alumno', 'alumno_id'), sourceBody('sede')],
+    permission: 'pagos.gestionar'
+  }),
   CR_RenovarMembresiaOperativa_CTS
 );
 

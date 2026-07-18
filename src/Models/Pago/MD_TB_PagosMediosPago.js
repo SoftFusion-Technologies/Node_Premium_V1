@@ -64,6 +64,18 @@ const PagosMediosPagoModel = db.define(
       defaultValue: 0
     },
 
+    orden: {
+      type: DataTypes.INTEGER.UNSIGNED,
+      allowNull: false,
+      defaultValue: 100
+    },
+
+    impacta_caja: {
+      type: DataTypes.TINYINT,
+      allowNull: false,
+      defaultValue: 1
+    },
+
     activo: {
       type: DataTypes.TINYINT,
       allowNull: false,

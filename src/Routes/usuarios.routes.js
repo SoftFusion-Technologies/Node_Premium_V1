@@ -16,7 +16,11 @@
 import express from 'express';
 
 // Benjamin Orellana - 2026/05/10 - Importa middlewares de seguridad para proteger rutas PREMIUM.
-import { authenticateToken, requireRolGlobal } from '../Security/auth.js';
+import {
+  authenticateToken,
+  requirePermission,
+  requireRolGlobal
+} from '../Security/auth.js';
 
 // Benjamin Orellana - 2026/05/10 - Importa controlador de roles de usuarios PREMIUM.
 import {
@@ -32,6 +36,7 @@ import {
 // Benjamin Orellana - 2026/05/10 - Importa controlador de usuarios PREMIUM.
 import {
   OBR_Usuarios_CTS,
+  OBR_UsuariosSelectorCobro_CTS,
   OBR_UsuarioPerfil_CTS,
   OBR_UsuarioPorId_CTS,
   CR_Usuarios_CTS,
@@ -90,7 +95,12 @@ const router = express.Router();
 /*
  * Benjamin Orellana - 2026/05/10 - Lista roles de usuarios con filtros y paginación.
  */
-router.get('/usuarios-roles', OBR_UsuariosRoles_CTS);
+router.get(
+  '/usuarios-roles',
+  authenticateToken,
+  requirePermission('usuarios.gestionar'),
+  OBR_UsuariosRoles_CTS
+);
 
 /*
  * Benjamin Orellana - 2026/05/10 - Lista roles activos para selects operativos.
@@ -98,6 +108,7 @@ router.get('/usuarios-roles', OBR_UsuariosRoles_CTS);
 router.get(
   '/usuarios-roles/activos',
   authenticateToken,
+  requirePermission('usuarios.gestionar'),
   OBR_UsuariosRolesActivos_CTS
 );
 
@@ -107,6 +118,7 @@ router.get(
 router.get(
   '/usuarios-roles/:id',
   authenticateToken,
+  requirePermission('usuarios.gestionar'),
   OBR_UsuariosRolesPorId_CTS
 );
 
@@ -178,6 +190,17 @@ router.get(
   authenticateToken,
   requireRolGlobal(['SUPER_ADMIN', 'DIRECCION']),
   OBR_Usuarios_CTS
+);
+
+/*
+ * Benjamin Orellana - 2026/07/13 - Lista mínima de usuarios activos para el
+ * selector operativo del drawer Nuevo Cobro.
+ */
+router.get(
+  '/usuarios/cobros/empleados',
+  authenticateToken,
+  requirePermission('cobros.registrar'),
+  OBR_UsuariosSelectorCobro_CTS
 );
 
 /*

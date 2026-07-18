@@ -1029,7 +1029,8 @@ export const OBR_PagosPorAlumno_CTS = async (req, res) => {
     }
 
     const where = {
-      alumno_id: Number(alumno_id)
+      alumno_id: Number(alumno_id),
+      sede_id: Number(req.financial_sede_id)
     };
 
     if (estado !== undefined) {
@@ -1091,7 +1092,8 @@ export const OBR_PagosPorMensualidad_CTS = async (req, res) => {
 
     const { count, rows } = await PagosModel.findAndCountAll({
       where: {
-        mensualidad_id: Number(mensualidad_id)
+        mensualidad_id: Number(mensualidad_id),
+        sede_id: Number(req.financial_sede_id)
       },
       include: includePago,
       limit,
@@ -1138,7 +1140,8 @@ export const OBR_HistorialPagosAlumno_CTS = async (req, res) => {
 
     const { count, rows } = await PagosModel.findAndCountAll({
       where: {
-        alumno_id: Number(alumno_id)
+        alumno_id: Number(alumno_id),
+        sede_id: Number(req.financial_sede_id)
       },
       include: includePago,
       limit,

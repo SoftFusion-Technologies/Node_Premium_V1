@@ -79,6 +79,37 @@ const sumarDias = (fechaDateOnly, dias) => {
   return fecha.toISOString().slice(0, 10);
 };
 
+const validarSinReservasFuturasParaCambioPlan = async ({
+  alumnoId,
+  transaction,
+}) => {
+  const reservas = await db.query(
+    `SELECT r.id, t.fecha, t.hora_inicio,
+            COALESCE(t.nombre_clase, 'Clase') AS nombre_clase
+       FROM agenda_turnos_reservas r
+       INNER JOIN agenda_turnos t ON t.id = r.turno_id
+      WHERE r.alumno_id = :alumnoId
+        AND r.estado = 'reservada'
+        AND t.estado NOT IN ('cancelado', 'bloqueado')
+        AND t.fecha >= :hoy
+      ORDER BY t.fecha ASC, t.hora_inicio ASC
+      LIMIT 10`,
+    {
+      replacements: { alumnoId: Number(alumnoId), hoy: fechaArgentina() },
+      type: QueryTypes.SELECT,
+      transaction,
+    },
+  );
+
+  if (reservas.length > 0) {
+    throw new CobroOperacionError(
+      `El alumno tiene ${reservas.length} reserva${reservas.length === 1 ? '' : 's'} futura${reservas.length === 1 ? '' : 's'}. Cancelá o reprogramá esos turnos antes de confirmar el cambio de plan.`,
+      409,
+      "RESERVAS_FUTURAS_PENDIENTES",
+    );
+  }
+};
+
 const MESES_POR_PERIODO = {
   mensual: 1,
   trimestral: 3,
@@ -488,6 +519,13 @@ const crearMembresiaPlan = async ({
       Number(membresiaVigente.plan_id) !== Number(linea.referencia_id),
   );
   const iniciarCicloAhora = renovarAhoraPorCuposAgotados || cambiarPlanAhora;
+
+  if (cambiarPlanAhora) {
+    await validarSinReservasFuturasParaCambioPlan({
+      alumnoId: alumno.id,
+      transaction,
+    });
+  }
 
   const renovacionFuturaExistente = await AlumnosMembresiasModel.findOne({
     where: {
@@ -1107,6 +1145,13 @@ const aplicarPlanPendiente = async ({ detalle, usuarioId, transaction }) => {
   const esNuevoCicloPorCambioPlan = observacionesMembresia.includes(
     "NUEVO_CICLO_CAMBIO_PLAN",
   );
+
+  if (esNuevoCicloPorCambioPlan) {
+    await validarSinReservasFuturasParaCambioPlan({
+      alumnoId: membresia.alumno_id,
+      transaction,
+    });
+  }
 
   if (esNuevoCicloPorCupos || esNuevoCicloPorCambioPlan) {
     const whereMembresiasAnteriores = esNuevoCicloPorCambioPlan

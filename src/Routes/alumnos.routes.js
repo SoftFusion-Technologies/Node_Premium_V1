@@ -112,6 +112,7 @@ import {
 } from "../Controllers/Alumno/CTS_TB_AlumnosAsistencias.js";
 
 import {
+  OBR_ContextoOperacionesMembresiaAlumnoPlanesPagos_CTS,
   OBR_VencimientosAlumnoPlanesPagos_CTS,
   CR_GenerarMembresiaAlumnoPlanesPagos_CTS,
   CR_MarcarDeudaAlumnoPlanesPagos_CTS,
@@ -965,6 +966,12 @@ router.get(
 );
 
 // Benjamin Orellana - 2026/06/15 - Congela membresía vigente del alumno.
+router.get(
+  "/alumnos/:alumno_id/contexto-operaciones-membresia",
+  authenticateToken,
+  OBR_ContextoOperacionesMembresiaAlumnoPlanesPagos_CTS,
+);
+
 router.patch(
   "/alumnos/:alumno_id/congelar-membresia",
   authenticateToken,

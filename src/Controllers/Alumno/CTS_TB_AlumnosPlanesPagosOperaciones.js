@@ -2,7 +2,7 @@
  * Benjamin Orellana - 2026/06/15 - Operaciones funcionales de planes y pagos desde ficha de alumno.
  */
 
-import { Op } from 'sequelize';
+import { Op, QueryTypes } from 'sequelize';
 import db from '../../DataBase/db.js';
 
 import AlumnosModel from '../../Models/Alumno/MD_TB_Alumnos.js';
@@ -43,6 +43,114 @@ const obtenerFechaArgentinaDateOnly = () => {
   const day = partes.find((parte) => parte.type === 'day')?.value;
 
   return `${year}-${month}-${day}`;
+};
+
+const sumarDiasDateOnly = (fecha, dias) => {
+  const valor = new Date(`${String(fecha).slice(0, 10)}T00:00:00Z`);
+  valor.setUTCDate(valor.getUTCDate() + Number(dias || 0));
+  return valor.toISOString().slice(0, 10);
+};
+
+const obtenerReservasFuturasAlumno = async ({
+  alumnoId,
+  transaction,
+  fechaDesde = obtenerFechaArgentinaDateOnly()
+}) => {
+  return db.query(
+    `SELECT r.id, r.turno_id, r.membresia_id, r.estado,
+            t.sede_id, t.fecha, t.hora_inicio, t.hora_fin,
+            COALESCE(t.nombre_clase, 'Clase') AS nombre_clase,
+            s.nombre AS sede_nombre
+       FROM agenda_turnos_reservas r
+       INNER JOIN agenda_turnos t ON t.id = r.turno_id
+       LEFT JOIN sedes_sedes s ON s.id = t.sede_id
+      WHERE r.alumno_id = :alumnoId
+        AND r.estado = 'reservada'
+        AND t.estado NOT IN ('cancelado', 'bloqueado')
+        AND t.fecha >= :fechaDesde
+      ORDER BY t.fecha ASC, t.hora_inicio ASC, r.id ASC`,
+    {
+      replacements: {
+        alumnoId: Number(alumnoId),
+        fechaDesde: String(fechaDesde).slice(0, 10)
+      },
+      type: QueryTypes.SELECT,
+      transaction
+    }
+  );
+};
+
+const bloquearOperacionConReservas = async ({
+  alumnoId,
+  transaction,
+  operacion
+}) => {
+  const reservas = await obtenerReservasFuturasAlumno({
+    alumnoId,
+    transaction
+  });
+
+  if (!reservas.length) return null;
+
+  const error = new Error(
+    `El alumno tiene ${reservas.length} reserva${reservas.length === 1 ? '' : 's'} futura${reservas.length === 1 ? '' : 's'}. Cancelá o reprogramá esos turnos antes de ${operacion}.`
+  );
+  error.status = 409;
+  error.code = 'RESERVAS_FUTURAS_PENDIENTES';
+  error.data = { reservas_futuras: reservas };
+  throw error;
+};
+
+export const OBR_ContextoOperacionesMembresiaAlumnoPlanesPagos_CTS = async (
+  req,
+  res
+) => {
+  try {
+    const { alumno_id } = req.params;
+
+    if (!esIdValido(alumno_id)) {
+      return responderError(res, 400, 'El parámetro alumno_id no es válido.');
+    }
+
+    const hoy = obtenerFechaArgentinaDateOnly();
+    const [alumno, membresia, reservasFuturas] = await Promise.all([
+      AlumnosModel.findByPk(alumno_id),
+      AlumnosMembresiasModel.findOne({
+        where: {
+          alumno_id: Number(alumno_id),
+          estado: { [Op.in]: ['activa', 'pendiente_pago', 'congelada'] },
+          fecha_inicio: { [Op.lte]: hoy },
+          fecha_vencimiento: { [Op.gte]: hoy }
+        },
+        order: [
+          ['fecha_inicio', 'DESC'],
+          ['id', 'DESC']
+        ]
+      }),
+      obtenerReservasFuturasAlumno({ alumnoId: alumno_id })
+    ]);
+
+    if (!alumno) {
+      return responderError(res, 404, 'No se encontró el alumno solicitado.');
+    }
+
+    return res.status(200).json({
+      ok: true,
+      data: {
+        alumno_id: Number(alumno_id),
+        estado_alumno: alumno.estado,
+        membresia: toPlain(membresia),
+        reservas_futuras: reservasFuturas,
+        puede_operar_sin_reservas: reservasFuturas.length === 0
+      }
+    });
+  } catch (error) {
+    console.error(
+      'Error en OBR_ContextoOperacionesMembresiaAlumnoPlanesPagos_CTS:',
+      error
+    );
+    return responderError(res, 500, 'Error al consultar el contexto operativo.');
+  }
 };
 
 const diferenciaDiasDateOnly = (fechaDesde, fechaHasta) => {
@@ -260,14 +368,6 @@ const mapMembresiaResumen = (membresia, hoy) => {
   };
 };
 
-// Benjamin Orellana - 2026/06/15 - Suma días a una fecha DATEONLY.
-const sumarDiasDateOnly = (fecha, dias) => {
-  const date = new Date(`${String(fecha).slice(0, 10)}T00:00:00`);
-
-  date.setDate(date.getDate() + Number(dias || 0));
-
-  return date.toISOString().slice(0, 10);
-};
 
 // Benjamin Orellana - 2026/06/30 - Valida fechas DATEONLY usadas al generar membresías operativas desde ficha de alumno.
 const esFechaDateOnlyValida = (valor) => {
@@ -1457,6 +1557,27 @@ export const UR_CongelarMembresiaAlumnoPlanesPagos_CTS = async (req, res) => {
         ? String(fecha_desde).slice(0, 10)
         : hoy;
 
+    if (fechaDesdeFinal !== hoy) {
+      await transaction.rollback();
+      return responderError(
+        res,
+        400,
+        'El congelamiento debe comenzar en la fecha actual.'
+      );
+    }
+
+    if (
+      fecha_estimada_reactivacion &&
+      String(fecha_estimada_reactivacion).slice(0, 10) <= fechaDesdeFinal
+    ) {
+      await transaction.rollback();
+      return responderError(
+        res,
+        400,
+        'La reactivación estimada debe ser posterior al inicio del congelamiento.'
+      );
+    }
+
     const membresia = await AlumnosMembresiasModel.findOne({
       where: {
         alumno_id: Number(alumno_id),
@@ -1485,6 +1606,12 @@ export const UR_CongelarMembresiaAlumnoPlanesPagos_CTS = async (req, res) => {
         'El alumno no tiene una membresía vigente para congelar.'
       );
     }
+
+    await bloquearOperacionConReservas({
+      alumnoId: alumno_id,
+      transaction,
+      operacion: 'congelar la membresía'
+    });
 
     const observacionFinal = [
       `[CONGELAMIENTO] ${motivoTexto}`,
@@ -1534,7 +1661,12 @@ export const UR_CongelarMembresiaAlumnoPlanesPagos_CTS = async (req, res) => {
 
     console.error('Error en UR_CongelarMembresiaAlumnoPlanesPagos_CTS:', error);
 
-    return responderError(res, 500, 'Error interno al congelar membresía.');
+    return responderError(
+      res,
+      Number(error.status || 500),
+      error.status ? error.message : 'Error interno al congelar membresía.',
+      error.data || null
+    );
   }
 };
 
@@ -1590,6 +1722,25 @@ export const UR_ReactivarMembresiaAlumnoPlanesPagos_CTS = async (req, res) => {
       );
     }
 
+    const observacionesCongelamiento = String(membresia.observaciones || '');
+    const coincidenciasDesde = [
+      ...observacionesCongelamiento.matchAll(/Desde:\s*(\d{4}-\d{2}-\d{2})/g)
+    ];
+    const fechaActualizacionMembresia = membresia.updated_at
+      ? new Date(membresia.updated_at).toISOString().slice(0, 10)
+      : hoy;
+    const fechaCongelamiento =
+      coincidenciasDesde.at(-1)?.[1] || fechaActualizacionMembresia;
+    const diasCongelados = Math.max(
+      diferenciaDiasDateOnly(fechaCongelamiento, hoy) || 0,
+      0
+    );
+    const vencimientoAnterior = String(membresia.fecha_vencimiento).slice(0, 10);
+    const vencimientoExtendido = sumarDiasDateOnly(
+      vencimientoAnterior,
+      diasCongelados
+    );
+
     const membresiasAlumnoRows = await AlumnosMembresiasModel.findAll({
       where: {
         alumno_id: Number(alumno_id)
@@ -1619,13 +1770,14 @@ export const UR_ReactivarMembresiaAlumnoPlanesPagos_CTS = async (req, res) => {
     });
 
     const fechaInicio = String(membresia.fecha_inicio).slice(0, 10);
-    const fechaVencimiento = String(membresia.fecha_vencimiento).slice(0, 10);
+    const fechaVencimiento = vencimientoExtendido;
 
     const estaVigente = fechaInicio <= hoy && fechaVencimiento >= hoy;
     const estaVencida = fechaVencimiento < hoy;
 
     const observacionFinal = [
       '[REACTIVACIÓN] Membresía reactivada desde ficha del alumno',
+      `Pausa aplicada: ${diasCongelados} día${diasCongelados === 1 ? '' : 's'}`,
       observaciones ? String(observaciones).trim() : null
     ]
       .filter(Boolean)
@@ -1640,6 +1792,7 @@ export const UR_ReactivarMembresiaAlumnoPlanesPagos_CTS = async (req, res) => {
     await membresia.update(
       {
         estado: nuevoEstadoMembresia,
+        fecha_vencimiento: vencimientoExtendido,
         observaciones: [membresia.observaciones, observacionFinal]
           .filter(Boolean)
           .join('\n'),
@@ -1647,6 +1800,65 @@ export const UR_ReactivarMembresiaAlumnoPlanesPagos_CTS = async (req, res) => {
       },
       { transaction }
     );
+
+    let periodosFuturosDesplazados = 0;
+
+    if (diasCongelados > 0) {
+      const membresiasFuturas = await AlumnosMembresiasModel.findAll({
+        where: {
+          alumno_id: Number(alumno_id),
+          id: { [Op.ne]: Number(membresia.id) },
+          estado: { [Op.in]: ['activa', 'pendiente_pago', 'congelada'] },
+          fecha_inicio: { [Op.gt]: vencimientoAnterior }
+        },
+        order: [
+          ['fecha_inicio', 'ASC'],
+          ['id', 'ASC']
+        ],
+        transaction
+      });
+
+      for (const futura of membresiasFuturas) {
+        const nuevaFechaInicio = sumarDiasDateOnly(
+          futura.fecha_inicio,
+          diasCongelados
+        );
+        const nuevaFechaFin = sumarDiasDateOnly(
+          futura.fecha_vencimiento,
+          diasCongelados
+        );
+
+        await futura.update(
+          {
+            fecha_inicio: nuevaFechaInicio,
+            fecha_vencimiento: nuevaFechaFin,
+            observaciones: [
+              futura.observaciones,
+              `[REACTIVACIÓN] Período desplazado ${diasCongelados} día${diasCongelados === 1 ? '' : 's'} por congelamiento de membresía #${membresia.id}`
+            ]
+              .filter(Boolean)
+              .join('\n'),
+            updated_at: new Date()
+          },
+          { transaction }
+        );
+
+        await PagosMensualidadesModel.update(
+          {
+            periodo_desde: nuevaFechaInicio,
+            periodo_hasta: nuevaFechaFin,
+            fecha_vencimiento: nuevaFechaFin,
+            updated_at: new Date()
+          },
+          {
+            where: { membresia_id: Number(futura.id) },
+            transaction
+          }
+        );
+
+        periodosFuturosDesplazados += 1;
+      }
+    }
 
     // Benjamin Orellana - 2026/06/15 - Recalcula cobertura vigente real luego de reactivar.
     const membresiaVigenteReal = await AlumnosMembresiasModel.findOne({
@@ -1697,6 +1909,10 @@ export const UR_ReactivarMembresiaAlumnoPlanesPagos_CTS = async (req, res) => {
         membresia_id: membresia.id,
         estado_alumno: nuevoEstadoAlumno,
         estado_membresia: nuevoEstadoMembresia,
+        dias_congelados: diasCongelados,
+        fecha_vencimiento_anterior: vencimientoAnterior,
+        fecha_vencimiento_nueva: vencimientoExtendido,
+        periodos_futuros_desplazados: periodosFuturosDesplazados,
         deuda_vigente: Number(resumenDeuda.deuda_vigente || 0),
         cobertura_vigente: Boolean(membresiaVigenteReal)
       }
@@ -1811,6 +2027,12 @@ export const UR_RegistrarBajaAlumnoPlanesPagos_CTS = async (req, res) => {
       .filter(Boolean)
       .join(' - ');
 
+    await bloquearOperacionConReservas({
+      alumnoId: alumno_id,
+      transaction,
+      operacion: 'registrar la baja'
+    });
+
     const membresiasAfectadas = await AlumnosMembresiasModel.findAll({
       where: {
         alumno_id: Number(alumno_id),
@@ -1825,6 +2047,7 @@ export const UR_RegistrarBajaAlumnoPlanesPagos_CTS = async (req, res) => {
       await membresia.update(
         {
           estado: 'cancelada',
+          clases_disponibles: 0,
           observaciones: [membresia.observaciones, observacionFinal]
             .filter(Boolean)
             .join('\n'),
@@ -1927,7 +2150,12 @@ export const UR_RegistrarBajaAlumnoPlanesPagos_CTS = async (req, res) => {
 
     console.error('Error en UR_RegistrarBajaAlumnoPlanesPagos_CTS:', error);
 
-    return responderError(res, 500, 'Error interno al registrar baja.');
+    return responderError(
+      res,
+      Number(error.status || 500),
+      error.status ? error.message : 'Error interno al registrar baja.',
+      error.data || null
+    );
   }
 };
 
@@ -2233,6 +2461,12 @@ export const UR_CambiarSedeAlumnoPlanesPagos_CTS = async (req, res) => {
       );
     }
 
+    await bloquearOperacionConReservas({
+      alumnoId: alumno_id,
+      transaction,
+      operacion: 'cambiar la sede'
+    });
+
     const sedeAnteriorId = Number(
       alumno.sede_id || membresiaActual.sede_id || 0
     );
@@ -2364,8 +2598,11 @@ export const UR_CambiarSedeAlumnoPlanesPagos_CTS = async (req, res) => {
 
     return responderError(
       res,
-      500,
-      'Error interno al cambiar sede del alumno.'
+      Number(error.status || 500),
+      error.status
+        ? error.message
+        : 'Error interno al cambiar sede del alumno.',
+      error.data || null
     );
   }
 };
@@ -2462,6 +2699,12 @@ export const UR_CambiarPlanAlumnoPlanesPagos_CTS = async (req, res) => {
         'El alumno no tiene una membresía operativa vigente para cambiar de plan.'
       );
     }
+
+    await bloquearOperacionConReservas({
+      alumnoId: alumno_id,
+      transaction,
+      operacion: 'cambiar el plan'
+    });
 
     if (Number(membresiaActual.plan_id) === Number(plan_id)) {
       await transaction.rollback();
@@ -2615,8 +2858,11 @@ export const UR_CambiarPlanAlumnoPlanesPagos_CTS = async (req, res) => {
 
     return responderError(
       res,
-      500,
-      'Error interno al cambiar plan del alumno.'
+      Number(error.status || 500),
+      error.status
+        ? error.message
+        : 'Error interno al cambiar plan del alumno.',
+      error.data || null
     );
   }
 };

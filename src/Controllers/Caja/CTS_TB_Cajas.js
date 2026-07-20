@@ -370,9 +370,25 @@ export const CR_AbrirCajaPrincipal_CTS = async (req, res) => {
       lock: transaction.LOCK.UPDATE
     });
     if (existente) {
-      const error = new Error('La sede ya tiene una caja abierta.');
-      error.status = 409;
-      throw error;
+      const cajaExistente = await CajasModel.findByPk(existente.caja_id, {
+        transaction
+      });
+
+      await transaction.commit();
+      return res.status(200).json({
+        ok: true,
+        message: 'La caja principal ya estaba abierta.',
+        ya_estaba_abierta: true,
+        data: {
+          ...(typeof existente.toJSON === 'function'
+            ? existente.toJSON()
+            : existente),
+          caja:
+            typeof cajaExistente?.toJSON === 'function'
+              ? cajaExistente.toJSON()
+              : cajaExistente
+        }
+      });
     }
 
     const caja = await obtenerOCrearCajaPrincipal(sedeId, transaction);

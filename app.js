@@ -10,7 +10,7 @@ import path from 'path';
 import db from './src/DataBase/db.js';
 
 // Benjamin Orellana - 2026/04/14 - Se elimina configuración hardcodeada de MySQL y se reutilizan variables centralizadas.
-import { PORT } from './src/DataBase/config.js';
+import { PORT, DB_SYNC } from './src/DataBase/config.js';
 
 // Benjamin Orellana - 2026/05/10 - Importa rutas centralizadas del backend PREMIUM.
 // Sergio Gustavo Manrique - 2026/06/25 - Refactor: routes.js monolítico dividido

@@ -46,6 +46,7 @@ const obtenerIndicadoresAlumno = async (alumnoId) => {
     AlumnosMembresiasModel.findOne({
       where: {
         alumno_id: alumnoId,
+        plan_id:   { [Op.ne]: null },
         estado:    'activa',
         fecha_inicio:      { [Op.lte]: hoy },
         fecha_vencimiento: { [Op.gt]:  hoy }
@@ -1093,15 +1094,30 @@ export const OBRS_TurnosAlumno_CTS = async (req, res) => {
     const membresia = await AlumnosMembresiasModel.findOne({
       where: {
         alumno_id,
+        plan_id: { [Op.ne]: null },
         estado: 'activa',
         fecha_inicio: { [Op.lte]: hoyServidor },
-        fecha_vencimiento: { [Op.gte]: hoyServidor }
+        fecha_vencimiento: { [Op.gt]: hoyServidor },
+        clases_disponibles: { [Op.gt]: 0 }
       },
       attributes: ['fecha_vencimiento'],
       order: [['fecha_vencimiento', 'DESC']]
     });
 
     const fechaVencimiento = membresia?.fecha_vencimiento ?? null;
+
+    // Sin una membresía actual, activa, asociada a un plan y con créditos,
+    // no se ofrecen turnos inscribibles. La validación transaccional de la
+    // reserva sigue siendo la autoridad final, pero este corte evita una UX
+    // engañosa en el portal del alumno.
+    if (!membresia) {
+      return res.status(200).json({
+        turnos: [],
+        fecha_vencimiento: null,
+        elegible: false,
+        motivo_no_elegible: 'No tenés una membresía vigente con plan y créditos disponibles.'
+      });
+    }
 
     // El techo es el mínimo entre fecha_hasta pedida y fecha_vencimiento
     let techo = fecha_hasta ?? null;
@@ -1150,7 +1166,12 @@ export const OBRS_TurnosAlumno_CTS = async (req, res) => {
     // Incluir fecha_vencimiento para que el frontend pueda limitar la navegación
     return res
       .status(200)
-      .json({ turnos, fecha_vencimiento: fechaVencimiento });
+      .json({
+        turnos,
+        fecha_vencimiento: fechaVencimiento,
+        elegible: true,
+        motivo_no_elegible: null
+      });
   } catch (error) {
     console.error('[OBRS_TurnosAlumno_CTS]', error);
     return res.status(500).json({ message: 'Error al obtener turnos.' });

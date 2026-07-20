@@ -14,11 +14,12 @@
 
 import AlumnosModel from '../../Models/Alumno/MD_TB_Alumnos.js';
 import AlumnosAsistenciasModel from '../../Models/Alumno/MD_TB_AlumnosAsistencias.js';
+import AlumnosMembresiasModel from '../../Models/Alumno/MD_TB_AlumnosMembresias.js';
 import AgendaTurnosModel from '../../Models/Agenda/MD_TB_AgendaTurnos.js';
 import SedesModel from '../../Models/Sede/MD_TB_Sedes.js';
 import UsuariosModel from '../../Models/Usuario/MD_TB_Usuarios.js';
 import db from '../../DataBase/db.js';
-import { QueryTypes } from 'sequelize';
+import { Op, QueryTypes } from 'sequelize';
 
 // Umbral por defecto (días) para considerar a un alumno activo como
 // "inactivo" por falta de asistencia. Coincide con lo pedido: alertar a
@@ -31,6 +32,49 @@ const UMBRAL_DIAS_INACTIVIDAD_DEFAULT = 7;
 const parsearUmbralDias = (valor) => {
   const n = Number(valor);
   return Number.isFinite(n) && n >= 0 ? n : UMBRAL_DIAS_INACTIVIDAD_DEFAULT;
+};
+
+const fechaDateOnlyLocal = (valor) => {
+  if (!valor) return null;
+
+  const [anio, mes, dia] = String(valor).slice(0, 10).split('-').map(Number);
+  if (![anio, mes, dia].every(Number.isFinite)) return null;
+
+  return new Date(anio, mes - 1, dia);
+};
+
+const fechaActualDateOnly = () => {
+  const partes = new Intl.DateTimeFormat('es-AR', {
+    timeZone: 'America/Argentina/Buenos_Aires',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  }).formatToParts(new Date());
+  const valor = (tipo) => partes.find((parte) => parte.type === tipo)?.value;
+  return `${valor('year')}-${valor('month')}-${valor('day')}`;
+};
+
+const esFechaDateOnly = (valor) => /^\d{4}-\d{2}-\d{2}$/.test(String(valor || ''));
+const esHoraValida = (valor) => /^([01]\d|2[0-3]):[0-5]\d$/.test(String(valor || ''));
+const usuarioId = (req) => Number(req.user?.id || req.user?.usuario_id || 0) || null;
+const texto = (valor, maximo = 1000) => {
+  const normalizado = String(valor || '').trim();
+  return normalizado ? normalizado.slice(0, maximo) : null;
+};
+
+const construirObservacionManual = (nombreClase, observaciones) => {
+  const cabecera = `[CLASE_MANUAL] ${texto(nombreClase, 160) || 'Clase personalizada'}`;
+  const detalle = texto(observaciones);
+  return detalle ? `${cabecera}\n${detalle}` : cabecera;
+};
+
+const nombreClaseAsistencia = (asistencia) => {
+  if (asistencia?.turno?.nombre_clase) return asistencia.turno.nombre_clase;
+
+  const coincidencia = String(asistencia?.observaciones || '').match(
+    /^\[CLASE_MANUAL\]\s*(.+)$/m
+  );
+  return coincidencia?.[1] || null;
 };
 
 /*
@@ -153,19 +197,36 @@ export const OBRS_EstadisticasAsistenciaAlumno_CTS = async (req, res) => {
       ]
     });
 
-    const hoy = new Date();
+    const hoy = fechaDateOnlyLocal(fechaActualDateOnly());
+    const hoyDateOnly = fechaActualDateOnly();
     const inicioMes = new Date(hoy.getFullYear(), hoy.getMonth(), 1);
 
-    const delMes = asistencias.filter((a) => new Date(a.fecha) >= inicioMes);
+    const delMes = asistencias.filter((a) => {
+      const fecha = fechaDateOnlyLocal(a.fecha);
+      return fecha && fecha >= inicioMes && String(a.fecha) <= hoyDateOnly;
+    });
     const asistenciasMes = delMes.filter((a) => a.estado === 'asistio').length;
     const ausenciasMes = delMes.filter((a) => a.estado === 'ausente').length;
-    const canceladasMes = delMes.filter((a) => a.estado === 'cancelo').length;
+    // Una cancelación se contabiliza cuando ocurrió la acción, no por la
+    // fecha futura que tenía programada la clase.
+    const canceladasMes = asistencias.filter((a) => {
+      if (a.estado !== 'cancelo') return false;
+      const fechaCancelacion = new Date(a.updated_at || a.created_at || a.fecha);
+      return (
+        !Number.isNaN(fechaCancelacion.getTime()) &&
+        fechaCancelacion >= inicioMes &&
+        fechaCancelacion <= new Date()
+      );
+    }).length;
     const totalContableMes = asistenciasMes + ausenciasMes;
 
-    const ultimaAsistio = asistencias.find((a) => a.estado === 'asistio');
+    const ultimaAsistio = asistencias.find(
+      (a) => a.estado === 'asistio' && String(a.fecha) <= hoyDateOnly
+    );
     const diasSinActividad = ultimaAsistio
       ? Math.floor(
-          (hoy - new Date(ultimaAsistio.fecha)) / (1000 * 60 * 60 * 24)
+          (hoy - fechaDateOnlyLocal(ultimaAsistio.fecha)) /
+            (1000 * 60 * 60 * 24)
         )
       : null;
 
@@ -174,14 +235,15 @@ export const OBRS_EstadisticasAsistenciaAlumno_CTS = async (req, res) => {
     // a un alumno recién dado de alta que todavía no tuvo su primera clase.
     const diasDesdeAlta = alumno.fecha_inicio
       ? Math.floor(
-          (hoy - new Date(alumno.fecha_inicio)) / (1000 * 60 * 60 * 24)
+          (hoy - fechaDateOnlyLocal(alumno.fecha_inicio)) /
+            (1000 * 60 * 60 * 24)
         )
       : null;
 
     // Racha: cuenta desde el registro más reciente hacia atrás mientras sea
-    // "asistio". Se corta apenas aparece cualquier otro estado.
+    // "asistio". Los eventos futuros no alteran una racha ya consolidada.
     let racha = 0;
-    for (const a of asistencias) {
+    for (const a of asistencias.filter((item) => String(item.fecha) <= hoyDateOnly)) {
       if (a.estado !== 'asistio') break;
       racha++;
     }
@@ -191,7 +253,15 @@ export const OBRS_EstadisticasAsistenciaAlumno_CTS = async (req, res) => {
     const inicioVentana = new Date(hoy);
     inicioVentana.setDate(inicioVentana.getDate() - SEMANAS_VENTANA * 7);
     const asistenciasVentana = asistencias.filter(
-      (a) => a.estado === 'asistio' && new Date(a.fecha) >= inicioVentana
+      (a) => {
+        const fecha = fechaDateOnlyLocal(a.fecha);
+        return (
+          a.estado === 'asistio' &&
+          fecha &&
+          fecha >= inicioVentana &&
+          String(a.fecha) <= hoyDateOnly
+        );
+      }
     ).length;
     const frecuenciaSemanalReal =
       Math.round((asistenciasVentana / SEMANAS_VENTANA) * 10) / 10;
@@ -211,7 +281,9 @@ export const OBRS_EstadisticasAsistenciaAlumno_CTS = async (req, res) => {
         cancelaciones_mes: canceladasMes,
         dias_sin_actividad: diasSinActividad ?? diasDesdeAlta,
         ultima_asistencia: ultimaAsistio?.fecha || null,
-        ultima_clase: ultimaAsistio?.turno?.nombre_clase || null,
+        ultima_clase: ultimaAsistio
+          ? nombreClaseAsistencia(ultimaAsistio)
+          : null,
         racha_actual: racha,
         porcentaje_asistencia:
           totalContableMes > 0
@@ -229,6 +301,170 @@ export const OBRS_EstadisticasAsistenciaAlumno_CTS = async (req, res) => {
       .json({
         message: 'Error al calcular las estadísticas de asistencia del alumno.'
       });
+  }
+};
+
+/*
+ * Registra una asistencia administrativa sin reserva previa. Como no existe
+ * una reserva que haya consumido el crédito, descuenta exactamente una clase
+ * de la membresía vigente que cubre la fecha indicada.
+ */
+export const CR_AsistenciaManualAlumno_CTS = async (req, res) => {
+  const transaction = await db.transaction();
+
+  try {
+    const alumnoId = Number(req.params.alumno_id);
+    const fecha = String(req.body.fecha || '');
+    const hora = String(req.body.hora || '');
+    const nombreClase = texto(req.body.nombre_clase, 160) || 'Clase personalizada';
+
+    if (!Number.isInteger(alumnoId) || alumnoId <= 0) {
+      await transaction.rollback();
+      return res.status(400).json({ message: 'El alumno indicado no es válido.' });
+    }
+    if (!esFechaDateOnly(fecha) || fecha > fechaActualDateOnly()) {
+      await transaction.rollback();
+      return res.status(400).json({
+        message: 'La fecha debe tener formato YYYY-MM-DD y no puede ser futura.'
+      });
+    }
+    if (!esHoraValida(hora)) {
+      await transaction.rollback();
+      return res.status(400).json({ message: 'La hora debe tener formato HH:mm.' });
+    }
+
+    const alumno = await AlumnosModel.findByPk(alumnoId, { transaction });
+    if (!alumno) {
+      await transaction.rollback();
+      return res.status(404).json({ message: 'Alumno no encontrado.' });
+    }
+
+    const membresia = await AlumnosMembresiasModel.findOne({
+      where: {
+        alumno_id: alumnoId,
+        sede_id: Number(alumno.sede_id),
+        estado: 'activa',
+        fecha_inicio: { [Op.lte]: fecha },
+        fecha_vencimiento: { [Op.gte]: fecha },
+        clases_disponibles: { [Op.gt]: 0 }
+      },
+      order: [['fecha_inicio', 'DESC'], ['id', 'DESC']],
+      transaction,
+      lock: transaction.LOCK.UPDATE
+    });
+
+    if (!membresia) {
+      await transaction.rollback();
+      return res.status(409).json({
+        message: 'El alumno no tiene una membresía activa con cupos para esa fecha.'
+      });
+    }
+
+    const horaRegistro = `${hora}:00`;
+    const duplicada = await AlumnosAsistenciasModel.findOne({
+      where: {
+        alumno_id: alumnoId,
+        fecha,
+        hora_registro: horaRegistro,
+        turno_id: null,
+        estado: { [Op.ne]: 'cancelo' }
+      },
+      transaction,
+      lock: transaction.LOCK.UPDATE
+    });
+
+    if (duplicada) {
+      await transaction.rollback();
+      return res.status(409).json({
+        message: 'Ya existe una asistencia manual para el alumno en esa fecha y hora.'
+      });
+    }
+
+    const asistencia = await AlumnosAsistenciasModel.create(
+      {
+        alumno_id: alumnoId,
+        sede_id: Number(alumno.sede_id),
+        membresia_id: Number(membresia.id),
+        fecha,
+        hora_registro: horaRegistro,
+        estado: 'asistio',
+        registrado_por_id: usuarioId(req),
+        observaciones: construirObservacionManual(
+          nombreClase,
+          req.body.observaciones
+        )
+      },
+      { transaction }
+    );
+
+    await membresia.update(
+      {
+        clases_usadas: Number(membresia.clases_usadas || 0) + 1,
+        clases_disponibles: Math.max(
+          Number(membresia.clases_disponibles || 0) - 1,
+          0
+        ),
+        updated_at: new Date()
+      },
+      { transaction }
+    );
+
+    await transaction.commit();
+    return res.status(201).json({
+      ok: true,
+      message: 'Asistencia registrada correctamente.',
+      data: asistencia
+    });
+  } catch (error) {
+    if (!transaction.finished) await transaction.rollback();
+    console.error('[CR_AsistenciaManualAlumno_CTS]', error);
+    return res.status(500).json({ message: 'Error al registrar la asistencia manual.' });
+  }
+};
+
+export const UR_JustificarAusenciaAlumno_CTS = async (req, res) => {
+  try {
+    const alumnoId = Number(req.params.alumno_id);
+    const asistenciaId = Number(req.params.asistencia_id);
+
+    if (![alumnoId, asistenciaId].every((id) => Number.isInteger(id) && id > 0)) {
+      return res.status(400).json({ message: 'Los identificadores no son válidos.' });
+    }
+
+    const asistencia = await AlumnosAsistenciasModel.findOne({
+      where: { id: asistenciaId, alumno_id: alumnoId }
+    });
+
+    if (!asistencia) {
+      return res.status(404).json({ message: 'Ausencia no encontrada.' });
+    }
+    if (asistencia.estado !== 'ausente') {
+      return res.status(409).json({
+        message: 'Solo se pueden justificar registros que estén en estado ausente.'
+      });
+    }
+
+    const nuevaObservacion = texto(req.body.observaciones);
+    const observaciones = [
+      texto(asistencia.observaciones),
+      nuevaObservacion ? `[JUSTIFICACIÓN] ${nuevaObservacion}` : '[JUSTIFICACIÓN] Sin detalle'
+    ].filter(Boolean).join('\n');
+
+    await asistencia.update({
+      estado: 'justificado',
+      registrado_por_id: usuarioId(req),
+      observaciones,
+      updated_at: new Date()
+    });
+
+    return res.status(200).json({
+      ok: true,
+      message: 'Ausencia justificada correctamente.',
+      data: asistencia
+    });
+  } catch (error) {
+    console.error('[UR_JustificarAusenciaAlumno_CTS]', error);
+    return res.status(500).json({ message: 'Error al justificar la ausencia.' });
   }
 };
 

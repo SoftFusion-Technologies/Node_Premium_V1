@@ -7,11 +7,10 @@
  * Este archivo (CTS_TB_AgendaTurnosReservas.js) contiene los controladores
  * para gestionar las reservas de turnos (agenda_turnos_reservas).
  * Incluye inscripción de alumnos, cancelación con tiempo límite,
- * reprogramación y marcado de asistencia. Al inscribir se crea
- * automáticamente el registro de asistencia en estado 'asistio';
- * al cancelar/anular la inscripción, ese registro pasa a estado 'cancelo'
- * (no se borra), para que quede en el historial del alumno si canceló él
- * mismo o si lo dio de baja el admin.
+ * reprogramación y marcado de asistencia. Reservar consume un cupo de la
+ * membresía, pero no confirma que el alumno haya asistido. La asistencia real
+ * se registra únicamente desde la acción administrativa correspondiente. Al
+ * cancelar se conserva un registro en estado 'cancelo' para auditoría.
  *
  * Tema: Controladores - Agenda
  * Capa: Backend
@@ -28,21 +27,39 @@ import AlumnosAsistenciasModel        from '../../Models/Alumno/MD_TB_AlumnosAsi
 import SistemaConfiguracionModel      from '../../Models/Sistema/MD_TB_SistemaConfiguracion.js';
 import SedesModel                     from '../../Models/Sede/MD_TB_Sedes.js';
 import db                             from '../../DataBase/db.js';
+import { normalizarCicloMembresiasAlumno } from '../../Services/Alumno/membresiaCiclo.service.js';
 
 // ─── Helper interno ───────────────────────────────────────────────────────────
 
 /*
- * Sergio Manrique - 2026/07/05
- * Fecha de "hoy" en formato DATEONLY (YYYY-MM-DD) en UTC.
- * Debe usarse siempre que se compare contra columnas DATEONLY de
- * membresías (fecha_inicio/fecha_vencimiento), para que el criterio de
- * "membresía activa" sea el mismo que usa el listado de alumnos
- * (construirAlumnoRespuesta en CTS_TB_Alumnos.js). Usar dayjs().format()
- * (hora local del servidor) en un lugar y esta función (UTC) en otro
- * puede hacer que, cerca de medianoche, un lado vea la membresía como
- * activa y el otro no, para el mismo instante real.
+ * Benjamin Orellana - 2026/07/18
+ * Cuando no existe una membresía elegible, prioriza para el diagnóstico el
+ * período que corresponde a la fecha de la clase. Evita diagnosticar otro
+ * período distinto del que realmente debería pagar esa reserva.
  */
-const obtenerFechaActualDateOnly = () => new Date().toISOString().slice(0, 10);
+const buscarMembresiaParaDiagnostico = async ({
+  alumnoId,
+  fechaReferencia,
+  transaction = null
+}) => {
+  const vigenteEnFecha = await AlumnosMembresiasModel.findOne({
+    where: {
+      alumno_id: alumnoId,
+      fecha_inicio: { [Op.lte]: fechaReferencia },
+      fecha_vencimiento: { [Op.gte]: fechaReferencia }
+    },
+    order: [['fecha_inicio', 'ASC'], ['id', 'ASC']],
+    transaction
+  });
+
+  if (vigenteEnFecha) return vigenteEnFecha;
+
+  return AlumnosMembresiasModel.findOne({
+    where: { alumno_id: alumnoId },
+    order: [['fecha_inicio', 'DESC'], ['id', 'DESC']],
+    transaction
+  });
+};
 
 /*
  * Lee el límite de minutos para cancelar desde sistema_configuracion.
@@ -56,26 +73,9 @@ export const obtenerMinutosCancelacion = async () => {
 };
 
 /*
- * Crea el registro de asistencia en estado 'asistio' (presente por defecto)
- * para una reserva recién confirmada. El instructor podrá cambiarlo luego.
- */
-const crearAsistenciaPorReserva = async (turno, reserva, transaccion) => {
-  await AlumnosAsistenciasModel.create({
-    alumno_id:    reserva.alumno_id,
-    sede_id:      turno.sede_id,
-    turno_id:     turno.id,
-    reserva_id:   reserva.id,
-    membresia_id: reserva.membresia_id || null,
-    fecha:        turno.fecha,
-    estado:       'asistio'
-  }, { transaction: transaccion });
-};
-
-/*
- * Marca como 'cancelo' el registro de asistencia asociado a una reserva
- * anulada, en vez de borrarlo: así queda constancia en el historial del
- * alumno (perfil > Asistencias) de que canceló esa clase, ya sea que lo
- * haya hecho él mismo o el admin en su nombre.
+ * Marca como 'cancelo' la asistencia asociada a una reserva. En el flujo
+ * normal todavía no existe una asistencia al cancelar, por lo que se crea el
+ * registro de auditoría directamente en ese estado.
  *
  * Si el alumno se vuelve a inscribir más adelante, esa nueva inscripción
  * crea una reserva y una fila de asistencia completamente aparte (con su
@@ -83,7 +83,7 @@ const crearAsistenciaPorReserva = async (turno, reserva, transaccion) => {
  * queda como historial.
  */
 export const marcarAsistenciaComoCancelada = async (reserva_id, transaccion, registrado_por_id = null) => {
-  await AlumnosAsistenciasModel.update(
+  const [actualizadas] = await AlumnosAsistenciasModel.update(
     {
       estado:             'cancelo',
       registrado_por_id,
@@ -93,6 +93,32 @@ export const marcarAsistenciaComoCancelada = async (reserva_id, transaccion, reg
       where:       { reserva_id },
       transaction: transaccion
     }
+  );
+
+  if (actualizadas > 0) return;
+
+  const reserva = await AgendaTurnosReservasModel.findByPk(reserva_id, {
+    transaction: transaccion
+  });
+  if (!reserva) return;
+
+  const turno = await AgendaTurnosModel.findByPk(reserva.turno_id, {
+    transaction: transaccion
+  });
+  if (!turno) return;
+
+  await AlumnosAsistenciasModel.create(
+    {
+      alumno_id: reserva.alumno_id,
+      sede_id: turno.sede_id,
+      turno_id: turno.id,
+      reserva_id: reserva.id,
+      membresia_id: reserva.membresia_id || null,
+      fecha: turno.fecha,
+      estado: 'cancelo',
+      registrado_por_id
+    },
+    { transaction: transaccion }
   );
 };
 
@@ -145,7 +171,6 @@ const promoverListaEspera = async (turno_id) => {
       return;
     }
 
-    const hoy = obtenerFechaActualDateOnly();
     let primero    = null;
     let membresia  = null;
 
@@ -156,11 +181,14 @@ const promoverListaEspera = async (turno_id) => {
       const membresiaCandidata = await AlumnosMembresiasModel.findOne({
         where: {
           alumno_id:          candidato.alumno_id,
+          plan_id:            { [Op.ne]: null },
           estado:             'activa',
-          fecha_inicio:       { [Op.lte]: hoy },
-          // El día del vencimiento la membresía ya no habilita a inscribirse,
-          // aunque le queden créditos (por eso Op.gt y no Op.gte).
-          fecha_vencimiento:  { [Op.gt]: turno.fecha },
+          // Para una reserva futura importa que el período cubra la fecha de
+          // la clase. Una renovación confirmada puede comenzar después de hoy
+          // y aun así ser la membresía correcta para ese turno.
+          fecha_inicio:       { [Op.lte]: turno.fecha },
+          // El vencimiento es inclusivo: el ultimo dia indicado aun habilita.
+          fecha_vencimiento:  { [Op.gte]: turno.fecha },
           clases_disponibles: { [Op.gt]: 0 }
         },
         order:       [['fecha_inicio', 'ASC'], ['id', 'ASC']],
@@ -190,15 +218,17 @@ const promoverListaEspera = async (turno_id) => {
       fecha_reserva:  new Date()
     }, { transaction: transaccion });
 
-    // Crear asistencia en estado 'asistio' por defecto para la nueva reserva
-    await crearAsistenciaPorReserva(turno, reserva, transaccion);
-
     // Descontar crédito de la membresía
     await membresia.update({
       clases_usadas:      membresia.clases_usadas + 1,
       clases_disponibles: membresia.clases_disponibles - 1,
       updated_at:         new Date()
     }, { transaction: transaccion });
+
+    await normalizarCicloMembresiasAlumno({
+      alumnoId: primero.alumno_id,
+      transaction: transaccion
+    });
 
     // Marcar como asignado en la lista de espera
     await primero.update({
@@ -295,14 +325,27 @@ export const OBRS_ClientesDisponiblesTurno_CTS = async (req, res) => {
       ];
     }
 
+    // Quien ya esta reservado no vuelve a aparecer en el selector. Ademas de
+    // mejorar la UX, evita que una seleccion masiva intente duplicarlo.
+    const reservasActivas = await AgendaTurnosReservasModel.findAll({
+      where: { turno_id, estado: 'reservada' },
+      attributes: ['alumno_id'],
+      raw: true
+    });
+    const alumnosYaInscriptos = reservasActivas.map((reserva) =>
+      Number(reserva.alumno_id)
+    );
+
+    if (alumnosYaInscriptos.length > 0) {
+      where.id = { [Op.notIn]: alumnosYaInscriptos };
+    }
+
     const alumnos = await AlumnosModel.findAll({
       where,
       attributes: ['id', 'nombre', 'apellido', 'dni'],
       order: [['nombre', 'ASC'], ['apellido', 'ASC']],
       limit: 20
     });
-
-    const hoy = obtenerFechaActualDateOnly();
 
     // El turno deja de aceptar inscripciones apenas termina (hora_fin), no
     // recién al otro día: si el turno es de 16 a 17, a las 16:56 todavía se
@@ -325,32 +368,38 @@ export const OBRS_ClientesDisponiblesTurno_CTS = async (req, res) => {
         };
       }
       // Misma membresía que consumiría la inscripción real (la más antigua,
-      // activa y vigente, FIFO). Si no hay ninguna que cumpla, se cae a la
-      // más reciente de cualquier estado solo para explicar el motivo.
+      // activa, con créditos y que cubra la fecha del turno, FIFO). Si no hay
+      // ninguna que cumpla, se cae a una membresía diagnóstica para explicar
+      // el motivo.
       let membresia = await AlumnosMembresiasModel.findOne({
         where: {
           alumno_id:          alumno.id,
+          plan_id:            { [Op.ne]: null },
           estado:             'activa',
-          fecha_inicio:       { [Op.lte]: hoy },
-          fecha_vencimiento:  { [Op.gt]: hoy }
+          fecha_inicio:       { [Op.lte]: turno.fecha },
+          fecha_vencimiento:  { [Op.gte]: turno.fecha },
+          // Una membresía vigente pero agotada no debe ocultar una renovación
+          // que ya comenzó y todavía tiene créditos disponibles.
+          clases_disponibles: { [Op.gt]: 0 }
         },
         order: [['fecha_inicio', 'ASC'], ['id', 'ASC']]
       });
 
       if (!membresia) {
-        membresia = await AlumnosMembresiasModel.findOne({
-          where: { alumno_id: alumno.id },
-          order: [['fecha_inicio', 'DESC'], ['id', 'DESC']]
+        membresia = await buscarMembresiaParaDiagnostico({
+          alumnoId: alumno.id,
+          fechaReferencia: turno.fecha
         });
       }
 
       const vencimientoVigente =
-        !!membresia && dayjs(membresia.fecha_vencimiento).isAfter(hoy, 'day');
+        !!membresia && !dayjs(turno.fecha).isAfter(membresia.fecha_vencimiento, 'day');
       const inicioVigente =
-        !!membresia && !dayjs(membresia.fecha_inicio).isAfter(hoy, 'day');
+        !!membresia && !dayjs(membresia.fecha_inicio).isAfter(turno.fecha, 'day');
 
       const inscribible =
         !!membresia &&
+        !!membresia.plan_id &&
         membresia.estado === 'activa' &&
         inicioVigente &&
         vencimientoVigente &&
@@ -359,6 +408,7 @@ export const OBRS_ClientesDisponiblesTurno_CTS = async (req, res) => {
       let motivo = null;
       if (!inscribible) {
         if (!membresia) motivo = 'Sin membresía';
+        else if (!membresia.plan_id) motivo = 'Membresía sin plan asociado';
         else if (membresia.estado === 'congelada') motivo = 'Membresía congelada';
         else if (membresia.estado === 'cancelada') motivo = 'Membresía cancelada';
         else if (membresia.estado === 'pendiente_pago') motivo = 'Pago pendiente';
@@ -374,6 +424,10 @@ export const OBRS_ClientesDisponiblesTurno_CTS = async (req, res) => {
         apellido:              alumno.apellido,
         dni:                   alumno.dni,
         creditos:              membresia?.clases_disponibles ?? 0,
+        creditos_habilitados:  inscribible ? Number(membresia?.clases_disponibles || 0) : 0,
+        membresia_id:          membresia?.id ?? null,
+        plan_id:               membresia?.plan_id ?? null,
+        estado_membresia:      membresia?.estado ?? null,
         fecha_vencimiento:     membresia?.fecha_vencimiento ?? null,
         inscribible,
         motivo_no_inscribible: motivo
@@ -466,19 +520,23 @@ export const CR_ReservaAdmin_CTS = async (req, res) => {
     // Bloquea la fila de la membresía para evitar doble descuento si llegan
     // dos inscripciones simultáneas para el mismo alumno (otro gestor, u otra
     // pestaña/dispositivo).
-    const hoy = obtenerFechaActualDateOnly();
+    const fechaReferencia = turno.fecha;
 
-    // Se consume primero la membresía más antigua (FIFO) que esté vigente y
-    // activa: si el alumno renovó con anticipación y todavía le quedan
-    // créditos de la membresía anterior, se gasta esa antes que la nueva.
+    // Se consume primero la membresía más antigua (FIFO) que esté activa, con
+    // créditos y cubra la fecha de la clase. Así, un período agotado no tapa
+    // la renovación y una reserva futura puede usar el período que realmente
+    // estará vigente ese día.
     const membresia = await AlumnosMembresiasModel.findOne({
       where: {
         alumno_id,
+        plan_id:           { [Op.ne]: null },
         estado:            'activa',
-        fecha_inicio:      { [Op.lte]: hoy },
-        // El día del vencimiento la membresía ya no habilita a inscribirse,
-        // aunque le queden créditos (por eso Op.gt y no Op.gte).
-        fecha_vencimiento: { [Op.gt]: hoy }
+        fecha_inicio:      { [Op.lte]: turno.fecha },
+        // El vencimiento es inclusivo: el ultimo dia indicado aun habilita.
+        fecha_vencimiento: { [Op.gte]: turno.fecha },
+        // Si el período anterior quedó en cero y la renovación ya está
+        // vigente, continúa con la membresía más antigua que sí tenga cupos.
+        clases_disponibles: { [Op.gt]: 0 }
       },
       order:       [['fecha_inicio', 'ASC'], ['id', 'ASC']],
       transaction: transaccion,
@@ -488,9 +546,9 @@ export const CR_ReservaAdmin_CTS = async (req, res) => {
     if (!membresia) {
       // Buscar la membresía más reciente (aunque no esté vigente) para dar
       // un mensaje preciso en vez de uno genérico.
-      const cualquiera = await AlumnosMembresiasModel.findOne({
-        where:       { alumno_id },
-        order:       [['fecha_inicio', 'DESC'], ['id', 'DESC']],
+      const cualquiera = await buscarMembresiaParaDiagnostico({
+        alumnoId: alumno_id,
+        fechaReferencia,
         transaction: transaccion
       });
 
@@ -499,12 +557,15 @@ export const CR_ReservaAdmin_CTS = async (req, res) => {
       if (!cualquiera) {
         return res.status(403).json({ message: 'El alumno no tiene una membresía activa para inscribirse en esta clase.' });
       }
-      if (!dayjs(cualquiera.fecha_vencimiento).isAfter(hoy, 'day')) {
+      if (!cualquiera.plan_id) {
+        return res.status(403).json({ message: 'La membresía vigente del alumno no tiene un plan asociado. Regularizala antes de inscribirlo.' });
+      }
+      if (dayjs(fechaReferencia).isAfter(cualquiera.fecha_vencimiento, 'day')) {
         return res.status(403).json({
           message: `La membresía del alumno ya venció (${dayjs(cualquiera.fecha_vencimiento).format('DD/MM/YYYY')}).`
         });
       }
-      if (dayjs(cualquiera.fecha_inicio).isAfter(hoy, 'day')) {
+      if (dayjs(cualquiera.fecha_inicio).isAfter(fechaReferencia, 'day')) {
         return res.status(403).json({ message: 'La membresía del alumno todavía no está vigente.' });
       }
       // La membresía está dentro de su rango de fechas (por eso el listado
@@ -542,6 +603,11 @@ export const CR_ReservaAdmin_CTS = async (req, res) => {
       updated_at:         new Date()
     }, { transaction: transaccion });
 
+    await normalizarCicloMembresiasAlumno({
+      alumnoId: alumno_id,
+      transaction: transaccion
+    });
+
     const reserva = await AgendaTurnosReservasModel.create({
       turno_id,
       alumno_id,
@@ -551,9 +617,6 @@ export const CR_ReservaAdmin_CTS = async (req, res) => {
       fecha_reserva:  new Date(),
       observaciones:  observaciones  || null
     }, { transaction: transaccion });
-
-    // Crear asistencia en estado 'asistio' por defecto para la nueva reserva
-    await crearAsistenciaPorReserva(turno, reserva, transaccion);
 
     // Actualizar contador de cupos
     await turno.update({
@@ -849,19 +912,22 @@ export const CR_MiReserva_CTS = async (req, res) => {
     // ── Validación de membresía y créditos (siempre desde el backend) ──────────
     // Bloquea la fila de la membresía para que no haya doble descuento si el
     // alumno envía dos peticiones simultáneas.
-    const hoy = obtenerFechaActualDateOnly();
+    const fechaReferencia = turno.fecha;
 
-    // Se consume primero la membresía más antigua (FIFO) que esté vigente y
-    // activa: si el alumno renovó con anticipación y todavía le quedan
-    // créditos de la membresía anterior, se gasta esa antes que la nueva.
+    // Se consume primero la membresía más antigua (FIFO) que esté activa, con
+    // créditos y cubra la fecha de la clase. Esto también permite reservar
+    // contra una renovación confirmada que comienza antes del turno.
     const membresia = await AlumnosMembresiasModel.findOne({
       where: {
         alumno_id,
+        plan_id:           { [Op.ne]: null },
         estado:            'activa',
-        fecha_inicio:      { [Op.lte]: hoy },
-        // El día del vencimiento la membresía ya no habilita a inscribirse,
-        // aunque le queden créditos (por eso Op.gt y no Op.gte).
-        fecha_vencimiento: { [Op.gt]: hoy }
+        fecha_inicio:      { [Op.lte]: turno.fecha },
+        // El vencimiento es inclusivo: el ultimo dia indicado aun habilita.
+        fecha_vencimiento: { [Op.gte]: turno.fecha },
+        // Mantiene FIFO entre períodos utilizables, pero nunca selecciona un
+        // período agotado por delante de una renovación con saldo disponible.
+        clases_disponibles: { [Op.gt]: 0 }
       },
       order:       [['fecha_inicio', 'ASC'], ['id', 'ASC']],
       transaction: transaccion,
@@ -870,9 +936,9 @@ export const CR_MiReserva_CTS = async (req, res) => {
 
     if (!membresia) {
       // Buscar membresía para dar un mensaje preciso
-      const cualquiera = await AlumnosMembresiasModel.findOne({
-        where:       { alumno_id },
-        order:       [['fecha_inicio', 'DESC'], ['id', 'DESC']],
+      const cualquiera = await buscarMembresiaParaDiagnostico({
+        alumnoId: alumno_id,
+        fechaReferencia,
         transaction: transaccion
       });
 
@@ -881,10 +947,13 @@ export const CR_MiReserva_CTS = async (req, res) => {
       if (!cualquiera) {
         return res.status(403).json({ message: 'No tenés una membresía activa para inscribirte en esta clase.' });
       }
-      if (cualquiera.estado === 'vencida' || !dayjs(cualquiera.fecha_vencimiento).isAfter(hoy, 'day')) {
+      if (!cualquiera.plan_id) {
+        return res.status(403).json({ message: 'Tu membresía vigente no tiene un plan asociado. Consultá con administración para regularizarla.' });
+      }
+      if (cualquiera.estado === 'vencida' || dayjs(fechaReferencia).isAfter(cualquiera.fecha_vencimiento, 'day')) {
         return res.status(403).json({ message: 'Tu membresía ya se encuentra vencida.' });
       }
-      if (dayjs(cualquiera.fecha_inicio).isAfter(hoy, 'day')) {
+      if (dayjs(cualquiera.fecha_inicio).isAfter(fechaReferencia, 'day')) {
         return res.status(403).json({ message: 'Tu membresía todavía no está vigente.' });
       }
       if (cualquiera.estado === 'congelada') {
@@ -961,6 +1030,11 @@ export const CR_MiReserva_CTS = async (req, res) => {
       updated_at:         new Date()
     }, { transaction: transaccion });
 
+    await normalizarCicloMembresiasAlumno({
+      alumnoId: alumno_id,
+      transaction: transaccion
+    });
+
     // Crear la reserva vinculada a la membresía que pagó el crédito
     const reserva = await AgendaTurnosReservasModel.create({
       turno_id,
@@ -970,9 +1044,6 @@ export const CR_MiReserva_CTS = async (req, res) => {
       estado:         'reservada',
       fecha_reserva:  new Date()
     }, { transaction: transaccion });
-
-    // Crear asistencia en estado 'asistio' por defecto para la nueva reserva
-    await crearAsistenciaPorReserva(turno, reserva, transaccion);
 
     // Actualizar contador de cupos
     await turno.update({

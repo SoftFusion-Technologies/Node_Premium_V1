@@ -23,6 +23,7 @@ import FinanzasMovimientosModel from "../../Models/Finanzas/MD_TB_FinanzasMovimi
 import ProductosStockSedesModel from "../../Models/Catalogo/MD_TB_ProductosStockSedes.js";
 import ProductosStockMovimientosModel from "../../Models/Catalogo/MD_TB_ProductosStockMovimientos.js";
 import ProductosModel from "../../Models/Catalogo/MD_TB_Productos.js";
+import { normalizarCicloMembresiasAlumno } from "../Alumno/membresiaCiclo.service.js";
 
 const TIPOS_CONCEPTO = ["producto", "servicio", "plan"];
 const TIPOS_CLIENTE = ["alumno", "empleado", "sin_cliente"];
@@ -75,6 +76,30 @@ const fechaArgentina = () => {
 const sumarDias = (fechaDateOnly, dias) => {
   const fecha = new Date(`${fechaDateOnly}T00:00:00Z`);
   fecha.setUTCDate(fecha.getUTCDate() + Number(dias));
+  return fecha.toISOString().slice(0, 10);
+};
+
+const MESES_POR_PERIODO = {
+  mensual: 1,
+  trimestral: 3,
+  semestral: 6,
+  anual: 12,
+};
+
+// Conserva el día del vencimiento al avanzar por períodos calendario.
+// Ejemplo: 2026-08-06 + un período mensual = 2026-09-06.
+const sumarMesesCalendario = (fechaDateOnly, meses) => {
+  const fecha = new Date(`${fechaDateOnly}T00:00:00Z`);
+  const diaOriginal = fecha.getUTCDate();
+
+  fecha.setUTCDate(1);
+  fecha.setUTCMonth(fecha.getUTCMonth() + Number(meses));
+
+  const ultimoDiaMesDestino = new Date(
+    Date.UTC(fecha.getUTCFullYear(), fecha.getUTCMonth() + 1, 0),
+  ).getUTCDate();
+  fecha.setUTCDate(Math.min(diaOriginal, ultimoDiaMesDestino));
+
   return fecha.toISOString().slice(0, 10);
 };
 
@@ -435,6 +460,57 @@ const crearMembresiaPlan = async ({
   transaction,
 }) => {
   const hoy = fechaArgentina();
+
+  // La membresia operativa se determina por el periodo que cubre hoy, no por
+  // el mayor vencimiento historico. Esto evita que datos futuros o periodos
+  // solapados manden una renovacion explicita varios meses hacia adelante.
+  const membresiasOperativas = await AlumnosMembresiasModel.findAll({
+    where: {
+      alumno_id: Number(alumno.id),
+      estado: "activa",
+      fecha_inicio: { [Op.lte]: hoy },
+      fecha_vencimiento: { [Op.gte]: hoy },
+    },
+    order: [
+      ["fecha_inicio", "DESC"],
+      ["id", "DESC"],
+    ],
+    transaction,
+    lock: transaction.LOCK.UPDATE,
+  });
+  const membresiaVigente = membresiasOperativas[0] || null;
+  const renovarAhoraPorCuposAgotados = Boolean(
+    membresiaVigente &&
+      Number(membresiaVigente.clases_disponibles || 0) <= 0,
+  );
+  const cambiarPlanAhora = Boolean(
+    membresiaVigente &&
+      Number(membresiaVigente.plan_id) !== Number(linea.referencia_id),
+  );
+  const iniciarCicloAhora = renovarAhoraPorCuposAgotados || cambiarPlanAhora;
+
+  const renovacionFuturaExistente = await AlumnosMembresiasModel.findOne({
+    where: {
+      alumno_id: Number(alumno.id),
+      estado: { [Op.in]: ["pendiente_pago", "activa"] },
+      fecha_inicio: { [Op.gt]: hoy },
+    },
+    order: [
+      ["fecha_inicio", "ASC"],
+      ["id", "ASC"],
+    ],
+    transaction,
+    lock: transaction.LOCK.UPDATE,
+  });
+
+  if (renovacionFuturaExistente && !iniciarCicloAhora) {
+    throw new CobroOperacionError(
+      `El alumno ya tiene una renovación futura desde ${renovacionFuturaExistente.fecha_inicio}. Debe utilizar, completar o anular ese período antes de generar otro.`,
+      409,
+      "RENOVACION_FUTURA_EXISTENTE",
+    );
+  }
+
   const ultima = await AlumnosMembresiasModel.findOne({
     where: {
       alumno_id: Number(alumno.id),
@@ -448,13 +524,30 @@ const crearMembresiaPlan = async ({
     lock: transaction.LOCK.UPDATE,
   });
 
-  const fechaInicio =
-    linea.fecha_inicio ||
-    (ultima?.fecha_vencimiento && ultima.fecha_vencimiento >= hoy
+  const esContinuidadMismoPlan = Boolean(
+    !linea.fecha_inicio &&
+      ultima?.fecha_vencimiento &&
+      ultima.fecha_vencimiento >= hoy &&
+      Number(ultima.plan_id) === Number(linea.referencia_id),
+  );
+  const fechaInicio = iniciarCicloAhora
+    ? hoy
+    : linea.fecha_inicio ||
+      (ultima?.fecha_vencimiento && ultima.fecha_vencimiento >= hoy
       ? sumarDias(ultima.fecha_vencimiento, 1)
       : hoy);
   const duracion = Math.max(Number(linea.duracion_dias || 1), 1);
-  const fechaVencimiento = sumarDias(fechaInicio, duracion - 1);
+  const mesesPeriodo =
+    MESES_POR_PERIODO[String(linea.periodo || "")] || null;
+  const fechaVencimiento = iniciarCicloAhora
+    ? mesesPeriodo
+      ? sumarDias(sumarMesesCalendario(fechaInicio, mesesPeriodo), -1)
+      : sumarDias(fechaInicio, duracion - 1)
+    : esContinuidadMismoPlan
+      ? mesesPeriodo
+        ? sumarMesesCalendario(ultima.fecha_vencimiento, mesesPeriodo)
+        : sumarDias(fechaInicio, duracion - 1)
+      : sumarDias(fechaInicio, duracion - 1);
   const clases = Number(
     linea.cantidad_clases_periodo ?? linea.clases_por_mes ?? 0,
   );
@@ -480,7 +573,11 @@ const crearMembresiaPlan = async ({
       clases_usadas: 0,
       clases_disponibles: clases,
       origen_alta: "administracion",
-      observaciones: `Generada por cobro #${cobroId}`,
+      observaciones: cambiarPlanAhora
+        ? `Generada por cobro #${cobroId} | NUEVO_CICLO_CAMBIO_PLAN desde membresía #${membresiaVigente.id}`
+        : renovarAhoraPorCuposAgotados
+          ? `Generada por cobro #${cobroId} | NUEVO_CICLO_CUPOS_AGOTADOS desde membresía #${membresiaVigente.id}`
+          : `Generada por cobro #${cobroId}`,
     },
     { transaction },
   );
@@ -501,10 +598,53 @@ const crearMembresiaPlan = async ({
       monto_pagado: confirmado ? Number(linea.total).toFixed(2) : "0.00",
       saldo: confirmado ? "0.00" : Number(linea.total).toFixed(2),
       estado: confirmado ? "pagada" : "pendiente",
-      observaciones: `Generada por cobro #${cobroId}`,
+      observaciones: cambiarPlanAhora
+        ? `Generada por cobro #${cobroId} | Cambio de plan inmediato desde membresía #${membresiaVigente.id}`
+        : renovarAhoraPorCuposAgotados
+          ? `Generada por cobro #${cobroId} | Nuevo ciclo inmediato por cupos agotados desde membresía #${membresiaVigente.id}`
+          : `Generada por cobro #${cobroId}`,
     },
     { transaction },
   );
+
+  // Renovar sin cupos o elegir un plan distinto reemplaza el ciclo operativo.
+  // Los periodos anteriores conservan pagos, asistencias y trazabilidad, pero
+  // dejan de competir como membresia actual.
+  if (confirmado && iniciarCicloAhora) {
+    const membresiasReemplazadas = cambiarPlanAhora
+      ? await AlumnosMembresiasModel.findAll({
+          where: {
+            id: { [Op.ne]: Number(membresia.id) },
+            alumno_id: Number(alumno.id),
+            estado: { [Op.in]: ["activa", "pendiente_pago", "congelada"] },
+          },
+          transaction,
+          lock: transaction.LOCK.UPDATE,
+        })
+      : membresiasOperativas;
+
+    for (const membresiaAnterior of membresiasReemplazadas) {
+      if (Number(membresiaAnterior.id) === Number(membresia.id)) continue;
+      const observacionesAnteriores = String(
+        membresiaAnterior.observaciones || "",
+      ).trim();
+      await membresiaAnterior.update(
+        {
+          estado: cambiarPlanAhora ? "cancelada" : "vencida",
+          ...(cambiarPlanAhora ? { clases_disponibles: 0 } : {}),
+          observaciones: `${observacionesAnteriores}${
+            observacionesAnteriores ? " | " : ""
+          }${
+            cambiarPlanAhora
+              ? `Reemplazada por cambio de plan del cobro #${cobroId}`
+              : `Cerrada por nuevo ciclo inmediato del cobro #${cobroId}`
+          }`,
+          updated_at: new Date(),
+        },
+        { transaction },
+      );
+    }
+  }
 
   const pago = await PagosModel.create(
     {
@@ -522,6 +662,16 @@ const crearMembresiaPlan = async ({
     },
     { transaction },
   );
+
+  // La normalizacion es deliberadamente no destructiva: ninguna reserva ni
+  // cobro adelanta periodos futuros sin una accion administrativa explicita.
+  if (confirmado) {
+    await normalizarCicloMembresiasAlumno({
+      alumnoId: alumno.id,
+      fechaReferencia: hoy,
+      transaction,
+    });
+  }
 
   if (confirmado) {
     await alumno.update(
@@ -950,6 +1100,56 @@ const aplicarPlanPendiente = async ({ detalle, usuarioId, transaction }) => {
     );
   }
 
+  const observacionesMembresia = String(membresia.observaciones || "");
+  const esNuevoCicloPorCupos = observacionesMembresia.includes(
+    "NUEVO_CICLO_CUPOS_AGOTADOS",
+  );
+  const esNuevoCicloPorCambioPlan = observacionesMembresia.includes(
+    "NUEVO_CICLO_CAMBIO_PLAN",
+  );
+
+  if (esNuevoCicloPorCupos || esNuevoCicloPorCambioPlan) {
+    const whereMembresiasAnteriores = esNuevoCicloPorCambioPlan
+      ? {
+          id: { [Op.ne]: Number(membresia.id) },
+          alumno_id: Number(membresia.alumno_id),
+          estado: { [Op.in]: ["activa", "pendiente_pago", "congelada"] },
+        }
+      : {
+          id: { [Op.ne]: Number(membresia.id) },
+          alumno_id: Number(membresia.alumno_id),
+          estado: "activa",
+          fecha_inicio: { [Op.lte]: membresia.fecha_inicio },
+          fecha_vencimiento: { [Op.gte]: membresia.fecha_inicio },
+        };
+    const membresiasAnteriores = await AlumnosMembresiasModel.findAll({
+      where: whereMembresiasAnteriores,
+      transaction,
+      lock: transaction.LOCK.UPDATE,
+    });
+
+    for (const membresiaAnterior of membresiasAnteriores) {
+      const observacionesAnteriores = String(
+        membresiaAnterior.observaciones || "",
+      ).trim();
+      await membresiaAnterior.update(
+        {
+          estado: esNuevoCicloPorCambioPlan ? "cancelada" : "vencida",
+          ...(esNuevoCicloPorCambioPlan ? { clases_disponibles: 0 } : {}),
+          observaciones: `${observacionesAnteriores}${
+            observacionesAnteriores ? " | " : ""
+          }${
+            esNuevoCicloPorCambioPlan
+              ? `Reemplazada al confirmar cambio de plan del cobro #${detalle.cobro_id}`
+              : `Cerrada al confirmar nuevo ciclo del cobro #${detalle.cobro_id}`
+          }`,
+          updated_at: new Date(),
+        },
+        { transaction },
+      );
+    }
+  }
+
   await membresia.update(
     { estado: "activa", updated_at: new Date() },
     { transaction },
@@ -1221,7 +1421,11 @@ export const rechazarCobroPendiente = async ({
       if (detalle.tipo !== "plan") continue;
       if (detalle.membresia_id) {
         await AlumnosMembresiasModel.update(
-          { estado: "cancelada", updated_at: new Date() },
+          {
+            estado: "cancelada",
+            clases_disponibles: 0,
+            updated_at: new Date(),
+          },
           { where: { id: detalle.membresia_id }, transaction },
         );
       }

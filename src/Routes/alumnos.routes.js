@@ -107,6 +107,8 @@ import {
   OBRS_MisAsistencias_CTS,
   OBRS_MisEstadisticasAsistencia_CTS,
   OBRS_AlumnosInactivos_CTS,
+  CR_AsistenciaManualAlumno_CTS,
+  UR_JustificarAusenciaAlumno_CTS,
 } from "../Controllers/Alumno/CTS_TB_AlumnosAsistencias.js";
 
 import {
@@ -642,6 +644,32 @@ router.get(
     "PROFESOR",
   ]),
   OBRS_EstadisticasAsistenciaAlumno_CTS,
+);
+
+router.post(
+  "/alumnos/:alumno_id/asistencias/manual",
+  authenticateToken,
+  requireRolGlobal([
+    "SUPER_ADMIN",
+    "DIRECCION",
+    "FRONT_COMERCIAL",
+    "COORD_SEDE",
+    "PROFESOR",
+  ]),
+  CR_AsistenciaManualAlumno_CTS,
+);
+
+router.patch(
+  "/alumnos/:alumno_id/asistencias/:asistencia_id/justificar",
+  authenticateToken,
+  requireRolGlobal([
+    "SUPER_ADMIN",
+    "DIRECCION",
+    "FRONT_COMERCIAL",
+    "COORD_SEDE",
+    "PROFESOR",
+  ]),
+  UR_JustificarAusenciaAlumno_CTS,
 );
 
 /*

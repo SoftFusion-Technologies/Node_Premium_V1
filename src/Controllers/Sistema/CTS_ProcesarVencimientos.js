@@ -9,6 +9,7 @@ import db from '../../DataBase/db.js';
 import AlumnosModel from '../../Models/Alumno/MD_TB_Alumnos.js';
 import AlumnosMembresiasModel from '../../Models/Alumno/MD_TB_AlumnosMembresias.js';
 import PagosMensualidadesModel from '../../Models/Pago/MD_TB_PagosMensualidades.js';
+import { normalizarCicloMembresiasAlumno } from '../../Services/Alumno/membresiaCiclo.service.js';
 
 const ESTADOS_ALUMNO_NO_AUTOMATICOS = ['baja', 'congelado'];
 
@@ -314,6 +315,8 @@ export const ejecutarProcesamientoVencimientos = async ({
     const [membresiasVencidasCount] = await AlumnosMembresiasModel.update(
       {
         estado: 'vencida',
+        // Los creditos no utilizados vencen con el periodo y no se trasladan.
+        clases_disponibles: 0,
         updated_at: new Date()
       },
       {
@@ -361,6 +364,14 @@ export const ejecutarProcesamientoVencimientos = async ({
     const resultadosAlumnos = [];
 
     for (const alumno of alumnos) {
+      // Tambien corrige alumnos que agotaron cupos y ya tenian una renovacion
+      // confirmada en cola, aunque no hayan realizado otro cobro ese dia.
+      await normalizarCicloMembresiasAlumno({
+        alumnoId: alumno.id,
+        fechaReferencia: fechaProceso,
+        transaction
+      });
+
       const resultado = await recalcularEstadoAlumno({
         alumno,
         fechaProceso,

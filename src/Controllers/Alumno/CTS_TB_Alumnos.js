@@ -267,8 +267,8 @@ const construirAlumnoRespuesta = async (alumno, transaction = null) => {
     usuarioAlta,
     usuarioValidacion,
     contactosEmergencia,
-    membresias,
-    membresiaActiva,
+    membresiaVigente,
+    ultimaMembresia,
     anamnesis
   ] = await Promise.all([
     alumnoPlano.sede_id
@@ -298,7 +298,9 @@ const construirAlumnoRespuesta = async (alumno, transaction = null) => {
     AlumnosMembresiasModel.findOne({
       where: {
         alumno_id: alumnoPlano.id,
-        estado: 'activa',
+        estado: {
+          [Op.in]: ['activa', 'pendiente_pago', 'congelada']
+        },
         fecha_inicio: {
           [Op.lte]: obtenerFechaActualDateOnly()
         },
@@ -384,8 +386,11 @@ const construirAlumnoRespuesta = async (alumno, transaction = null) => {
       ? eliminarPasswordHash(usuarioValidacion)
       : null,
     contactos_emergencia: contactosEmergencia,
-    membresias,
-    membresia_actual: membresiaActiva,
+    // Conserva el contrato histórico de `membresias` y garantiza que
+    // `membresia_actual` priorice siempre la cobertura que incluye hoy. Una
+    // renovación futura solo se usa como respaldo si no existe una vigente.
+    membresias: membresiaVigente,
+    membresia_actual: membresiaVigente || ultimaMembresia,
     anamnesis
   };
 };
@@ -402,15 +407,35 @@ const obtenerResumenActividadAlumno = async (alumnoId, transaction = null) => {
       SELECT
         COUNT(
           CASE
-            WHEN aa.created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)
+            WHEN aa.estado = 'asistio'
+              AND aa.fecha BETWEEN DATE_SUB(CURDATE(), INTERVAL 30 DAY) AND CURDATE()
             THEN 1
           END
         ) AS asistencias_30_dias,
-        MAX(aa.created_at) AS ultima_asistencia_real,
+        MAX(
+          CASE
+            WHEN aa.estado = 'asistio' AND aa.fecha <= CURDATE()
+            THEN aa.fecha
+          END
+        ) AS ultima_asistencia_real,
         CASE
-          WHEN MAX(aa.created_at) IS NULL THEN NULL
+          WHEN MAX(
+            CASE
+              WHEN aa.estado = 'asistio' AND aa.fecha <= CURDATE()
+              THEN aa.fecha
+            END
+          ) IS NULL THEN NULL
           ELSE GREATEST(
-            TIMESTAMPDIFF(DAY, DATE(MAX(aa.created_at)), CURDATE()),
+            TIMESTAMPDIFF(
+              DAY,
+              MAX(
+                CASE
+                  WHEN aa.estado = 'asistio' AND aa.fecha <= CURDATE()
+                  THEN aa.fecha
+                END
+              ),
+              CURDATE()
+            ),
             0
           )
         END AS dias_sin_actividad
@@ -1715,7 +1740,8 @@ export const UR_Alumnos_CTS = async (req, res) => {
       }
 
       const planExiste = await PlanesModel.findOne({
-        where: { id: planId, activo: 1 }
+        where: { id: planId, activo: 1 },
+        transaction
       });
 
       if (!planExiste) {
@@ -1727,9 +1753,60 @@ export const UR_Alumnos_CTS = async (req, res) => {
         });
       }
 
-      await AlumnosMembresiasModel.update(
-        { plan_id: planId },
-        { where: { alumno_id: id }, transaction }
+      const hoy = obtenerFechaActualDateOnly();
+      const membresiaOperativa = await AlumnosMembresiasModel.findOne({
+        where: {
+          alumno_id: Number(id),
+          estado: { [Op.in]: ['activa', 'pendiente_pago', 'congelada'] },
+          fecha_inicio: { [Op.lte]: hoy },
+          fecha_vencimiento: { [Op.gte]: hoy }
+        },
+        order: [['fecha_inicio', 'DESC'], ['id', 'DESC']],
+        transaction,
+        lock: transaction.LOCK.UPDATE
+      });
+
+      if (!membresiaOperativa) {
+        await transaction.rollback();
+
+        return res.status(409).json({
+          ok: false,
+          message:
+            'El alumno no tiene una membresía vigente para asignar el plan. Generá una membresía desde Planes y pagos.'
+        });
+      }
+
+      const clasesIncluidas = Number(
+        planExiste.cantidad_clases_periodo ||
+          planExiste.clases_por_mes ||
+          0
+      );
+
+      if (!Number.isInteger(clasesIncluidas) || clasesIncluidas <= 0) {
+        await transaction.rollback();
+
+        return res.status(409).json({
+          ok: false,
+          message: 'El plan indicado no tiene una cantidad de clases válida.'
+        });
+      }
+
+      const clasesUsadas = Math.max(
+        Number(membresiaOperativa.clases_usadas || 0),
+        0
+      );
+
+      // La edición general regulariza solamente la cobertura vigente. Nunca
+      // debe reescribir renovaciones futuras ni el historial de membresías.
+      await membresiaOperativa.update(
+        {
+          plan_id: planId,
+          clases_incluidas: clasesIncluidas,
+          clases_usadas: clasesUsadas,
+          clases_disponibles: Math.max(clasesIncluidas - clasesUsadas, 0),
+          updated_at: new Date()
+        },
+        { transaction }
       );
     }
 

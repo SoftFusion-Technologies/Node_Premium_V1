@@ -186,6 +186,44 @@ const calcularResumenDeuda = ({ mensualidades, membresiaMap, hoy }) => {
   };
 };
 
+/*
+ * Benjamin Orellana - 2026/07/18
+ * Una renovación futura pendiente no debe bloquear anticipadamente el período
+ * que el alumno ya tiene activo y pagado. El estado global solo pasa a
+ * pendiente_pago cuando hoy no existe cobertura operativa sin saldo.
+ */
+const obtenerEstadoAlumnoPorCoberturaActual = async ({
+  alumnoId,
+  hoy,
+  transaction
+}) => {
+  const membresiaVigente = await AlumnosMembresiasModel.findOne({
+    where: {
+      alumno_id: Number(alumnoId),
+      plan_id: { [Op.ne]: null },
+      estado: 'activa',
+      fecha_inicio: { [Op.lte]: hoy },
+      fecha_vencimiento: { [Op.gte]: hoy }
+    },
+    order: [['fecha_inicio', 'DESC'], ['id', 'DESC']],
+    transaction
+  });
+
+  if (!membresiaVigente) return 'pendiente_pago';
+
+  const deudaCoberturaActual = await PagosMensualidadesModel.findOne({
+    where: {
+      alumno_id: Number(alumnoId),
+      membresia_id: Number(membresiaVigente.id),
+      estado: { [Op.in]: ['pendiente', 'parcial', 'vencida'] },
+      saldo: { [Op.gt]: 0 }
+    },
+    transaction
+  });
+
+  return deudaCoberturaActual ? 'pendiente_pago' : 'activo';
+};
+
 const mapMembresiaResumen = (membresia, hoy) => {
   if (!membresia) return null;
 
@@ -800,12 +838,20 @@ export const CR_GenerarMembresiaAlumnoPlanesPagos_CTS = async (req, res) => {
       );
     }
 
-    if (!['baja', 'congelado'].includes(String(alumno.estado).toLowerCase())) {
+    let estadoAlumnoResultante = String(alumno.estado).toLowerCase();
+
+    if (!['baja', 'congelado'].includes(estadoAlumnoResultante)) {
+      estadoAlumnoResultante = await obtenerEstadoAlumnoPorCoberturaActual({
+        alumnoId: alumno_id,
+        hoy,
+        transaction
+      });
+
       await alumno.update(
         {
           sede_id: Number(sede_id),
           fecha_inicio: alumno.fecha_inicio || fechaInicioFinal,
-          estado: 'pendiente_pago',
+          estado: estadoAlumnoResultante,
           updated_at: new Date()
         },
         { transaction }
@@ -825,6 +871,7 @@ export const CR_GenerarMembresiaAlumnoPlanesPagos_CTS = async (req, res) => {
         sede_id: Number(sede_id),
         fecha_inicio: fechaInicioFinal,
         fecha_vencimiento: fechaVencimientoFinal,
+        estado_alumno: estadoAlumnoResultante,
         estado_membresia: nuevaMembresia.estado,
         estado_mensualidad: nuevaMensualidad?.estado || null,
         precio_lista: precioLista,
@@ -1715,6 +1762,28 @@ export const UR_RegistrarBajaAlumnoPlanesPagos_CTS = async (req, res) => {
       return responderError(res, 409, 'El alumno ya está dado de baja.');
     }
 
+    // La baja nunca crea deuda. Primero se releva el saldo que ya existía y,
+    // cuando es cero, se fuerza una política neutra aunque un cliente antiguo
+    // envíe una opción de anulación.
+    const mensualidadesPendientes = await PagosMensualidadesModel.findAll({
+      where: {
+        alumno_id: Number(alumno_id),
+        estado: {
+          [Op.in]: ['pendiente', 'parcial', 'vencida']
+        },
+        saldo: {
+          [Op.gt]: 0
+        }
+      },
+      transaction
+    });
+    const deudaPendientePrevia = mensualidadesPendientes.reduce(
+      (total, mensualidad) => total + Number(mensualidad.saldo || 0),
+      0
+    );
+    const politicaDeudaAplicada =
+      deudaPendientePrevia > 0 ? politica_deuda : 'mantener_deuda';
+
     const hoy = obtenerFechaArgentinaDateOnly();
 
     const fechaBajaFinal =
@@ -1722,10 +1791,21 @@ export const UR_RegistrarBajaAlumnoPlanesPagos_CTS = async (req, res) => {
         ? String(fecha_baja).slice(0, 10)
         : hoy;
 
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(fechaBajaFinal) || fechaBajaFinal > hoy) {
+      await transaction.rollback();
+      return responderError(
+        res,
+        400,
+        'La fecha efectiva de baja no es válida ni puede ser futura.'
+      );
+    }
+
     const observacionFinal = [
       `[BAJA] ${motivoTexto}`,
       `Fecha efectiva: ${fechaBajaFinal}`,
-      `Política deuda: ${politica_deuda}`,
+      deudaPendientePrevia > 0
+        ? `Política deuda: ${politicaDeudaAplicada}`
+        : 'Sin deuda pendiente al momento de la baja',
       observaciones ? String(observaciones).trim() : null
     ]
       .filter(Boolean)
@@ -1756,20 +1836,7 @@ export const UR_RegistrarBajaAlumnoPlanesPagos_CTS = async (req, res) => {
 
     let mensualidadesAnuladas = 0;
 
-    if (politica_deuda !== 'mantener_deuda') {
-      const mensualidadesPendientes = await PagosMensualidadesModel.findAll({
-        where: {
-          alumno_id: Number(alumno_id),
-          estado: {
-            [Op.in]: ['pendiente', 'parcial', 'vencida']
-          },
-          saldo: {
-            [Op.gt]: 0
-          }
-        },
-        transaction
-      });
-
+    if (politicaDeudaAplicada !== 'mantener_deuda') {
       for (const mensualidad of mensualidadesPendientes) {
         const periodoDesde =
           mensualidad.periodo_desde ||
@@ -1780,8 +1847,8 @@ export const UR_RegistrarBajaAlumnoPlanesPagos_CTS = async (req, res) => {
           periodoDesde && String(periodoDesde).slice(0, 10) > hoy;
 
         const debeAnular =
-          politica_deuda === 'anular_toda_deuda_pendiente' ||
-          (politica_deuda === 'anular_deuda_futura' && esFutura);
+          politicaDeudaAplicada === 'anular_toda_deuda_pendiente' ||
+          (politicaDeudaAplicada === 'anular_deuda_futura' && esFutura);
 
         if (!debeAnular) continue;
 
@@ -1849,7 +1916,10 @@ export const UR_RegistrarBajaAlumnoPlanesPagos_CTS = async (req, res) => {
         membresias_canceladas: membresiasAfectadas.length,
         mensualidades_anuladas: mensualidadesAnuladas,
         metodos_recurrentes_inactivados: metodosRecurrentesAfectados.length,
-        politica_deuda
+        deuda_pendiente_previa: deudaPendientePrevia,
+        deuda_generada: 0,
+        politica_deuda: politicaDeudaAplicada,
+        politica_deuda_solicitada: politica_deuda
       }
     });
   } catch (error) {

@@ -8,9 +8,9 @@
  * para gestionar las reservas de turnos (agenda_turnos_reservas).
  * Incluye inscripción de alumnos, cancelación con tiempo límite,
  * reprogramación y marcado de asistencia. Reservar consume un cupo de la
- * membresía, pero no confirma que el alumno haya asistido. La asistencia real
- * se registra únicamente desde la acción administrativa correspondiente. Al
- * cancelar se conserva un registro en estado 'cancelo' para auditoría.
+ * membresía y crea la asistencia inicial en estado 'asistio'. El profesor puede
+ * cambiarla luego a 'ausente' o mantenerla como presente. Al cancelar se
+ * conserva el registro en estado 'cancelo' para auditoría.
  *
  * Tema: Controladores - Agenda
  * Capa: Backend
@@ -73,14 +73,47 @@ export const obtenerMinutosCancelacion = async () => {
 };
 
 /*
- * Marca como 'cancelo' la asistencia asociada a una reserva. En el flujo
- * normal todavía no existe una asistencia al cancelar, por lo que se crea el
- * registro de auditoría directamente en ese estado.
+ * Benjamin Orellana - 2026/07/21
+ * Toda reserva confirmada nace con asistencia 'asistio'. Este es el criterio
+ * operativo de Premium: el profesor solo modifica las excepciones y marca
+ * 'ausente' cuando el alumno no concurre. Se ejecuta dentro de la misma
+ * transacción que crea la reserva para evitar reservas sin asistencia.
+ */
+const crearAsistenciaInicialReserva = async ({
+  reserva,
+  turno,
+  transaction,
+  registradoPorId = null
+}) => {
+  if (!reserva || !turno) return null;
+
+  const [asistencia] = await AlumnosAsistenciasModel.findOrCreate({
+    where: { reserva_id: reserva.id },
+    defaults: {
+      alumno_id: reserva.alumno_id,
+      sede_id: turno.sede_id,
+      turno_id: turno.id,
+      reserva_id: reserva.id,
+      membresia_id: reserva.membresia_id || null,
+      fecha: turno.fecha,
+      estado: 'asistio',
+      registrado_por_id: registradoPorId
+    },
+    transaction
+  });
+
+  return asistencia;
+};
+
+/*
+ * Marca como 'cancelo' la asistencia asociada a una reserva. Normalmente la
+ * fila ya existe en estado 'asistio'; se actualiza sin borrarla. El fallback
+ * de creación se conserva para reservas históricas que todavía no tengan una
+ * asistencia vinculada.
  *
  * Si el alumno se vuelve a inscribir más adelante, esa nueva inscripción
  * crea una reserva y una fila de asistencia completamente aparte (con su
- * propio reserva_id) — este registro cancelado no se toca ni bloquea nada,
- * queda como historial.
+ * propio reserva_id). El registro cancelado queda como historial.
  */
 export const marcarAsistenciaComoCancelada = async (reserva_id, transaccion, registrado_por_id = null) => {
   const [actualizadas] = await AlumnosAsistenciasModel.update(
@@ -217,6 +250,12 @@ const promoverListaEspera = async (turno_id) => {
       estado:         'reservada',
       fecha_reserva:  new Date()
     }, { transaction: transaccion });
+
+    await crearAsistenciaInicialReserva({
+      reserva,
+      turno,
+      transaction: transaccion
+    });
 
     // Descontar crédito de la membresía
     await membresia.update({
@@ -617,6 +656,13 @@ export const CR_ReservaAdmin_CTS = async (req, res) => {
       fecha_reserva:  new Date(),
       observaciones:  observaciones  || null
     }, { transaction: transaccion });
+
+    await crearAsistenciaInicialReserva({
+      reserva,
+      turno,
+      transaction: transaccion,
+      registradoPorId: req.user?.id ?? req.user?.usuario_id ?? null
+    });
 
     // Actualizar contador de cupos
     await turno.update({
@@ -1044,6 +1090,12 @@ export const CR_MiReserva_CTS = async (req, res) => {
       estado:         'reservada',
       fecha_reserva:  new Date()
     }, { transaction: transaccion });
+
+    await crearAsistenciaInicialReserva({
+      reserva,
+      turno,
+      transaction: transaccion
+    });
 
     // Actualizar contador de cupos
     await turno.update({

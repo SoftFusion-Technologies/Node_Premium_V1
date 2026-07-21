@@ -278,28 +278,41 @@ export const OBRS_TurnosAsistenciaDia_CTS = async (req, res) => {
       }
     }
 
-    const hoyDate = new Date(fechaConsulta);
-    const inicioMes = new Date(hoyDate.getFullYear(), hoyDate.getMonth(), 1);
     const SEMANAS_VENTANA = 8;
-    const inicioVentana = new Date(hoyDate);
-    inicioVentana.setDate(inicioVentana.getDate() - SEMANAS_VENTANA * 7);
+    const inicioMesDateOnly = dayjs(fechaConsulta)
+      .startOf('month')
+      .format('YYYY-MM-DD');
+    const inicioVentanaDateOnly = dayjs(fechaConsulta)
+      .subtract(SEMANAS_VENTANA, 'week')
+      .format('YYYY-MM-DD');
 
     for (const turno of turnosPlanos) {
       for (const reserva of turno.reservas || []) {
         const alumnoId = reserva.alumno?.id;
         const historialAlumno = historialPorAlumno.get(alumnoId) || [];
 
-        const ultimaAsistio = historialAlumno.find((a) => a.estado === 'asistio');
+        // Las reservas futuras también nacen como 'asistio', pero no deben
+        // adelantar la última asistencia ni inflar estadísticas anteriores.
+        const ultimaAsistio = historialAlumno.find(
+          (a) => a.estado === 'asistio' && String(a.fecha) <= fechaConsulta
+        );
         const asistenciasMes = historialAlumno.filter(
-          (a) => a.estado === 'asistio' && new Date(a.fecha) >= inicioMes
+          (a) =>
+            a.estado === 'asistio' &&
+            String(a.fecha) >= inicioMesDateOnly &&
+            String(a.fecha) <= fechaConsulta
         ).length;
         const asistenciasVentana = historialAlumno.filter(
-          (a) => a.estado === 'asistio' && new Date(a.fecha) >= inicioVentana
+          (a) =>
+            a.estado === 'asistio' &&
+            String(a.fecha) >= inicioVentanaDateOnly &&
+            String(a.fecha) <= fechaConsulta
         ).length;
 
-        reserva.ultima_asistencia      = ultimaAsistio?.fecha ?? null;
-        reserva.asistencias_mes        = asistenciasMes;
-        reserva.frecuencia_semanal_real = Math.round((asistenciasVentana / SEMANAS_VENTANA) * 10) / 10;
+        reserva.ultima_asistencia       = ultimaAsistio?.fecha ?? null;
+        reserva.asistencias_mes         = asistenciasMes;
+        reserva.frecuencia_semanal_real =
+          Math.round((asistenciasVentana / SEMANAS_VENTANA) * 10) / 10;
       }
     }
 

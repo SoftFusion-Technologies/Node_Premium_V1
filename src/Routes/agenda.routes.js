@@ -29,6 +29,7 @@ import {
 import {
   OBRS_Turnos_CTS,
   OBRS_TurnosAsistenciaDia_CTS,
+  OBRS_HistorialCancelaciones_CTS,
   OBRS_DetTurno_CTS,
   CR_Turno_CTS,
   CR_TurnosMasivo_CTS,
@@ -153,6 +154,17 @@ router.get(
   authenticateToken,
   requireRolGlobal(ROLES_ADMIN),
   OBRS_TurnosAsistenciaDia_CTS
+);
+
+/*
+ * Benjamin Orellana - 2026/07/22 - Historial diario de cancelaciones.
+ * Query params: sede_id (requerido), fecha (opcional, default hoy).
+ */
+router.get(
+  '/agenda-admin/historial-cancelaciones',
+  authenticateToken,
+  requireRolGlobal(ROLES_ADMIN),
+  OBRS_HistorialCancelaciones_CTS
 );
 
 /*

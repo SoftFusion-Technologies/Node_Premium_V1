@@ -223,7 +223,7 @@ export const OBRS_TurnosAsistenciaDia_CTS = async (req, res) => {
           where:      { estado: 'reservada' },
           required:   false,
           include: [
-            { model: AlumnosModel, as: 'alumno', attributes: ['id', 'nombre', 'apellido'] }
+            { model: AlumnosModel, as: 'alumno', attributes: ['id', 'nombre', 'apellido', 'dni'] }
           ]
         }
       ],
@@ -320,6 +320,65 @@ export const OBRS_TurnosAsistenciaDia_CTS = async (req, res) => {
   } catch (error) {
     console.error('[OBRS_TurnosAsistenciaDia_CTS]', error);
     return res.status(500).json({ message: 'Error al obtener los turnos del día.' });
+  }
+};
+
+/*
+ * Benjamin Orellana - 2026/07/22
+ * Historial diario de reservas canceladas. Se mantiene separado del endpoint
+ * operativo de asistencia para no mezclar cancelaciones con alumnos activos.
+ */
+export const OBRS_HistorialCancelaciones_CTS = async (req, res) => {
+  try {
+    const { sede_id, fecha } = req.query;
+
+    if (!sede_id) {
+      return res.status(400).json({ message: 'Falta el parámetro sede_id.' });
+    }
+
+    const fechaConsulta = fecha || dayjs().format('YYYY-MM-DD');
+
+    const reservas = await AgendaTurnosReservasModel.findAll({
+      where: { estado: 'cancelada' },
+      attributes: [
+        'id',
+        'turno_id',
+        'alumno_id',
+        'origen_reserva',
+        'fecha_reserva',
+        'fecha_cancelacion',
+        'motivo_cancelacion',
+        'observaciones'
+      ],
+      include: [
+        {
+          model: AgendaTurnosModel,
+          as: 'turno',
+          required: true,
+          where: { sede_id, fecha: fechaConsulta },
+          attributes: ['id', 'sede_id', 'fecha', 'hora_inicio', 'hora_fin', 'nombre_clase']
+        },
+        {
+          model: AlumnosModel,
+          as: 'alumno',
+          required: true,
+          attributes: ['id', 'nombre', 'apellido', 'dni']
+        }
+      ],
+      order: [
+        [{ model: AgendaTurnosModel, as: 'turno' }, 'hora_inicio', 'ASC'],
+        ['fecha_cancelacion', 'DESC'],
+        ['id', 'DESC']
+      ]
+    });
+
+    return res.status(200).json({
+      status: 'success',
+      data: reservas.map((reserva) => reserva.toJSON())
+    });
+  } catch (error) {
+    console.error('[OBRS_HistorialCancelaciones_CTS]', error);
+    return res.status(500).json({ message: 'Error al obtener el historial de cancelaciones.' });
   }
 };
 

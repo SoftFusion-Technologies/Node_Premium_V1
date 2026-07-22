@@ -1370,6 +1370,23 @@ export const CR_Alumnos_CTS = async (req, res) => {
 
     const nuevoAlumno = await AlumnosModel.create(payload, { transaction });
 
+    /*
+     * Benjamin Orellana - 2026/07/22 - Todo alumno creado desde el panel
+     * interno recibe credenciales para el portal/app. El DNI normalizado se
+     * utiliza como contraseña inicial y deberá cambiarse en el primer acceso.
+     * La existencia de estas credenciales no habilita por sí sola la reserva
+     * de turnos: esa operación debe exigir una membresía activa y vigente.
+     */
+    await AlumnosLoginModel.create(
+      {
+        alumno_id: nuevoAlumno.id,
+        password_hash: await bcrypt.hash(payload.dni, 10),
+        requiere_cambio_password: 1,
+        estado: 'activo'
+      },
+      { transaction }
+    );
+
     if (bodyConIdsNormalizados.plan_id) {
       const planId = bodyConIdsNormalizados.plan_id;
 
@@ -1442,8 +1459,16 @@ export const CR_Alumnos_CTS = async (req, res) => {
 
     return res.status(201).json({
       ok: true,
-      message: 'Alumno creado correctamente.',
-      data
+      message:
+        'Alumno creado correctamente. Ya puede iniciar sesión con su DNI como contraseña inicial.',
+      data: {
+        ...data,
+        acceso_alumno: {
+          habilitado: true,
+          usuario: nuevoAlumno.dni,
+          requiere_cambio_password: true
+        }
+      }
     });
   } catch (error) {
     await transaction.rollback();
@@ -1761,7 +1786,10 @@ export const UR_Alumnos_CTS = async (req, res) => {
           fecha_inicio: { [Op.lte]: hoy },
           fecha_vencimiento: { [Op.gte]: hoy }
         },
-        order: [['fecha_inicio', 'DESC'], ['id', 'DESC']],
+        order: [
+          ['fecha_inicio', 'DESC'],
+          ['id', 'DESC']
+        ],
         transaction,
         lock: transaction.LOCK.UPDATE
       });
@@ -1777,9 +1805,7 @@ export const UR_Alumnos_CTS = async (req, res) => {
       }
 
       const clasesIncluidas = Number(
-        planExiste.cantidad_clases_periodo ||
-          planExiste.clases_por_mes ||
-          0
+        planExiste.cantidad_clases_periodo || planExiste.clases_por_mes || 0
       );
 
       if (!Number.isInteger(clasesIncluidas) || clasesIncluidas <= 0) {
@@ -1946,10 +1972,7 @@ export const UR_AlumnoPerfil_CTS = async (req, res) => {
 
     // El email no puede modificarse (solo se valida si el alumno ya tenía uno
     // cargado; si nunca cargó email no hay nada que comparar)
-    if (
-      alumno.email &&
-      emailNormalizado !== normalizarEmail(alumno.email)
-    ) {
+    if (alumno.email && emailNormalizado !== normalizarEmail(alumno.email)) {
       return res.status(403).json({
         ok: false,
         message: 'No está permitido modificar el email.'

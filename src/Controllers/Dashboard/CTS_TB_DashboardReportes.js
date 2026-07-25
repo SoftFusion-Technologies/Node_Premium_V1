@@ -288,7 +288,9 @@ export const OBR_DashboardCierreMensual_CTS = async (req, res) => {
         s.nombre AS sede,
         s.capacidad_operativa AS cupo_maximo,
         (SELECT COUNT(*) FROM alumnos_alumnos a
-          WHERE a.sede_id = s.id AND a.estado = 'activo') AS alumnos_activos,
+          WHERE a.sede_id = s.id
+            AND a.fecha_inicio <= :hasta
+            AND (a.fecha_baja IS NULL OR a.fecha_baja > :hasta)) AS alumnos_activos,
         (SELECT COUNT(*) FROM alumnos_alumnos a
           WHERE a.sede_id = s.id AND a.fecha_inicio BETWEEN :desde AND :hasta) AS altas_mensuales,
         (SELECT COUNT(*) FROM alumnos_alumnos a

@@ -257,7 +257,6 @@ const archivarAnamnesis = async (
       enfermedades_relevantes:   snap.enfermedades_relevantes,
       medicacion:                snap.medicacion,
       actividad_fisica_actual:   snap.actividad_fisica_actual,
-      disponibilidad_semanal:    snap.disponibilidad_semanal,
       nivel_condicion_fisica:    snap.nivel_condicion_fisica,
       observaciones_adicionales: snap.observaciones_adicionales,
       observaciones_profesor:    snap.observaciones_profesor,
@@ -305,7 +304,6 @@ const buildAnamnesisPayload = ({
   setIfPresent(payload, body, 'enfermedades_relevantes', normalizarTexto);
   setIfPresent(payload, body, 'medicacion', normalizarTexto);
   setIfPresent(payload, body, 'actividad_fisica_actual', normalizarTexto);
-  setIfPresent(payload, body, 'disponibilidad_semanal', normalizarTexto);
   setIfPresent(payload, body, 'nivel_condicion_fisica', normalizarEnum);
   setIfPresent(payload, body, 'observaciones_adicionales', normalizarTexto);
   setIfPresent(payload, body, 'observaciones_profesor', normalizarTexto);
@@ -384,15 +382,6 @@ const validarPayloadAnamnesis = (payload = {}, modo = 'create') => {
     !ESTADOS_REVISION_VALIDOS.includes(payload.estado_revision)
   ) {
     errores.push('El estado de revisión indicado no es válido.');
-  }
-
-  if (
-    payload.disponibilidad_semanal &&
-    payload.disponibilidad_semanal.length > 255
-  ) {
-    errores.push(
-      'La disponibilidad semanal no puede superar los 255 caracteres.'
-    );
   }
 
   return errores;

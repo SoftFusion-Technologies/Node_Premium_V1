@@ -101,11 +101,6 @@ const AlumnosAnamnesisModel = db.define(
       allowNull: true
     },
 
-    disponibilidad_semanal: {
-      type: DataTypes.STRING(255),
-      allowNull: true
-    },
-
     nivel_condicion_fisica: {
       type: DataTypes.ENUM('muy_bajo', 'bajo', 'medio', 'alto', 'muy_alto'),
       allowNull: true

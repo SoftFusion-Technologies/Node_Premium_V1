@@ -324,6 +324,87 @@ export const OBRS_TurnosAsistenciaDia_CTS = async (req, res) => {
 };
 
 /*
+ * Sergio Manrique - 2026/07/24
+ * Historial de asistencias de una sede en un rango de fechas, en formato
+ * plano (una fila por alumno inscripto en cada turno), pensado para
+ * exportar a Excel. A diferencia de OBRS_TurnosAsistenciaDia_CTS no calcula
+ * estadísticas por alumno (última asistencia, frecuencia semanal, etc.):
+ * eso es carísimo repetido día por día en un rango, y no hace falta para
+ * un listado de exportación.
+ */
+export const OBRS_AsistenciasRango_CTS = async (req, res) => {
+  try {
+    const { sede_id, fecha_desde, fecha_hasta } = req.query;
+
+    if (!sede_id || !fecha_desde || !fecha_hasta) {
+      return res.status(400).json({
+        message: 'Faltan parámetros: sede_id, fecha_desde y fecha_hasta son requeridos.'
+      });
+    }
+
+    const turnos = await AgendaTurnosModel.findAll({
+      where: {
+        sede_id,
+        fecha: { [Op.between]: [fecha_desde, fecha_hasta] },
+        estado: { [Op.ne]: 'cancelado' }
+      },
+      include: [
+        { model: SedesModel, as: 'sede', attributes: ['id', 'nombre'] },
+        { model: UsuariosModel, as: 'profesor', attributes: ['id', 'nombre', 'apellido'] },
+        {
+          model: AgendaTurnosReservasModel,
+          as: 'reservas',
+          where: { estado: 'reservada' },
+          required: false,
+          include: [
+            { model: AlumnosModel, as: 'alumno', attributes: ['id', 'nombre', 'apellido', 'dni'] }
+          ]
+        }
+      ],
+      order: [['fecha', 'ASC'], ['hora_inicio', 'ASC']]
+    });
+
+    const turnosPlanos = turnos.map((t) => t.toJSON());
+
+    const reservaIds = turnosPlanos.flatMap((t) => (t.reservas || []).map((r) => r.id));
+
+    const asistencias = reservaIds.length
+      ? await AlumnosAsistenciasModel.findAll({
+          where: { reserva_id: { [Op.in]: reservaIds } }
+        })
+      : [];
+
+    const asistenciaPorReserva = new Map(asistencias.map((a) => [a.reserva_id, a]));
+
+    const filas = [];
+    for (const turno of turnosPlanos) {
+      for (const reserva of turno.reservas || []) {
+        const asistencia = asistenciaPorReserva.get(reserva.id);
+        filas.push({
+          fecha: turno.fecha,
+          hora_inicio: turno.hora_inicio,
+          hora_fin: turno.hora_fin,
+          nombre_clase: turno.nombre_clase,
+          sede: turno.sede?.nombre || null,
+          profesor: turno.profesor ? `${turno.profesor.nombre} ${turno.profesor.apellido}` : null,
+          alumno_nombre: reserva.alumno?.nombre || null,
+          alumno_apellido: reserva.alumno?.apellido || null,
+          alumno_dni: reserva.alumno?.dni || null,
+          // Mismo default que OBRS_TurnosAsistenciaDia_CTS: una reserva sin
+          // registro explícito en agenda_alumnos_asistencias nace 'asistio'.
+          estado_asistencia: asistencia?.estado ?? 'asistio'
+        });
+      }
+    }
+
+    return res.status(200).json({ status: 'success', data: filas });
+  } catch (error) {
+    console.error('[OBRS_AsistenciasRango_CTS]', error);
+    return res.status(500).json({ message: 'Error al obtener el historial de asistencias.' });
+  }
+};
+
+/*
  * Benjamin Orellana - 2026/07/22
  * Historial diario de reservas canceladas. Se mantiene separado del endpoint
  * operativo de asistencia para no mezclar cancelaciones con alumnos activos.

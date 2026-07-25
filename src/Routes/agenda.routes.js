@@ -29,6 +29,7 @@ import {
 import {
   OBRS_Turnos_CTS,
   OBRS_TurnosAsistenciaDia_CTS,
+  OBRS_AsistenciasRango_CTS,
   OBRS_HistorialCancelaciones_CTS,
   OBRS_DetTurno_CTS,
   CR_Turno_CTS,
@@ -154,6 +155,18 @@ router.get(
   authenticateToken,
   requireRolGlobal(ROLES_ADMIN),
   OBRS_TurnosAsistenciaDia_CTS
+);
+
+/*
+ * Sergio Manrique - 2026/07/24 - Historial de asistencias en un rango de
+ * fechas, en formato plano, para exportar a Excel.
+ * Query params: sede_id, fecha_desde, fecha_hasta (todos requeridos).
+ */
+router.get(
+  '/agenda-admin/asistencias-rango',
+  authenticateToken,
+  requireRolGlobal(ROLES_ADMIN),
+  OBRS_AsistenciasRango_CTS
 );
 
 /*

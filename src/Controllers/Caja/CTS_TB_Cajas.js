@@ -16,7 +16,8 @@ import PagosMediosPagoModel from '../../Models/Pago/MD_TB_PagosMediosPago.js';
 const ESTADOS_SESION = ['abierta', 'cerrada', 'anulada'];
 const TIPOS_MOVIMIENTO = ['ingreso', 'egreso'];
 
-const redondear = (valor) => Math.round((Number(valor || 0) + Number.EPSILON) * 100) / 100;
+const redondear = (valor) =>
+  Math.round((Number(valor || 0) + Number.EPSILON) * 100) / 100;
 const numeroPositivo = (valor) => {
   const numero = Number(valor);
   return Number.isFinite(numero) && numero > 0 ? redondear(numero) : null;
@@ -37,7 +38,8 @@ const fechaArgentina = () =>
     month: '2-digit',
     day: '2-digit'
   }).format(new Date());
-const esFechaValida = (valor) => /^\d{4}-\d{2}-\d{2}$/.test(String(valor || ''));
+const esFechaValida = (valor) =>
+  /^\d{4}-\d{2}-\d{2}$/.test(String(valor || ''));
 const usuarioId = (req) => Number(req.user?.id || req.user?.usuario_id || 0);
 
 const errorRespuesta = (res, error, nombre) => {
@@ -128,6 +130,11 @@ const listarMovimientosSesion = async (sesionId, transaction = null) =>
        CONCAT_WS(' ', ur.nombre, ur.apellido) AS usuario_nombre,
        c.id AS cobro_id,
        c.cliente_tipo,
+       c.total AS cobro_total,
+       COALESCE(cd.total_planes, 0) AS total_planes,
+       COALESCE(cd.total_productos, 0) AS total_productos,
+       COALESCE(cd.total_servicios, 0) AS total_servicios,
+       cd.conceptos_nombres,
        COALESCE(
          NULLIF(CONCAT_WS(' ', aa.nombre, aa.apellido), ''),
          NULLIF(CONCAT_WS(' ', uc.nombre, uc.apellido), ''),
@@ -138,6 +145,20 @@ const listarMovimientosSesion = async (sesionId, transaction = null) =>
      LEFT JOIN usuarios_usuarios ur ON ur.id = cm.usuario_registro_id
      LEFT JOIN cobros_pagos cp ON cp.id = cm.cobro_pago_id
      LEFT JOIN cobros_cobros c ON c.id = cp.cobro_id
+     LEFT JOIN (
+       SELECT
+         cobro_id,
+         SUM(CASE WHEN tipo = 'plan' THEN total ELSE 0 END) AS total_planes,
+         SUM(CASE WHEN tipo = 'producto' THEN total ELSE 0 END) AS total_productos,
+         SUM(CASE WHEN tipo = 'servicio' THEN total ELSE 0 END) AS total_servicios,
+         GROUP_CONCAT(
+           DISTINCT nombre_snapshot
+           ORDER BY nombre_snapshot
+           SEPARATOR ' · '
+         ) AS conceptos_nombres
+       FROM cobros_detalles
+       GROUP BY cobro_id
+     ) cd ON cd.cobro_id = c.id
      LEFT JOIN alumnos_alumnos aa ON aa.id = c.alumno_id
      LEFT JOIN usuarios_usuarios uc ON uc.id = c.cliente_usuario_id
      WHERE cm.caja_sesion_id = :sesion_id
@@ -228,7 +249,11 @@ const cargarResumenSesion = async (sesion, transaction = null) => {
   return {
     sesion: {
       ...plano,
-      caja: caja ? (typeof caja.toJSON === 'function' ? caja.toJSON() : caja) : null
+      caja: caja
+        ? typeof caja.toJSON === 'function'
+          ? caja.toJSON()
+          : caja
+        : null
     },
     resumen: calcularResumen({ sesion: plano, movimientos }),
     movimientos
@@ -265,7 +290,12 @@ export const OBR_ResumenCaja_CTS = async (req, res) => {
     const sesionId = Number(req.query.sesion_id || 0);
 
     if (!esFechaValida(fecha)) {
-      return res.status(400).json({ ok: false, message: 'La fecha debe tener formato YYYY-MM-DD.' });
+      return res
+        .status(400)
+        .json({
+          ok: false,
+          message: 'La fecha debe tener formato YYYY-MM-DD.'
+        });
     }
 
     let sesion = null;
@@ -306,7 +336,9 @@ export const OBR_ResumenCaja_CTS = async (req, res) => {
       ok: true,
       fecha,
       data,
-      message: data ? 'Resumen de caja obtenido correctamente.' : 'No hay sesión de caja para la fecha seleccionada.'
+      message: data
+        ? 'Resumen de caja obtenido correctamente.'
+        : 'No hay sesión de caja para la fecha seleccionada.'
     });
   } catch (error) {
     return errorRespuesta(res, error, 'OBR_ResumenCaja_CTS');
@@ -321,10 +353,14 @@ export const OBR_SesionesCaja_CTS = async (req, res) => {
     const estado = req.query.estado ? String(req.query.estado) : null;
 
     if (!esFechaValida(desde) || !esFechaValida(hasta)) {
-      return res.status(400).json({ ok: false, message: 'El rango de fechas no es válido.' });
+      return res
+        .status(400)
+        .json({ ok: false, message: 'El rango de fechas no es válido.' });
     }
     if (estado && !ESTADOS_SESION.includes(estado)) {
-      return res.status(400).json({ ok: false, message: 'El estado de caja no es válido.' });
+      return res
+        .status(400)
+        .json({ ok: false, message: 'El estado de caja no es válido.' });
     }
 
     const sesiones = await db.query(
@@ -359,7 +395,9 @@ export const CR_AbrirCajaPrincipal_CTS = async (req, res) => {
     const observaciones = texto(req.body.observaciones);
 
     if (montoInicial === null) {
-      const error = new Error('El monto inicial debe ser un número mayor o igual a cero.');
+      const error = new Error(
+        'El monto inicial debe ser un número mayor o igual a cero.'
+      );
       error.status = 400;
       throw error;
     }
@@ -418,7 +456,12 @@ export const CR_AbrirCajaPrincipal_CTS = async (req, res) => {
       }
     });
   } catch (error) {
-    return responderErrorOperacion({ res, error, transaction, nombre: 'CR_AbrirCajaPrincipal_CTS' });
+    return responderErrorOperacion({
+      res,
+      error,
+      transaction,
+      nombre: 'CR_AbrirCajaPrincipal_CTS'
+    });
   }
 };
 
@@ -454,7 +497,9 @@ export const CR_MovimientoManualCaja_CTS = async (req, res) => {
       const movimientos = await listarMovimientosSesion(sesion.id, transaction);
       const resumen = calcularResumen({ sesion, movimientos });
       if (monto > resumen.efectivo_esperado + 0.009) {
-        const error = new Error('El retiro supera el efectivo esperado en caja.');
+        const error = new Error(
+          'El retiro supera el efectivo esperado en caja.'
+        );
         error.status = 409;
         throw error;
       }
@@ -482,11 +527,19 @@ export const CR_MovimientoManualCaja_CTS = async (req, res) => {
     await transaction.commit();
     return res.status(201).json({
       ok: true,
-      message: tipo === 'ingreso' ? 'Ingreso registrado correctamente.' : 'Retiro registrado correctamente.',
+      message:
+        tipo === 'ingreso'
+          ? 'Ingreso registrado correctamente.'
+          : 'Retiro registrado correctamente.',
       data: movimiento
     });
   } catch (error) {
-    return responderErrorOperacion({ res, error, transaction, nombre: 'CR_MovimientoManualCaja_CTS' });
+    return responderErrorOperacion({
+      res,
+      error,
+      transaction,
+      nombre: 'CR_MovimientoManualCaja_CTS'
+    });
   }
 };
 
@@ -496,7 +549,9 @@ export const UR_RegistrarConteoCaja_CTS = async (req, res) => {
     const sedeId = Number(req.body.sede_id);
     const montoContado = numeroNoNegativo(req.body.monto_contado);
     if (montoContado === null) {
-      const error = new Error('El monto contado debe ser mayor o igual a cero.');
+      const error = new Error(
+        'El monto contado debe ser mayor o igual a cero.'
+      );
       error.status = 400;
       throw error;
     }
@@ -520,10 +575,19 @@ export const UR_RegistrarConteoCaja_CTS = async (req, res) => {
     return res.status(200).json({
       ok: true,
       message: 'Conteo de efectivo guardado correctamente.',
-      data: { monto_contado: montoContado, monto_esperado: resumen.efectivo_esperado, diferencia }
+      data: {
+        monto_contado: montoContado,
+        monto_esperado: resumen.efectivo_esperado,
+        diferencia
+      }
     });
   } catch (error) {
-    return responderErrorOperacion({ res, error, transaction, nombre: 'UR_RegistrarConteoCaja_CTS' });
+    return responderErrorOperacion({
+      res,
+      error,
+      transaction,
+      nombre: 'UR_RegistrarConteoCaja_CTS'
+    });
   }
 };
 
@@ -539,7 +603,9 @@ export const UR_CerrarCaja_CTS = async (req, res) => {
         : numeroNoNegativo(montoBody);
 
     if (montoContado === null) {
-      const error = new Error('Antes de cerrar la caja debe registrar el efectivo contado.');
+      const error = new Error(
+        'Antes de cerrar la caja debe registrar el efectivo contado.'
+      );
       error.status = 400;
       throw error;
     }
@@ -571,6 +637,11 @@ export const UR_CerrarCaja_CTS = async (req, res) => {
       data: await cargarResumenSesion(sesion)
     });
   } catch (error) {
-    return responderErrorOperacion({ res, error, transaction, nombre: 'UR_CerrarCaja_CTS' });
+    return responderErrorOperacion({
+      res,
+      error,
+      transaction,
+      nombre: 'UR_CerrarCaja_CTS'
+    });
   }
 };

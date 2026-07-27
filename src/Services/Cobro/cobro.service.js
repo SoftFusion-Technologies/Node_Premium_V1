@@ -391,13 +391,13 @@ const resolverPagos = async ({ pagos, total, transaction }) => {
   const totalPagado = redondear(
     resueltos.reduce((suma, item) => suma + item.monto, 0),
   );
-  if (Math.abs(totalPagado - total) > 0.009) {
+  if (totalPagado - total > 0.009) {
     throw new CobroOperacionError(
-      "La suma de los medios de pago debe coincidir con el total del cobro.",
+      "La suma de los medios de pago no puede superar el total del cobro.",
     );
   }
 
-  return resueltos;
+  return { pagos: resueltos, totalPagado };
 };
 
 const prepararConsumoSaldo = async ({ pagos, alumnoId, transaction }) => {
@@ -485,6 +485,7 @@ const crearMembresiaPlan = async ({
   sedeId,
   linea,
   estadoCobro,
+  montoPagado,
   medioPagoId,
   usuarioId,
   cobroId,
@@ -590,6 +591,17 @@ const crearMembresiaPlan = async ({
     linea.cantidad_clases_periodo ?? linea.clases_por_mes ?? 0,
   );
   const confirmado = estadoCobro === "confirmado";
+  const montoPagadoConfirmado = confirmado
+    ? redondear(Math.min(Number(montoPagado || 0), Number(linea.total)))
+    : 0;
+  const saldoMensualidad = redondear(
+    Math.max(Number(linea.total) - montoPagadoConfirmado, 0),
+  );
+  const estadoMensualidad = confirmado
+    ? saldoMensualidad > 0.009
+      ? "parcial"
+      : "pagada"
+    : "pendiente";
   const basePlan = redondear(linea.importe - linea.descuento_importe);
 
   const membresia = await AlumnosMembresiasModel.create(
@@ -633,9 +645,11 @@ const crearMembresiaPlan = async ({
       fecha_emision: hoy,
       fecha_vencimiento: fechaVencimiento,
       monto_total: Number(linea.total).toFixed(2),
-      monto_pagado: confirmado ? Number(linea.total).toFixed(2) : "0.00",
-      saldo: confirmado ? "0.00" : Number(linea.total).toFixed(2),
-      estado: confirmado ? "pagada" : "pendiente",
+      monto_pagado: montoPagadoConfirmado.toFixed(2),
+      saldo: confirmado
+        ? saldoMensualidad.toFixed(2)
+        : Number(linea.total).toFixed(2),
+      estado: estadoMensualidad,
       observaciones: cambiarPlanAhora
         ? `Generada por cobro #${cobroId} | Cambio de plan inmediato desde membresía #${membresiaVigente.id}`
         : renovarAhoraPorCuposAgotados
@@ -693,7 +707,7 @@ const crearMembresiaPlan = async ({
       usuario_registro_id: Number(usuarioId),
       usuario_validacion_id: confirmado ? Number(usuarioId) : null,
       fecha_pago: new Date(),
-      monto: Number(linea.total).toFixed(2),
+      monto: Number(montoPagado).toFixed(2),
       estado: confirmado ? "confirmado" : "pendiente_validacion",
       referencia: `COBRO-${cobroId}`,
       observaciones: `Pago de plan generado por cobro #${cobroId}`,
@@ -891,11 +905,31 @@ export const registrarCobro = async ({ payload, usuario }) => {
         "El total del cobro debe ser mayor a cero.",
       );
 
-    const pagos = await resolverPagos({
+    const pagosResueltos = await resolverPagos({
       pagos: payload.pagos,
       total: resumen.total,
       transaction,
     });
+    const pagos = pagosResueltos.pagos;
+    const totalPagado = pagosResueltos.totalPagado;
+    const esPagoParcial = totalPagado + 0.009 < resumen.total;
+    const solicitaPagoParcial =
+      payload.pago_parcial === true || Number(payload.pago_parcial) === 1;
+
+    if (esPagoParcial) {
+      if (!solicitaPagoParcial) {
+        throw new CobroOperacionError(
+          "La suma de los medios de pago debe coincidir con el total del cobro.",
+        );
+      }
+      if (conceptos.length !== 1 || !lineaPlan) {
+        throw new CobroOperacionError(
+          "El pago parcial solo está disponible cuando el cobro contiene un único plan.",
+          409,
+          "PAGO_PARCIAL_NO_PERMITIDO",
+        );
+      }
+    }
     const consumoSaldo = await prepararConsumoSaldo({
       pagos,
       alumnoId: alumno?.id,
@@ -927,7 +961,16 @@ export const registrarCobro = async ({ payload, usuario }) => {
         impuestos: resumen.impuestos.toFixed(2),
         total: resumen.total.toFixed(2),
         estado: estadoCobro,
-        observaciones: payload.observaciones || null,
+        observaciones: esPagoParcial
+          ? [
+              payload.observaciones,
+              `Pago parcial ${totalPagado.toFixed(2)}; deuda ${redondear(
+                resumen.total - totalPagado,
+              ).toFixed(2)}`,
+            ]
+              .filter(Boolean)
+              .join(" | ")
+          : payload.observaciones || null,
       },
       { transaction },
     );
@@ -988,6 +1031,7 @@ export const registrarCobro = async ({ payload, usuario }) => {
           sedeId,
           linea,
           estadoCobro,
+          montoPagado: totalPagado,
           medioPagoId: medioPagoPlan.medio_pago_id,
           usuarioId,
           cobroId: cobro.id,
@@ -1026,7 +1070,7 @@ export const registrarCobro = async ({ payload, usuario }) => {
           tipo: "ingreso",
           fecha: fechaArgentina(),
           descripcion: `Cobro #${cobro.id}`,
-          monto: resumen.total.toFixed(2),
+          monto: totalPagado.toFixed(2),
           origen: esCobroExclusivoDePlan ? "pago_alumno" : "manual",
           referencia: `COBRO-${cobro.id}`,
           usuario_registro_id: usuarioId,
@@ -1199,11 +1243,16 @@ const aplicarPlanPendiente = async ({ detalle, usuarioId, transaction }) => {
     { estado: "activa", updated_at: new Date() },
     { transaction },
   );
+  const montoTotal = Number(mensualidad.monto_total || 0);
+  const montoPagado = redondear(
+    Math.min(Number(pago.monto || 0), montoTotal),
+  );
+  const saldoPendiente = redondear(Math.max(montoTotal - montoPagado, 0));
   await mensualidad.update(
     {
-      monto_pagado: Number(mensualidad.monto_total).toFixed(2),
-      saldo: "0.00",
-      estado: "pagada",
+      monto_pagado: montoPagado.toFixed(2),
+      saldo: saldoPendiente.toFixed(2),
+      estado: saldoPendiente > 0.009 ? "parcial" : "pagada",
       updated_at: new Date(),
     },
     { transaction },
@@ -1330,6 +1379,13 @@ export const confirmarCobroPendiente = async ({
         "PAGO_PENDIENTE_NO_ENCONTRADO",
       );
     }
+    const totalPagado = redondear(
+      pagosCobro.reduce(
+        (acumulado, pagoCobro) =>
+          acumulado + Number(pagoCobro.monto || 0),
+        0,
+      ),
+    );
 
     let pagoPlan = null;
     for (const detalle of detalles) {
@@ -1356,7 +1412,7 @@ export const confirmarCobroPendiente = async ({
         tipo: "ingreso",
         fecha: fechaArgentina(),
         descripcion: `Cobro #${cobro.id} validado`,
-        monto: Number(cobro.total).toFixed(2),
+        monto: totalPagado.toFixed(2),
         origen: esCobroExclusivoDePlan ? "pago_alumno" : "manual",
         referencia: `COBRO-${cobro.id}`,
         usuario_registro_id: usuarioId,
@@ -1865,6 +1921,13 @@ export const anularCobroConfirmado = async ({
         "PAGOS_COBRO_INCONSISTENTES",
       );
     }
+    const totalPagadoCobro = redondear(
+      pagosCobro.reduce(
+        (acumulado, pagoCobro) =>
+          acumulado + Number(pagoCobro.monto || 0),
+        0,
+      ),
+    );
 
     for (const detalle of detalles) {
       await validarYRevertirPlan({
@@ -1890,7 +1953,7 @@ export const anularCobroConfirmado = async ({
         tipo: "egreso",
         fecha: fechaArgentina(),
         descripcion: `Anulación de cobro #${cobro.id}`,
-        monto: Number(cobro.total).toFixed(2),
+        monto: totalPagadoCobro.toFixed(2),
         origen: "ajuste",
         referencia: `ANULACION-COBRO-${cobro.id}`,
         usuario_registro_id: usuarioId,

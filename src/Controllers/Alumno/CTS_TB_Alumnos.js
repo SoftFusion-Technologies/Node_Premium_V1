@@ -1097,7 +1097,14 @@ export const OBR_AlumnosSelectorCobro_CTS = async (req, res) => {
       });
     }
 
-    const { q, sede_id, page = 1, limit = 40 } = req.query;
+    const {
+      q,
+      sede_id,
+      page = 1,
+      limit = 40,
+      orden = 'asc',
+      situacion_financiera = 'todos'
+    } = req.query;
     const where = {};
     const scope = aplicarScopeSedesAlumnos(where, req.user, sede_id);
 
@@ -1105,6 +1112,34 @@ export const OBR_AlumnosSelectorCobro_CTS = async (req, res) => {
       return res.status(scope.status).json({
         ok: false,
         message: scope.message
+      });
+    }
+
+    const aliasAlumno = db
+      .getQueryInterface()
+      .queryGenerator.quoteIdentifier(AlumnosModel.name);
+    const saldoFavorSql = `COALESCE((
+      SELECT MAX(als.saldo)
+      FROM alumnos_saldos AS als
+      WHERE als.alumno_id = ${aliasAlumno}.id
+    ), 0)`;
+    const saldoDeudorSql = `COALESCE((
+      SELECT SUM(pm.saldo)
+      FROM pagos_mensualidades AS pm
+      WHERE pm.alumno_id = ${aliasAlumno}.id
+        AND pm.estado IN ('pendiente', 'parcial', 'vencida')
+        AND pm.saldo > 0
+    ), 0)`;
+    const filtroFinanciero = String(situacion_financiera)
+      .trim()
+      .toLowerCase();
+    const filtrosFinancierosValidos = ['todos', 'deuda', 'saldo_favor'];
+
+    if (!filtrosFinancierosValidos.includes(filtroFinanciero)) {
+      return res.status(400).json({
+        ok: false,
+        message:
+          'El filtro financiero debe ser todos, deuda o saldo_favor.'
       });
     }
 
@@ -1117,9 +1152,25 @@ export const OBR_AlumnosSelectorCobro_CTS = async (req, res) => {
       ];
     }
 
+    if (filtroFinanciero === 'deuda') {
+      where[Op.and] = [
+        ...(where[Op.and] || []),
+        db.literal(`${saldoDeudorSql} > 0`)
+      ];
+    }
+
+    if (filtroFinanciero === 'saldo_favor') {
+      where[Op.and] = [
+        ...(where[Op.and] || []),
+        db.literal(`${saldoFavorSql} > 0`)
+      ];
+    }
+
     const pageNumber = Math.max(Number(page) || 1, 1);
     const limitNumber = Math.min(Math.max(Number(limit) || 40, 1), 100);
     const offset = (pageNumber - 1) * limitNumber;
+    const direccionOrden =
+      String(orden).trim().toLowerCase() === 'desc' ? 'DESC' : 'ASC';
 
     const { rows, count } = await AlumnosModel.findAndCountAll({
       where,
@@ -1131,14 +1182,16 @@ export const OBR_AlumnosSelectorCobro_CTS = async (req, res) => {
         'dni',
         'telefono',
         'email',
-        'estado'
+        'estado',
+        [db.literal(saldoFavorSql), 'saldo_favor'],
+        [db.literal(saldoDeudorSql), 'saldo_deudor']
       ],
       limit: limitNumber,
       offset,
       order: [
-        ['apellido', 'ASC'],
-        ['nombre', 'ASC'],
-        ['id', 'ASC']
+        ['nombre', direccionOrden],
+        ['apellido', direccionOrden],
+        ['id', direccionOrden]
       ]
     });
 

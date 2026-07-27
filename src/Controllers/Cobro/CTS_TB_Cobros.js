@@ -136,6 +136,20 @@ export const OBR_Cobros_CTS = async (req, res) => {
         `SELECT c.id, c.fecha_cobro, c.cliente_tipo, c.alumno_id,
           c.cliente_usuario_id, c.importe, c.descuentos, c.impuestos,
           c.total, c.moneda, c.estado,
+          COALESCE((
+            SELECT SUM(cp_total.monto)
+            FROM cobros_pagos cp_total
+            WHERE cp_total.cobro_id = c.id
+          ), 0) AS total_pagado,
+          CASE
+            WHEN c.estado IN ('confirmado', 'pendiente_validacion') THEN
+              GREATEST(c.total - COALESCE((
+                SELECT SUM(cp_saldo.monto)
+                FROM cobros_pagos cp_saldo
+                WHERE cp_saldo.cobro_id = c.id
+              ), 0), 0)
+            ELSE 0
+          END AS saldo_pendiente,
           CASE
             WHEN c.cliente_tipo = 'alumno' THEN CONCAT_WS(' ', a.nombre, a.apellido)
             WHEN c.cliente_tipo = 'empleado' THEN CONCAT_WS(' ', uc.nombre, uc.apellido)
@@ -170,7 +184,12 @@ export const OBR_Cobros_CTS = async (req, res) => {
       ),
       db.query(
         `SELECT COUNT(*) AS cantidad,
-          COALESCE(SUM(CASE WHEN c.estado = 'confirmado' THEN c.total ELSE 0 END), 0) AS total_confirmado,
+          COALESCE(SUM(CASE WHEN c.estado = 'confirmado' THEN (
+            SELECT COALESCE(SUM(cp_confirmado.monto), 0)
+            FROM cobros_pagos cp_confirmado
+            WHERE cp_confirmado.cobro_id = c.id
+              AND cp_confirmado.estado = 'confirmado'
+          ) ELSE 0 END), 0) AS total_confirmado,
           SUM(CASE WHEN c.estado = 'pendiente_validacion' THEN 1 ELSE 0 END) AS pendientes,
           SUM(CASE WHEN c.estado = 'rechazado' THEN 1 ELSE 0 END) AS rechazados,
           SUM(CASE WHEN c.estado = 'anulado' THEN 1 ELSE 0 END) AS anulados
@@ -247,6 +266,20 @@ export const OBR_CobroDetalle_CTS = async (req, res) => {
     };
     const cabeceras = await db.query(
       `SELECT c.*,
+        COALESCE((
+          SELECT SUM(cp_total.monto)
+          FROM cobros_pagos cp_total
+          WHERE cp_total.cobro_id = c.id
+        ), 0) AS total_pagado,
+        CASE
+          WHEN c.estado IN ('confirmado', 'pendiente_validacion') THEN
+            GREATEST(c.total - COALESCE((
+              SELECT SUM(cp_saldo.monto)
+              FROM cobros_pagos cp_saldo
+              WHERE cp_saldo.cobro_id = c.id
+            ), 0), 0)
+          ELSE 0
+        END AS saldo_pendiente,
         CASE
           WHEN c.cliente_tipo = 'alumno' THEN CONCAT_WS(' ', a.nombre, a.apellido)
           WHEN c.cliente_tipo = 'empleado' THEN CONCAT_WS(' ', uc.nombre, uc.apellido)

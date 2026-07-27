@@ -113,7 +113,7 @@ const GastosGastosModel = db.define(
     estado: {
       type: DataTypes.ENUM('pendiente', 'pagado', 'anulado'),
       allowNull: false,
-      defaultValue: 'pagado'
+      defaultValue: 'pendiente'
     },
 
     origen: {

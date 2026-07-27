@@ -9,6 +9,9 @@ import GastosGastosModel from '../../Models/Gastos/MD_TB_GastosGastos.js';
 import GastosTiposModel from '../../Models/Gastos/MD_TB_GastosTipos.js';
 import GastosProveedoresModel from '../../Models/Gastos/MD_TB_GastosProveedores.js';
 import GastosPeriodicosModel from '../../Models/Gastos/MD_TB_GastosPeriodicos.js';
+import CajasMovimientosModel from '../../Models/Caja/MD_TB_CajasMovimientos.js';
+import CajasSesionesModel from '../../Models/Caja/MD_TB_CajasSesiones.js';
+import PagosMediosPagoModel from '../../Models/Pago/MD_TB_PagosMediosPago.js';
 
 import {
   anexarSedesARegistros,
@@ -23,12 +26,298 @@ import {
   normalizarFecha,
   normalizarTexto,
   normalizarTinyint,
+  obtenerFechaActualDateOnly,
   ORIGENES_GASTO_VALIDOS,
   toNumberOrNull,
   validarRolLecturaGastos,
   validarRolOperacionGastos,
   validarSedeTipoProveedor
 } from './gastos.helpers.js';
+
+const ESTADO_MOVIMIENTO_VIGENTE = 'vigente';
+
+const usuarioId = (req) =>
+  Number(req.user?.id || req.user?.usuario_id || 0);
+
+const crearErrorOperacion = (message, status = 409) => {
+  const error = new Error(message);
+  error.status = status;
+  return error;
+};
+
+const obtenerMedioPagoCaja = async (medioPagoId, transaction) => {
+  const id = toNumberOrNull(medioPagoId);
+
+  if (!id) {
+    throw crearErrorOperacion(
+      'Debe seleccionar el medio de pago utilizado para registrar el gasto.',
+      400
+    );
+  }
+
+  const medioPago = await PagosMediosPagoModel.findOne({
+    where: {
+      id,
+      activo: 1,
+      impacta_caja: 1
+    },
+    transaction,
+    lock: transaction.LOCK.UPDATE
+  });
+
+  if (!medioPago || String(medioPago.codigo || '').toUpperCase() === 'SALDO_FAVOR') {
+    throw crearErrorOperacion(
+      'El medio de pago seleccionado no está activo o no impacta en Caja.',
+      400
+    );
+  }
+
+  return medioPago;
+};
+
+const obtenerSesionAbierta = async (sedeId, transaction) => {
+  if (!sedeId) {
+    throw crearErrorOperacion(
+      'La sede es obligatoria para registrar un gasto pagado en Caja.',
+      400
+    );
+  }
+
+  const sesion = await CajasSesionesModel.findOne({
+    where: {
+      sede_id: Number(sedeId),
+      estado: 'abierta'
+    },
+    order: [['id', 'DESC']],
+    transaction,
+    lock: transaction.LOCK.UPDATE
+  });
+
+  if (!sesion) {
+    throw crearErrorOperacion(
+      'No hay una caja abierta en la sede seleccionada. Abrí la caja antes de marcar el gasto como pagado.'
+    );
+  }
+
+  return sesion;
+};
+
+const obtenerMovimientoGastoVigente = async (gastoId, transaction) => {
+  return CajasMovimientosModel.findOne({
+    where: {
+      gasto_id: Number(gastoId),
+      tipo: 'egreso',
+      origen: 'gasto',
+      estado: ESTADO_MOVIMIENTO_VIGENTE
+    },
+    order: [['id', 'DESC']],
+    transaction,
+    lock: transaction.LOCK.UPDATE
+  });
+};
+
+const validarEfectivoDisponible = async ({
+  sesion,
+  medioPago,
+  importe,
+  transaction
+}) => {
+  const esEfectivo =
+    String(medioPago.tipo || '').toLowerCase() === 'efectivo' ||
+    String(medioPago.codigo || '').toUpperCase() === 'EFECTIVO';
+
+  if (!esEfectivo) return;
+
+  const movimientos = await CajasMovimientosModel.findAll({
+    where: {
+      caja_sesion_id: Number(sesion.id),
+      estado: ESTADO_MOVIMIENTO_VIGENTE
+    },
+    transaction
+  });
+  const mediosIds = [
+    ...new Set(
+      movimientos
+        .map((movimiento) => Number(movimiento.medio_pago_id))
+        .filter(Boolean)
+    )
+  ];
+  const medios = mediosIds.length
+    ? await PagosMediosPagoModel.findAll({
+        where: {
+          id: {
+            [Op.in]: mediosIds
+          }
+        },
+        attributes: ['id', 'codigo', 'tipo'],
+        transaction
+      })
+    : [];
+  const mediosMap = medios.reduce((acc, medio) => {
+    acc[Number(medio.id)] = medio;
+    return acc;
+  }, {});
+
+  const efectivoNeto = movimientos.reduce((total, movimiento) => {
+    const medio = mediosMap[Number(movimiento.medio_pago_id)];
+    const movimientoEsEfectivo =
+      String(medio?.tipo || '').toLowerCase() === 'efectivo' ||
+      String(medio?.codigo || '').toUpperCase() === 'EFECTIVO';
+
+    if (!movimientoEsEfectivo) return total;
+
+    const monto = Number(movimiento.monto || 0);
+    return total + (movimiento.tipo === 'ingreso' ? monto : -monto);
+  }, 0);
+
+  const efectivoEsperado =
+    Number(sesion.monto_inicial || 0) + Number(efectivoNeto || 0);
+
+  if (Number(importe || 0) > efectivoEsperado + 0.009) {
+    throw crearErrorOperacion(
+      'El gasto supera el efectivo esperado en la caja de la sede seleccionada.'
+    );
+  }
+};
+
+const registrarMovimientoCajaGasto = async ({
+  gasto,
+  medioPagoId,
+  req,
+  transaction
+}) => {
+  const existente = await obtenerMovimientoGastoVigente(gasto.id, transaction);
+
+  if (existente) return existente;
+
+  const medioPago = await obtenerMedioPagoCaja(medioPagoId, transaction);
+  const sesion = await obtenerSesionAbierta(gasto.sede_id, transaction);
+  const importe = Number(gasto.importe_total || 0);
+
+  await validarEfectivoDisponible({
+    sesion,
+    medioPago,
+    importe,
+    transaction
+  });
+
+  return CajasMovimientosModel.create(
+    {
+      caja_sesion_id: Number(sesion.id),
+      caja_id: Number(sesion.caja_id),
+      sede_id: Number(gasto.sede_id),
+      gasto_id: Number(gasto.id),
+      medio_pago_id: Number(medioPago.id),
+      usuario_registro_id: usuarioId(req),
+      tipo: 'egreso',
+      origen: 'gasto',
+      fecha_movimiento: new Date(),
+      monto: importe.toFixed(2),
+      descripcion: `Gasto: ${String(gasto.nombre || '').slice(0, 248)}`,
+      estado: ESTADO_MOVIMIENTO_VIGENTE,
+      referencia: `GASTO-${gasto.id}`,
+      observaciones: gasto.observacion || null
+    },
+    { transaction }
+  );
+};
+
+const anularMovimientoCajaGasto = async ({
+  movimiento,
+  gasto,
+  req,
+  transaction
+}) => {
+  if (!movimiento) return;
+
+  const sesion = await CajasSesionesModel.findByPk(movimiento.caja_sesion_id, {
+    transaction,
+    lock: transaction.LOCK.UPDATE
+  });
+
+  if (!sesion || sesion.estado !== 'abierta') {
+    throw crearErrorOperacion(
+      'No se puede revertir el gasto porque la caja donde se registró ya está cerrada. Conservá el gasto pagado y realizá un ajuste auditable desde Caja si corresponde.'
+    );
+  }
+
+  const detalleReversion = `Movimiento anulado al cambiar el gasto #${gasto.id} a ${gasto.estado}. Usuario: ${usuarioId(req)}.`;
+  const observaciones = [movimiento.observaciones, detalleReversion]
+    .filter(Boolean)
+    .join(' ')
+    .slice(0, 500);
+
+  await movimiento.update(
+    {
+      estado: 'anulado',
+      observaciones,
+      updated_at: new Date()
+    },
+    { transaction }
+  );
+};
+
+const anexarMovimientosCajaAGastos = async (registros = []) => {
+  const planos = registros.map((registro) =>
+    typeof registro?.toJSON === 'function' ? registro.toJSON() : { ...registro }
+  );
+  const gastoIds = planos.map((registro) => Number(registro.id)).filter(Boolean);
+
+  if (!gastoIds.length) return planos;
+
+  const movimientos = await CajasMovimientosModel.findAll({
+    where: {
+      gasto_id: {
+        [Op.in]: gastoIds
+      }
+    },
+    order: [['id', 'DESC']]
+  });
+
+  const medioIds = [
+    ...new Set(
+      movimientos
+        .map((movimiento) => Number(movimiento.medio_pago_id))
+        .filter(Boolean)
+    )
+  ];
+  const medios = medioIds.length
+    ? await PagosMediosPagoModel.findAll({
+        where: {
+          id: {
+            [Op.in]: medioIds
+          }
+        },
+        attributes: ['id', 'nombre', 'codigo', 'tipo', 'impacta_caja']
+      })
+    : [];
+  const mediosMap = medios.reduce((acc, medio) => {
+    const plano = typeof medio.toJSON === 'function' ? medio.toJSON() : medio;
+    acc[Number(plano.id)] = plano;
+    return acc;
+  }, {});
+  const movimientosMap = movimientos.reduce((acc, movimiento) => {
+    const plano =
+      typeof movimiento.toJSON === 'function'
+        ? movimiento.toJSON()
+        : movimiento;
+    const gastoId = Number(plano.gasto_id);
+
+    if (!acc[gastoId]) acc[gastoId] = [];
+    acc[gastoId].push({
+      ...plano,
+      medio_pago: plano.medio_pago_id
+        ? mediosMap[Number(plano.medio_pago_id)] || null
+        : null
+    });
+    return acc;
+  }, {});
+
+  return planos.map((registro) => ({
+    ...registro,
+    movimientos_caja: movimientosMap[Number(registro.id)] || []
+  }));
+};
 
 const buildPayloadGastoCreate = (body = {}) => {
   const importeTotal = normalizarDecimal(body.importe_total, 0);
@@ -50,12 +339,15 @@ const buildPayloadGastoCreate = (body = {}) => {
     nombre: normalizarTexto(body.nombre),
     descripcion: normalizarTexto(body.descripcion),
     fecha_gasto: normalizarFecha(body.fecha_gasto),
-    fecha_pago: normalizarFecha(body.fecha_pago),
+    fecha_pago:
+      normalizarTexto(body.estado) === 'pagado'
+        ? normalizarFecha(body.fecha_pago) || obtenerFechaActualDateOnly()
+        : null,
     importe_total: importeTotal,
     incluye_iva: incluyeIva,
     iva_porcentaje: ivaPorcentaje,
     importe_iva: importeIva,
-    estado: normalizarTexto(body.estado) || 'pagado',
+    estado: normalizarTexto(body.estado) || 'pendiente',
     origen: normalizarTexto(body.origen) || 'manual',
     observacion: normalizarTexto(body.observacion)
   };
@@ -292,7 +584,8 @@ export const OBR_Gastos_CTS = async (req, res) => {
       distinct: true
     });
 
-    const data = await anexarSedesARegistros(rows);
+    const dataConSedes = await anexarSedesARegistros(rows);
+    const data = await anexarMovimientosCajaAGastos(dataConSedes);
 
     return res.status(200).json({
       ok: true,
@@ -338,7 +631,8 @@ export const OBR_GastoPorId_CTS = async (req, res) => {
       });
     }
 
-    const [data] = await anexarSedesARegistros([gasto]);
+    const [dataConSede] = await anexarSedesARegistros([gasto]);
+    const [data] = await anexarMovimientosCajaAGastos([dataConSede]);
 
     return res.status(200).json({
       ok: true,
@@ -396,20 +690,37 @@ export const CR_Gastos_CTS = async (req, res) => {
 
     const nuevoGasto = await GastosGastosModel.create(payload, { transaction });
 
+    if (payload.estado === 'pagado') {
+      await registrarMovimientoCajaGasto({
+        gasto: nuevoGasto,
+        medioPagoId: req.body.medio_pago_id,
+        req,
+        transaction
+      });
+    }
+
     await transaction.commit();
 
     const data = await GastosGastosModel.findByPk(nuevoGasto.id, {
       include: buildIncludeGastos()
     });
     const [dataConSede] = await anexarSedesARegistros([data]);
+    const [dataConCaja] = await anexarMovimientosCajaAGastos([dataConSede]);
 
     return res.status(201).json({
       ok: true,
       message: 'Gasto creado correctamente.',
-      data: dataConSede
+      data: dataConCaja
     });
   } catch (error) {
     if (transaction && !transaction.finished) await transaction.rollback();
+
+    if (error?.status) {
+      return res.status(error.status).json({
+        ok: false,
+        message: error.message
+      });
+    }
 
     return manejarErrorControlador({ res, error, nombre: 'CR_Gastos_CTS' });
   }
@@ -429,7 +740,10 @@ export const UR_Gastos_CTS = async (req, res) => {
     }
 
     const { id } = req.params;
-    const gasto = await GastosGastosModel.findByPk(id, { transaction });
+    const gasto = await GastosGastosModel.findByPk(id, {
+      transaction,
+      lock: transaction.LOCK.UPDATE
+    });
 
     if (!gasto) {
       await transaction.rollback();
@@ -494,13 +808,80 @@ export const UR_Gastos_CTS = async (req, res) => {
       });
     }
 
+    const estadoSiguiente = String(
+      Object.prototype.hasOwnProperty.call(payload, 'estado')
+        ? payload.estado
+        : gasto.estado
+    ).toLowerCase();
+    const movimientoVigente = await obtenerMovimientoGastoVigente(
+      gasto.id,
+      transaction
+    );
+    const cambiaSede =
+      Object.prototype.hasOwnProperty.call(payload, 'sede_id') &&
+      Number(payload.sede_id || 0) !== Number(gasto.sede_id || 0);
+    const cambiaImporte =
+      Object.prototype.hasOwnProperty.call(payload, 'importe_total') &&
+      Math.abs(
+        Number(payload.importe_total || 0) - Number(gasto.importe_total || 0)
+      ) > 0.009;
+    const cambiaMedio =
+      movimientoVigente &&
+      req.body.medio_pago_id !== undefined &&
+      Number(req.body.medio_pago_id || 0) !==
+        Number(movimientoVigente.medio_pago_id || 0);
+
+    if (
+      movimientoVigente &&
+      estadoSiguiente === 'pagado' &&
+      (cambiaSede || cambiaImporte || cambiaMedio)
+    ) {
+      await transaction.rollback();
+
+      return res.status(409).json({
+        ok: false,
+        message:
+          'No se puede modificar la sede, el importe o el medio de pago de un gasto que ya impactó en Caja. Primero revertí el gasto a pendiente.'
+      });
+    }
+
+    if (estadoSiguiente === 'pagado') {
+      payload.fecha_pago =
+        payload.fecha_pago || gasto.fecha_pago || obtenerFechaActualDateOnly();
+    } else if (Object.prototype.hasOwnProperty.call(payload, 'estado')) {
+      payload.fecha_pago = null;
+    }
+
     await gasto.update(payload, { transaction });
+
+    if (estadoSiguiente === 'pagado' && !movimientoVigente) {
+      await registrarMovimientoCajaGasto({
+        gasto,
+        medioPagoId: req.body.medio_pago_id,
+        req,
+        transaction
+      });
+    }
+
+    if (
+      movimientoVigente &&
+      estadoSiguiente !== 'pagado'
+    ) {
+      await anularMovimientoCajaGasto({
+        movimiento: movimientoVigente,
+        gasto,
+        req,
+        transaction
+      });
+    }
+
     await transaction.commit();
 
     const actualizado = await GastosGastosModel.findByPk(id, {
       include: buildIncludeGastos()
     });
-    const [data] = await anexarSedesARegistros([actualizado]);
+    const [dataConSede] = await anexarSedesARegistros([actualizado]);
+    const [data] = await anexarMovimientosCajaAGastos([dataConSede]);
 
     return res.status(200).json({
       ok: true,
@@ -509,6 +890,13 @@ export const UR_Gastos_CTS = async (req, res) => {
     });
   } catch (error) {
     if (transaction && !transaction.finished) await transaction.rollback();
+
+    if (error?.status) {
+      return res.status(error.status).json({
+        ok: false,
+        message: error.message
+      });
+    }
 
     return manejarErrorControlador({ res, error, nombre: 'UR_Gastos_CTS' });
   }
@@ -528,7 +916,10 @@ export const DR_Gastos_CTS = async (req, res) => {
     }
 
     const { id } = req.params;
-    const gasto = await GastosGastosModel.findByPk(id, { transaction });
+    const gasto = await GastosGastosModel.findByPk(id, {
+      transaction,
+      lock: transaction.LOCK.UPDATE
+    });
 
     if (!gasto) {
       await transaction.rollback();
@@ -550,6 +941,37 @@ export const DR_Gastos_CTS = async (req, res) => {
       });
     }
 
+    const movimientosCaja = await CajasMovimientosModel.count({
+      where: {
+        gasto_id: Number(gasto.id)
+      },
+      transaction
+    });
+
+    if (movimientosCaja > 0 || gasto.estado === 'pagado') {
+      await transaction.rollback();
+
+      return res.status(409).json({
+        ok: false,
+        message:
+          'No se puede eliminar físicamente un gasto que ya impactó en Caja.',
+        detalle:
+          'Conservá el registro para mantener la trazabilidad financiera. Si la caja sigue abierta, primero podés revertirlo a pendiente.',
+        asociaciones_detectadas: {
+          cajas_movimientos: Number(movimientosCaja)
+        },
+        asociaciones:
+          movimientosCaja > 0
+            ? [
+                {
+                  tabla: 'cajas_movimientos',
+                  cantidad: Number(movimientosCaja)
+                }
+              ]
+            : []
+      });
+    }
+
     const data = typeof gasto.toJSON === 'function' ? gasto.toJSON() : gasto;
 
     await gasto.destroy({ transaction });
@@ -562,6 +984,13 @@ export const DR_Gastos_CTS = async (req, res) => {
     });
   } catch (error) {
     if (transaction && !transaction.finished) await transaction.rollback();
+
+    if (error?.status) {
+      return res.status(error.status).json({
+        ok: false,
+        message: error.message
+      });
+    }
 
     return manejarErrorControlador({ res, error, nombre: 'DR_Gastos_CTS' });
   }

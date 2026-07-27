@@ -18,7 +18,6 @@ import {
   buildPagination,
   calcularImporteIva,
   esFechaDateOnlyValida,
-  ESTADOS_GASTO_VALIDOS,
   FRECUENCIAS_GASTO_PERIODICO_VALIDAS,
   manejarErrorControlador,
   normalizarDecimal,
@@ -406,15 +405,14 @@ export const CR_GenerarGastoDesdePeriodico_CTS = async (req, res) => {
     }
 
     const fechaGasto = normalizarFecha(req.body.fecha_gasto) || periodico.proxima_fecha_generacion || obtenerFechaActualDateOnly();
-    const estado = normalizarTexto(req.body.estado) || 'pagado';
-    const fechaPago = normalizarFecha(req.body.fecha_pago) || (estado === 'pagado' ? fechaGasto : null);
+    // Benjamin Orellana - 2026/07/27 - Un periódico genera la obligación pendiente.
+    // El egreso se registra después desde Gastos, al seleccionar medio de pago y caja.
+    const estado = 'pendiente';
+    const fechaPago = null;
 
     const errores = [];
 
     if (!esFechaDateOnlyValida(fechaGasto)) errores.push('La fecha del gasto debe tener formato YYYY-MM-DD.');
-    if (fechaPago && !esFechaDateOnlyValida(fechaPago)) errores.push('La fecha de pago debe tener formato YYYY-MM-DD.');
-    if (!ESTADOS_GASTO_VALIDOS.includes(estado)) errores.push('El estado del gasto indicado no es válido.');
-
     if (periodico.fecha_fin && fechaGasto > periodico.fecha_fin) {
       errores.push('La fecha del gasto supera la fecha de fin del gasto periódico.');
     }

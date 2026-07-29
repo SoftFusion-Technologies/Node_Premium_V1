@@ -9,8 +9,7 @@ import AlumnosModel from '../../Models/Alumno/MD_TB_Alumnos.js';
 import AlumnosAnamnesisModel from '../../Models/Alumno/MD_TB_AlumnosAnamnesis.js';
 import UsuariosModel from '../../Models/Usuario/MD_TB_Usuarios.js';
 import AlumnosAnamnesisHistorialModel from '../../Models/Alumno/MD_TB_AlumnosAnamnesisHistorial.js';
-
-const ROLES_GLOBALES = ['SUPER_ADMIN', 'DIRECCION'];
+import { usuarioTieneAccesoTodasSedes } from '../../utils/usuariosAcceso.utils.js';
 
 const ROLES_OPERATIVOS_ALUMNOS = [
   'SUPER_ADMIN',
@@ -79,7 +78,7 @@ const normalizarTinyint = (value, defaultValue = 0) => {
 };
 
 const usuarioEsGlobal = (user) => {
-  return ROLES_GLOBALES.includes(user?.rol_codigo);
+  return usuarioTieneAccesoTodasSedes(user);
 };
 
 const obtenerSedesPermitidasUsuario = (user) => {

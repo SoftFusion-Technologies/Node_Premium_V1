@@ -541,7 +541,8 @@ export const CR_UsuariosSedes_CTS = async (req, res) => {
 
       await UsuariosModel.update(
         {
-          sede_principal_id: payload.sede_id
+          sede_principal_id: payload.sede_id,
+          acceso_todas_sedes: 0
         },
         {
           where: {
@@ -690,7 +691,8 @@ export const UR_UsuariosSedes_CTS = async (req, res) => {
 
       await UsuariosModel.update(
         {
-          sede_principal_id: asignacion.sede_id
+          sede_principal_id: asignacion.sede_id,
+          acceso_todas_sedes: 0
         },
         {
           where: {
@@ -781,7 +783,8 @@ export const UR_SedePrincipalUsuariosSedes_CTS = async (req, res) => {
 
     await UsuariosModel.update(
       {
-        sede_principal_id: asignacion.sede_id
+        sede_principal_id: asignacion.sede_id,
+        acceso_todas_sedes: 0
       },
       {
         where: {

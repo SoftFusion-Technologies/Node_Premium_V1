@@ -8,8 +8,7 @@ import SedesModel from '../../Models/Sede/MD_TB_Sedes.js';
 import ServiciosModel from '../../Models/Catalogo/MD_TB_Servicios.js';
 import ServiciosCategoriasModel from '../../Models/Catalogo/MD_TB_ServiciosCategorias.js';
 import ServiciosPreciosModel from '../../Models/Catalogo/MD_TB_ServiciosPrecios.js';
-
-const ROLES_GLOBALES = ['SUPER_ADMIN', 'DIRECCION'];
+import { usuarioTieneAccesoTodasSedes } from '../../utils/usuariosAcceso.utils.js';
 
 const responderError = (res, status, message) =>
   res.status(status).json({ ok: false, message });
@@ -94,7 +93,7 @@ const validarSede = async (req, source = req.query) => {
     return { ok: false, status: 400, message: 'La sede es obligatoria.' };
   }
   if (
-    !ROLES_GLOBALES.includes(req.user?.rol_codigo) &&
+    !usuarioTieneAccesoTodasSedes(req.user) &&
     !sedesPermitidas(req.user).includes(sedeId)
   ) {
     return {

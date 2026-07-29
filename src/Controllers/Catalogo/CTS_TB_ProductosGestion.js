@@ -13,8 +13,7 @@ import ProductosTiposModel from '../../Models/Catalogo/MD_TB_ProductosTipos.js';
 import ProductosPreciosModel from '../../Models/Catalogo/MD_TB_ProductosPrecios.js';
 import ProductosStockSedesModel from '../../Models/Catalogo/MD_TB_ProductosStockSedes.js';
 import ProductosStockMovimientosModel from '../../Models/Catalogo/MD_TB_ProductosStockMovimientos.js';
-
-const ROLES_GLOBALES = ['SUPER_ADMIN', 'DIRECCION'];
+import { usuarioTieneAccesoTodasSedes } from '../../utils/usuariosAcceso.utils.js';
 const TIPOS_AJUSTE = ['ingreso', 'ajuste_positivo', 'ajuste_negativo', 'merma'];
 
 const responderError = (res, status, message, details) =>
@@ -110,7 +109,7 @@ const validarSede = async (req, source = req.query) => {
   }
 
   if (
-    !ROLES_GLOBALES.includes(req.user?.rol_codigo) &&
+    !usuarioTieneAccesoTodasSedes(req.user) &&
     !sedesPermitidas(req.user).includes(sedeId)
   ) {
     return {

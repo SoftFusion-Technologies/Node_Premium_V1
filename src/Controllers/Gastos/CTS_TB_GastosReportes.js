@@ -11,10 +11,15 @@ import {
   esFechaDateOnlyValida,
   manejarErrorControlador,
   normalizarFecha,
+  normalizarTexto,
   validarRolLecturaGastos
 } from './gastos.helpers.js';
 
-const construirFiltrosReporteGastos = (query = {}, user = null, alias = 'g') => {
+const construirFiltrosReporteGastos = (
+  query = {},
+  user = null,
+  alias = 'g'
+) => {
   const errores = [];
   const condiciones = [];
   const replacements = {};
@@ -59,9 +64,22 @@ const construirFiltrosReporteGastos = (query = {}, user = null, alias = 'g') => 
     replacements.proveedor_id = Number(query.proveedor_id);
   }
 
-  if (query.incluye_iva !== undefined && query.incluye_iva !== null && query.incluye_iva !== '') {
+  if (
+    query.incluye_iva !== undefined &&
+    query.incluye_iva !== null &&
+    query.incluye_iva !== ''
+  ) {
     condiciones.push(`${alias}.incluye_iva = :incluye_iva`);
     replacements.incluye_iva = Number(query.incluye_iva) === 1 ? 1 : 0;
+  }
+
+  const search = normalizarTexto(query.q);
+
+  if (search) {
+    condiciones.push(
+      `(${alias}.nombre LIKE :q OR ${alias}.descripcion LIKE :q OR ${alias}.observacion LIKE :q)`
+    );
+    replacements.q = `%${search}%`;
   }
 
   const scope = aplicarScopeSedesGastosSql(user, query.sede_id, alias);
@@ -144,7 +162,11 @@ export const OBR_GastosResumen_CTS = async (req, res) => {
       data: resumen
     });
   } catch (error) {
-    return manejarErrorControlador({ res, error, nombre: 'OBR_GastosResumen_CTS' });
+    return manejarErrorControlador({
+      res,
+      error,
+      nombre: 'OBR_GastosResumen_CTS'
+    });
   }
 };
 
@@ -174,7 +196,6 @@ export const OBR_GastosPorTipo_CTS = async (req, res) => {
       });
     }
 
-    filtros.condiciones.push("g.estado <> 'anulado'");
     const whereSql = buildWhereSql(filtros.condiciones);
 
     const rows = await db.query(
@@ -183,17 +204,46 @@ export const OBR_GastosPorTipo_CTS = async (req, res) => {
           gt.id AS tipo_gasto_id,
           gt.nombre AS tipo_gasto,
           COUNT(g.id) AS cantidad_gastos,
-          COALESCE(SUM(g.importe_total), 0) AS total_gastado,
+          SUM(CASE WHEN g.estado = 'pagado' THEN 1 ELSE 0 END) AS cantidad_pagados,
+          SUM(CASE WHEN g.estado = 'pendiente' THEN 1 ELSE 0 END) AS cantidad_pendientes,
+          SUM(CASE WHEN g.estado = 'anulado' THEN 1 ELSE 0 END) AS cantidad_anulados,
+          COALESCE(
+            SUM(CASE WHEN g.estado <> 'anulado' THEN g.importe_total ELSE 0 END),
+            0
+          ) AS total_gastado,
+          COALESCE(
+            SUM(CASE WHEN g.estado = 'pagado' THEN g.importe_total ELSE 0 END),
+            0
+          ) AS total_pagado,
+          COALESCE(
+            SUM(CASE WHEN g.estado = 'pendiente' THEN g.importe_total ELSE 0 END),
+            0
+          ) AS total_pendiente,
+          COALESCE(
+            SUM(CASE WHEN g.estado = 'anulado' THEN g.importe_total ELSE 0 END),
+            0
+          ) AS total_anulado,
           ROUND(
-            COALESCE(SUM(g.importe_total), 0) * 100 /
+            COALESCE(
+              SUM(CASE WHEN g.estado <> 'anulado' THEN g.importe_total ELSE 0 END),
+              0
+            ) * 100 /
             NULLIF((
-              SELECT COALESCE(SUM(g2.importe_total), 0)
+              SELECT COALESCE(
+                SUM(
+                  CASE
+                    WHEN g2.estado <> 'anulado' THEN g2.importe_total
+                    ELSE 0
+                  END
+                ),
+                0
+              )
               FROM gastos_gastos g2
-              WHERE g2.estado <> 'anulado'
-                ${filtros.condiciones
-                  .filter((condicion) => condicion !== "g.estado <> 'anulado'")
-                  .map((condicion) => `AND ${condicion.replaceAll('g.', 'g2.')}`)
-                  .join(' ')}
+              ${buildWhereSql(
+                filtros.condiciones.map((condicion) =>
+                  condicion.replaceAll('g.', 'g2.')
+                )
+              )}
             ), 0),
             2
           ) AS porcentaje
@@ -216,7 +266,11 @@ export const OBR_GastosPorTipo_CTS = async (req, res) => {
       data: rows
     });
   } catch (error) {
-    return manejarErrorControlador({ res, error, nombre: 'OBR_GastosPorTipo_CTS' });
+    return manejarErrorControlador({
+      res,
+      error,
+      nombre: 'OBR_GastosPorTipo_CTS'
+    });
   }
 };
 
@@ -270,7 +324,11 @@ export const OBR_GastosPorSede_CTS = async (req, res) => {
       data: rows
     });
   } catch (error) {
-    return manejarErrorControlador({ res, error, nombre: 'OBR_GastosPorSede_CTS' });
+    return manejarErrorControlador({
+      res,
+      error,
+      nombre: 'OBR_GastosPorSede_CTS'
+    });
   }
 };
 
@@ -323,6 +381,10 @@ export const OBR_GastosPorProveedor_CTS = async (req, res) => {
       data: rows
     });
   } catch (error) {
-    return manejarErrorControlador({ res, error, nombre: 'OBR_GastosPorProveedor_CTS' });
+    return manejarErrorControlador({
+      res,
+      error,
+      nombre: 'OBR_GastosPorProveedor_CTS'
+    });
   }
 };

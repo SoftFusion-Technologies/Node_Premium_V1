@@ -11,11 +11,14 @@ import UsuariosRolesModel from '../../Models/Usuario/MD_TB_UsuariosRoles.js';
 import UsuariosSedesModel from '../../Models/Usuario/MD_TB_UsuariosSedes.js';
 import SedesModel from '../../Models/Sede/MD_TB_Sedes.js';
 import { hashPassword } from '../../Security/auth.js';
-import { obtenerPerfilAccesoSede } from '../../utils/usuariosAcceso.utils.js';
+import {
+  obtenerPerfilAccesoSede,
+  rolPuedeTenerAccesoTodasSedes,
+  usuarioTieneAccesoTodasSedes
+} from '../../utils/usuariosAcceso.utils.js';
 
 const ESTADOS_USUARIO_VALIDOS = ['activo', 'inactivo', 'bloqueado'];
 const ROLES_PROTEGIDOS = ['SUPER_ADMIN'];
-const ROLES_GLOBALES = ['SUPER_ADMIN', 'DIRECCION'];
 
 const obtenerSedesPermitidasUsuario = (user) => {
   if (!user || !Array.isArray(user.sedes)) return [];
@@ -124,7 +127,10 @@ const validarGestionRolProtegido = async (
   };
 };
 
-const obtenerSedesUsuario = async (usuarioId) => {
+const obtenerSedesUsuario = async (
+  usuarioId,
+  { accesoTodasSedes = false, rolId = null } = {}
+) => {
   const asignaciones = await UsuariosSedesModel.findAll({
     where: {
       usuario_id: usuarioId,
@@ -136,16 +142,19 @@ const obtenerSedesUsuario = async (usuarioId) => {
     ]
   });
 
-  if (!asignaciones.length) return [];
+  if (!accesoTodasSedes && !asignaciones.length) return [];
 
   const sedeIds = asignaciones.map((item) => item.sede_id);
 
   const sedes = await SedesModel.findAll({
-    where: {
-      id: {
-        [Op.in]: sedeIds
-      }
-    }
+    where: accesoTodasSedes
+      ? { activo: 1 }
+      : {
+          id: {
+            [Op.in]: sedeIds
+          }
+        },
+    order: [['id', 'ASC']]
   });
 
   const sedesPorId = new Map(
@@ -157,19 +166,49 @@ const obtenerSedesUsuario = async (usuarioId) => {
     })
   );
 
-  return asignaciones
-    .map((asignacion) => {
+  const asignacionesPorSede = new Map(
+    asignaciones.map((asignacion) => [
+      Number(asignacion.sede_id),
+      typeof asignacion.toJSON === 'function'
+        ? asignacion.toJSON()
+        : asignacion
+    ])
+  );
+  const sedesOrdenadas = accesoTodasSedes
+    ? sedes.map((sede) =>
+        typeof sede.toJSON === 'function' ? sede.toJSON() : sede
+      )
+    : asignaciones
+        .map((asignacion) => sedesPorId.get(Number(asignacion.sede_id)))
+        .filter(Boolean);
+
+  return sedesOrdenadas
+    .map((sede) => {
+      const sedePlano =
+        typeof sede.toJSON === 'function' ? sede.toJSON() : sede;
       const asignacionPlano =
-        typeof asignacion.toJSON === 'function'
-          ? asignacion.toJSON()
-          : asignacion;
+        asignacionesPorSede.get(Number(sedePlano.id)) || null;
 
-      const sede = sedesPorId.get(Number(asignacionPlano.sede_id));
+      if (accesoTodasSedes) {
+        return {
+          ...sedePlano,
+          asignacion: {
+            id: asignacionPlano?.id || null,
+            rol_id: asignacionPlano?.rol_id || rolId || null,
+            es_sede_principal: false,
+            puede_operar: true,
+            puede_ver_reportes: true,
+            puede_ver_finanzas: true,
+            activo: true,
+            heredada_acceso_global: !asignacionPlano
+          }
+        };
+      }
 
-      if (!sede) return null;
+      if (!asignacionPlano) return null;
 
       return {
-        ...sede,
+        ...sedePlano,
         asignacion: {
           id: asignacionPlano.id,
           rol_id: asignacionPlano.rol_id,
@@ -177,7 +216,8 @@ const obtenerSedesUsuario = async (usuarioId) => {
           puede_operar: Boolean(asignacionPlano.puede_operar),
           puede_ver_reportes: Boolean(asignacionPlano.puede_ver_reportes),
           puede_ver_finanzas: Boolean(asignacionPlano.puede_ver_finanzas),
-          activo: Boolean(asignacionPlano.activo)
+          activo: Boolean(asignacionPlano.activo),
+          heredada_acceso_global: false
         }
       };
     })
@@ -196,7 +236,13 @@ const construirUsuarioRespuesta = async (usuario) => {
     ? await SedesModel.findByPk(usuarioPlano.sede_principal_id)
     : null;
 
-  const sedes = await obtenerSedesUsuario(usuarioPlano.id);
+  const accesoTodasSedes =
+    rolPuedeTenerAccesoTodasSedes(rolPlano?.codigo) &&
+    normalizarBoolean(usuarioPlano.acceso_todas_sedes, false);
+  const sedes = await obtenerSedesUsuario(usuarioPlano.id, {
+    accesoTodasSedes,
+    rolId: usuarioPlano.rol_id
+  });
 
   return {
     ...usuarioPlano,
@@ -209,6 +255,7 @@ const construirUsuarioRespuesta = async (usuario) => {
         }
       : null,
     rol_codigo: rolPlano?.codigo || null,
+    acceso_todas_sedes: accesoTodasSedes,
     sede_principal: sedePrincipal
       ? sedePrincipal.toJSON
         ? sedePrincipal.toJSON()
@@ -219,32 +266,40 @@ const construirUsuarioRespuesta = async (usuario) => {
 };
 
 const buildUsuarioPayload = (body = {}, modo = 'create') => {
-  const payload = {
-    rol_id:
+  const payload = {};
+  const incluir = (key) =>
+    modo === 'create' || Object.prototype.hasOwnProperty.call(body, key);
+
+  if (incluir('rol_id')) {
+    payload.rol_id =
       body.rol_id === undefined || body.rol_id === null || body.rol_id === ''
         ? null
-        : Number(body.rol_id),
+        : Number(body.rol_id);
+  }
 
-    sede_principal_id:
+  if (incluir('sede_principal_id')) {
+    payload.sede_principal_id =
       body.sede_principal_id === undefined ||
       body.sede_principal_id === null ||
       body.sede_principal_id === ''
         ? null
-        : Number(body.sede_principal_id),
-
-    nombre: normalizarTexto(body.nombre),
-    apellido: normalizarTexto(body.apellido),
-    email: normalizarEmail(body.email),
-    telefono: normalizarTelefono(body.telefono)
-  };
-
-  if (modo === 'update') {
-    Object.keys(payload).forEach((key) => {
-      if (payload[key] === undefined) {
-        delete payload[key];
-      }
-    });
+        : Number(body.sede_principal_id);
   }
+
+  if (incluir('acceso_todas_sedes')) {
+    payload.acceso_todas_sedes = normalizarBoolean(
+      body.acceso_todas_sedes,
+      false
+    )
+      ? 1
+      : 0;
+  }
+
+  if (incluir('nombre')) payload.nombre = normalizarTexto(body.nombre);
+  if (incluir('apellido')) payload.apellido = normalizarTexto(body.apellido);
+  if (incluir('email')) payload.email = normalizarEmail(body.email);
+  if (incluir('telefono'))
+    payload.telefono = normalizarTelefono(body.telefono);
 
   return payload;
 };
@@ -455,6 +510,67 @@ const crearAsignacionesSedesIniciales = async ({
   }
 };
 
+const prepararAsignacionesTodasSedes = async (rolCodigo, transaction) => {
+  const perfilAcceso = obtenerPerfilAccesoSede(rolCodigo);
+  const sedes = await SedesModel.findAll({
+    where: { activo: 1 },
+    attributes: ['id'],
+    order: [['id', 'ASC']],
+    transaction
+  });
+
+  return sedes.map((sede) => ({
+    sede_id: Number(sede.id),
+    rol_id: null,
+    es_sede_principal: false,
+    puede_operar: perfilAcceso.puede_operar,
+    puede_ver_reportes: perfilAcceso.puede_ver_reportes,
+    puede_ver_finanzas: perfilAcceso.puede_ver_finanzas
+  }));
+};
+
+const asegurarAsignacionesTodasSedes = async ({
+  usuarioId,
+  rolId,
+  rolCodigo,
+  transaction
+}) => {
+  const asignaciones = await prepararAsignacionesTodasSedes(
+    rolCodigo,
+    transaction
+  );
+
+  for (const asignacion of asignaciones) {
+    const [registro] = await UsuariosSedesModel.findOrCreate({
+      where: {
+        usuario_id: usuarioId,
+        sede_id: asignacion.sede_id
+      },
+      defaults: {
+        rol_id: rolId,
+        es_sede_principal: 0,
+        puede_operar: asignacion.puede_operar ? 1 : 0,
+        puede_ver_reportes: asignacion.puede_ver_reportes ? 1 : 0,
+        puede_ver_finanzas: asignacion.puede_ver_finanzas ? 1 : 0,
+        activo: 1
+      },
+      transaction
+    });
+
+    await registro.update(
+      {
+        rol_id: rolId,
+        es_sede_principal: 0,
+        puede_operar: 1,
+        puede_ver_reportes: 1,
+        puede_ver_finanzas: 1,
+        activo: 1
+      },
+      { transaction }
+    );
+  }
+};
+
 /*
  * Benjamin Orellana - 2026/05/10 - Lista usuarios con filtros, búsqueda, rol, estado, sede y paginación.
  */
@@ -556,21 +672,15 @@ export const OBR_Usuarios_CTS = async (req, res) => {
 
       const usuarioIds = asignaciones.map((item) => item.usuario_id);
 
-      if (usuarioIds.length === 0) {
-        return res.status(200).json({
-          ok: true,
-          message: 'Usuarios obtenidos correctamente.',
-          total: 0,
-          page: Number(page) || 1,
-          limit: Number(limit) || 20,
-          total_pages: 0,
-          data: []
-        });
-      }
-
-      where.id = {
-        [Op.in]: usuarioIds
-      };
+      where[Op.and] = [
+        ...(where[Op.and] || []),
+        {
+          [Op.or]: [
+            { id: { [Op.in]: usuarioIds } },
+            { acceso_todas_sedes: 1 }
+          ]
+        }
+      ];
     }
 
     const search = normalizarTexto(q);
@@ -665,7 +775,7 @@ export const OBR_UsuariosSelectorCobro_CTS = async (req, res) => {
   try {
     const { q, sede_id, page = 1, limit = 40 } = req.query;
     const where = { estado: 'activo' };
-    const usuarioGlobal = ROLES_GLOBALES.includes(req.user?.rol_codigo);
+    const usuarioGlobal = usuarioTieneAccesoTodasSedes(req.user);
     const sedesPermitidas = obtenerSedesPermitidasUsuario(req.user);
     let sedesFiltro = [];
 
@@ -705,7 +815,8 @@ export const OBR_UsuariosSelectorCobro_CTS = async (req, res) => {
         {
           [Op.or]: [
             { id: { [Op.in]: usuariosAsignadosIds } },
-            { sede_principal_id: { [Op.in]: sedesFiltro } }
+            { sede_principal_id: { [Op.in]: sedesFiltro } },
+            { acceso_todas_sedes: 1 }
           ]
         }
       ];
@@ -737,6 +848,7 @@ export const OBR_UsuariosSelectorCobro_CTS = async (req, res) => {
         'id',
         'rol_id',
         'sede_principal_id',
+        'acceso_todas_sedes',
         'nombre',
         'apellido',
         'email',
@@ -904,6 +1016,33 @@ export const CR_Usuarios_CTS = async (req, res) => {
       });
     }
 
+    const accesoTodasSedes = Boolean(payload.acceso_todas_sedes);
+
+    if (
+      accesoTodasSedes &&
+      !rolPuedeTenerAccesoTodasSedes(rol.codigo)
+    ) {
+      await transaction.rollback();
+
+      return res.status(400).json({
+        ok: false,
+        message:
+          'El rol indicado no puede recibir acceso global a todas las sedes.'
+      });
+    }
+
+    if (accesoTodasSedes) {
+      payload.sede_principal_id = null;
+    } else if (!payload.sede_principal_id) {
+      await transaction.rollback();
+
+      return res.status(400).json({
+        ok: false,
+        message:
+          'Debe indicar una sede principal cuando el usuario no tiene acceso a todas las sedes.'
+      });
+    }
+
     if (payload.sede_principal_id) {
       const sedeExiste = await validarSedeExistente(payload.sede_principal_id);
 
@@ -941,11 +1080,13 @@ export const CR_Usuarios_CTS = async (req, res) => {
       }
     );
 
-    const asignaciones = prepararAsignacionesSedes(
-      req.body,
-      payload.sede_principal_id,
-      rol.codigo
-    );
+    const asignaciones = accesoTodasSedes
+      ? await prepararAsignacionesTodasSedes(rol.codigo, transaction)
+      : prepararAsignacionesSedes(
+          req.body,
+          payload.sede_principal_id,
+          rol.codigo
+        );
 
     await crearAsignacionesSedesIniciales({
       usuarioId: nuevoUsuario.id,
@@ -1071,6 +1212,45 @@ export const UR_Usuarios_CTS = async (req, res) => {
       delete payload.rol_id;
     }
 
+    const accesoTodasSedesDestino =
+      payload.acceso_todas_sedes !== undefined
+        ? Boolean(payload.acceso_todas_sedes)
+        : normalizarBoolean(usuario.acceso_todas_sedes, false);
+    const sedePrincipalDestino =
+      payload.sede_principal_id !== undefined
+        ? payload.sede_principal_id
+        : usuario.sede_principal_id;
+
+    if (
+      accesoTodasSedesDestino &&
+      !rolPuedeTenerAccesoTodasSedes(rolDestino?.codigo)
+    ) {
+      await transaction.rollback();
+
+      return res.status(400).json({
+        ok: false,
+        message:
+          'El rol indicado no puede recibir acceso global a todas las sedes.'
+      });
+    }
+
+    if (accesoTodasSedesDestino) {
+      payload.acceso_todas_sedes = 1;
+      payload.sede_principal_id = null;
+    } else {
+      payload.acceso_todas_sedes = 0;
+
+      if (!sedePrincipalDestino) {
+        await transaction.rollback();
+
+        return res.status(400).json({
+          ok: false,
+          message:
+            'Debe indicar una sede principal cuando el usuario no tiene acceso a todas las sedes.'
+        });
+      }
+    }
+
     if (payload.sede_principal_id) {
       const sedeExiste = await validarSedeExistente(payload.sede_principal_id);
 
@@ -1101,7 +1281,22 @@ export const UR_Usuarios_CTS = async (req, res) => {
       transaction
     });
 
-    if (payload.sede_principal_id) {
+    if (accesoTodasSedesDestino) {
+      await UsuariosSedesModel.update(
+        { es_sede_principal: 0 },
+        {
+          where: { usuario_id: usuario.id },
+          transaction
+        }
+      );
+
+      await asegurarAsignacionesTodasSedes({
+        usuarioId: usuario.id,
+        rolId: usuario.rol_id,
+        rolCodigo: rolDestino?.codigo,
+        transaction
+      });
+    } else if (payload.sede_principal_id) {
       await UsuariosSedesModel.update(
         {
           es_sede_principal: 0

@@ -1,8 +1,7 @@
 import { QueryTypes } from 'sequelize';
 
 import db from '../DataBase/db.js';
-
-const ROLES_GLOBALES = ['SUPER_ADMIN', 'DIRECCION'];
+import { usuarioTieneAccesoTodasSedes } from '../utils/usuariosAcceso.utils.js';
 
 const FUENTES = {
   alumno: {
@@ -153,7 +152,7 @@ export const requireFinancialScope = ({
       const sedeId = sedeIds[0];
       req.financial_sede_id = sedeId;
 
-      if (ROLES_GLOBALES.includes(req.user.rol_codigo)) return next();
+      if (usuarioTieneAccesoTodasSedes(req.user)) return next();
 
       const sede = asignacionSede(req.user, sedeId);
       const asignacion = sede?.asignacion;

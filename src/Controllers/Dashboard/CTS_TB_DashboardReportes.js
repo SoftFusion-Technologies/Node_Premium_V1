@@ -12,8 +12,70 @@ import { QueryTypes } from 'sequelize';
 
 import db from '../../DataBase/db.js';
 import { obtenerCotizacionUsdVigente } from '../Finanzas/CTS_TB_FinanzasCotizacionesUsd.js';
+import { usuarioTieneAccesoTodasSedes } from '../../utils/usuariosAcceso.utils.js';
 
 const TIPOS_DOLAR_VALIDOS = ['oficial', 'blue'];
+
+const obtenerSedesPermitidasUsuario = (user) => {
+  return Array.isArray(user?.sedes)
+    ? user.sedes
+        .filter(
+          (sede) =>
+            sede?.asignacion?.activo !== false &&
+            sede?.asignacion?.puede_operar !== false
+        )
+        .map((sede) => Number(sede.id || sede.sede_id))
+        .filter(Boolean)
+    : [];
+};
+
+const resolverScopeSedesDashboard = (req) => {
+  const sedeId = req.query.sede_id ? Number(req.query.sede_id) : null;
+
+  if (req.query.sede_id && (!Number.isInteger(sedeId) || sedeId <= 0)) {
+    return {
+      ok: false,
+      status: 400,
+      message: 'El parámetro sede_id debe ser un ID válido.'
+    };
+  }
+
+  if (usuarioTieneAccesoTodasSedes(req.user)) {
+    return {
+      ok: true,
+      sedeId,
+      sql: sedeId ? 'AND s.id = :sede_id' : '',
+      replacements: sedeId ? { sede_id: sedeId } : {}
+    };
+  }
+
+  const sedesPermitidas = obtenerSedesPermitidasUsuario(req.user);
+
+  if (!sedesPermitidas.length) {
+    return {
+      ok: false,
+      status: 403,
+      message: 'El usuario no tiene sedes asignadas para consultar el dashboard.'
+    };
+  }
+
+  if (sedeId && !sedesPermitidas.includes(sedeId)) {
+    return {
+      ok: false,
+      status: 403,
+      message: 'No tiene acceso al dashboard de la sede indicada.'
+    };
+  }
+
+  const sedesFiltro = sedeId ? [sedeId] : sedesPermitidas;
+
+  return {
+    ok: true,
+    sedeId,
+    sql: 'AND s.id IN (:sedes_permitidas)',
+    replacements: { sedes_permitidas: sedesFiltro }
+  };
+};
 
 // Sergio Manrique - 2026/07/17 - Fecha de hoy (horario Argentina) en formato
 // YYYY-MM-DD, para saber si el mes consultado ya terminó o está en curso.
@@ -124,7 +186,16 @@ export const OBR_DashboardCortesActividad_CTS = async (req, res) => {
       return res.status(400).json({ ok: false, message: 'Parámetros anio/mes inválidos.' });
     }
 
-    const sedeId = req.query.sede_id ? Number(req.query.sede_id) : null;
+    const scope = resolverScopeSedesDashboard(req);
+
+    if (!scope.ok) {
+      return res.status(scope.status).json({
+        ok: false,
+        message: scope.message
+      });
+    }
+
+    const { sedeId } = scope;
 
     const filasPorCorte = await Promise.all(
       CORTES_ACTIVIDAD.map(async (corteDef) => {
@@ -152,7 +223,7 @@ export const OBR_DashboardCortesActividad_CTS = async (req, res) => {
                 AND DATE(p.fecha_pago) BETWEEN :primerDiaMesAnterior AND :corteAnterior) AS facturacion_acumulada_mes_anterior
           FROM sedes_sedes s
           WHERE s.activo = 1
-            ${sedeId ? 'AND s.id = :sede_id' : ''}
+            ${scope.sql}
           ORDER BY s.nombre
           `,
           {
@@ -161,7 +232,7 @@ export const OBR_DashboardCortesActividad_CTS = async (req, res) => {
               corteAnterior: fechas.corteAnterior,
               primerDiaMes: fechas.primerDiaMes,
               primerDiaMesAnterior: fechas.primerDiaMesAnterior,
-              ...(sedeId ? { sede_id: sedeId } : {})
+              ...scope.replacements
             },
             type: QueryTypes.SELECT
           }
@@ -263,7 +334,16 @@ export const OBR_DashboardCierreMensual_CTS = async (req, res) => {
       return res.status(400).json({ ok: false, message: 'Parámetros anio/mes inválidos.' });
     }
 
-    const sedeId = req.query.sede_id ? Number(req.query.sede_id) : null;
+    const scope = resolverScopeSedesDashboard(req);
+
+    if (!scope.ok) {
+      return res.status(scope.status).json({
+        ok: false,
+        message: scope.message
+      });
+    }
+
+    const { sedeId } = scope;
 
     const tipoDolar = TIPOS_DOLAR_VALIDOS.includes(req.query.tipo_dolar)
       ? req.query.tipo_dolar
@@ -321,11 +401,15 @@ export const OBR_DashboardCierreMensual_CTS = async (req, res) => {
             AND g.fecha_gasto BETWEEN :desde AND :hasta) AS gasto_front_comercial
       FROM sedes_sedes s
       WHERE s.activo = 1
-        ${sedeId ? 'AND s.id = :sede_id' : ''}
+        ${scope.sql}
       ORDER BY s.nombre
       `,
       {
-        replacements: { desde: rango.desde, hasta: rango.hasta, ...(sedeId ? { sede_id: sedeId } : {}) },
+        replacements: {
+          desde: rango.desde,
+          hasta: rango.hasta,
+          ...scope.replacements
+        },
         type: QueryTypes.SELECT
       }
     );

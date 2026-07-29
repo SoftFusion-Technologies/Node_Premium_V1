@@ -49,6 +49,12 @@ const UsuariosModel = db.define(
       }
     },
 
+    acceso_todas_sedes: {
+      type: DataTypes.TINYINT,
+      allowNull: false,
+      defaultValue: 0
+    },
+
     nombre: {
       type: DataTypes.STRING(120),
       allowNull: false
@@ -114,6 +120,10 @@ const UsuariosModel = db.define(
       {
         name: 'idx_usuarios_sede_principal',
         fields: ['sede_principal_id']
+      },
+      {
+        name: 'idx_usuarios_acceso_todas_sedes',
+        fields: ['acceso_todas_sedes']
       },
       {
         name: 'idx_usuarios_estado',

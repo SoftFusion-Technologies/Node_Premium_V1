@@ -15,6 +15,7 @@ import PlanesModel from '../../Models/Plan/MD_TB_Planes.js';
 import PlanesPreciosModel from '../../Models/Plan/MD_TB_PlanesPrecios.js';
 import SedesModel from '../../Models/Sede/MD_TB_Sedes.js';
 import UsuariosModel from '../../Models/Usuario/MD_TB_Usuarios.js';
+import { usuarioTieneAccesoTodasSedes } from '../../utils/usuariosAcceso.utils.js';
 import UsuariosRolesModel from '../../Models/Usuario/MD_TB_UsuariosRoles.js';
 import { hashPassword } from '../../Security/auth.js';
 import {
@@ -36,8 +37,6 @@ const ESTADOS_ALUMNO_VALIDOS = [
 ];
 
 const ORIGENES_REGISTRO_VALIDOS = ['interno', 'externo', 'importado'];
-
-const ROLES_GLOBALES = ['SUPER_ADMIN', 'DIRECCION'];
 
 const ROLES_OPERATIVOS_ALUMNOS = [
   'SUPER_ADMIN',
@@ -186,7 +185,7 @@ const toNumberOrNull = (value) => {
 };
 
 const usuarioEsGlobal = (user) => {
-  return ROLES_GLOBALES.includes(user?.rol_codigo);
+  return usuarioTieneAccesoTodasSedes(user);
 };
 
 const obtenerSedesPermitidasUsuario = (user) => {

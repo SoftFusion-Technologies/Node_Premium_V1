@@ -7,8 +7,7 @@ import { Op } from 'sequelize';
 import db from '../../DataBase/db.js';
 import AlumnosModel from '../../Models/Alumno/MD_TB_Alumnos.js';
 import AlumnosContactosEmergenciaModel from '../../Models/Alumno/MD_TB_AlumnosContactosEmergencia.js';
-
-const ROLES_GLOBALES = ['SUPER_ADMIN', 'DIRECCION'];
+import { usuarioTieneAccesoTodasSedes } from '../../utils/usuariosAcceso.utils.js';
 
 const ROLES_OPERATIVOS_ALUMNOS = [
   'SUPER_ADMIN',
@@ -75,7 +74,7 @@ const normalizarPrincipal = (value, defaultValue = 0) => {
 };
 
 const usuarioEsGlobal = (user) => {
-  return ROLES_GLOBALES.includes(user?.rol_codigo);
+  return usuarioTieneAccesoTodasSedes(user);
 };
 
 const obtenerSedesPermitidasUsuario = (user) => {

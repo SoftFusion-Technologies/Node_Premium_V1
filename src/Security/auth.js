@@ -20,6 +20,7 @@ import UsuariosPermisosModel from '../Models/Usuario/MD_TB_UsuariosPermisos.js';
 import UsuariosRolesPermisosModel from '../Models/Usuario/MD_TB_UsuariosRolesPermisos.js';
 import UsuariosSedesModel from '../Models/Usuario/MD_TB_UsuariosSedes.js';
 import SedesModel from '../Models/Sede/MD_TB_Sedes.js';
+import { usuarioTieneAccesoTodasSedes } from '../utils/usuariosAcceso.utils.js';
 
 if (process.env.NODE_ENV !== 'production') {
   dotenv.config();
@@ -37,8 +38,6 @@ const ROLES_INTERNOS = [
   'COORD_SEDE',
   'PROFESOR'
 ];
-
-const ROLES_GLOBAL_ACCESS = ['SUPER_ADMIN', 'DIRECCION'];
 
 const normalizarTexto = (valor) => {
   if (valor === undefined || valor === null) return null;
@@ -142,7 +141,11 @@ const buscarContextoRoles = async (rolIdsBase = []) => {
   };
 };
 
-const buscarSedesUsuario = async (usuarioId, rolGlobalId = null) => {
+const buscarSedesUsuario = async (
+  usuarioId,
+  rolGlobalId = null,
+  accesoTodasSedes = false
+) => {
   const asignaciones = await UsuariosSedesModel.findAll({
     where: {
       usuario_id: usuarioId,
@@ -155,22 +158,26 @@ const buscarSedesUsuario = async (usuarioId, rolGlobalId = null) => {
     ]
   });
 
-  if (!asignaciones.length) return [];
+  if (!accesoTodasSedes && !asignaciones.length) return [];
 
   const sedeIds = asignaciones.map((item) => item.sede_id);
   const rolIds = [
     Number(rolGlobalId),
-    ...asignaciones.map((item) => Number(item.rol_id || rolGlobalId))
+    ...(accesoTodasSedes
+      ? []
+      : asignaciones.map((item) => Number(item.rol_id || rolGlobalId)))
   ].filter(Boolean);
 
   const [sedes, contextoRoles] = await Promise.all([
     SedesModel.findAll({
-      where: {
-        id: {
-          [Op.in]: sedeIds
-        },
-        activo: 1
-      },
+      where: accesoTodasSedes
+        ? { activo: 1 }
+        : {
+            id: {
+              [Op.in]: sedeIds
+            },
+            activo: 1
+          },
       attributes: [
         'id',
         'nombre',
@@ -181,7 +188,8 @@ const buscarSedesUsuario = async (usuarioId, rolGlobalId = null) => {
         'telefono',
         'email',
         'activo'
-      ]
+      ],
+      order: [['id', 'ASC']]
     }),
     buscarContextoRoles(rolIds)
   ]);
@@ -195,41 +203,65 @@ const buscarSedesUsuario = async (usuarioId, rolGlobalId = null) => {
     })
   );
 
-  return asignaciones
-    .map((asignacion) => {
+  const asignacionesPorSede = new Map(
+    asignaciones.map((asignacion) => [
+      Number(asignacion.sede_id),
+      typeof asignacion.toJSON === 'function'
+        ? asignacion.toJSON()
+        : asignacion
+    ])
+  );
+  const sedesOrdenadas = accesoTodasSedes
+    ? Array.from(sedesPorId.values())
+    : asignaciones
+        .map((asignacion) => sedesPorId.get(Number(asignacion.sede_id)))
+        .filter(Boolean);
+
+  return sedesOrdenadas
+    .map((sede) => {
       const asignacionPlano =
-        typeof asignacion.toJSON === 'function'
-          ? asignacion.toJSON()
-          : asignacion;
-
-      const sede = sedesPorId.get(Number(asignacionPlano.sede_id));
-
-      if (!sede) return null;
-
-      const rolEfectivoId = Number(asignacionPlano.rol_id || rolGlobalId);
+        asignacionesPorSede.get(Number(sede.id)) || null;
+      const rolEfectivoId = Number(
+        accesoTodasSedes
+          ? rolGlobalId
+          : asignacionPlano?.rol_id || rolGlobalId
+      );
       const rolEfectivo = contextoRoles.rolesPorId.get(rolEfectivoId) || null;
       const permisosGlobales =
         contextoRoles.permisosPorRolId.get(Number(rolGlobalId)) || [];
       const permisosRolSede =
         contextoRoles.permisosPorRolId.get(rolEfectivoId) || [];
-      const permisosEfectivos = asignacionPlano.rol_id
+      const permisosEfectivos =
+        !accesoTodasSedes && asignacionPlano?.rol_id
         ? permisosRolSede.filter((codigo) => permisosGlobales.includes(codigo))
         : permisosGlobales;
 
       return {
         ...sede,
         asignacion: {
-          id: asignacionPlano.id,
-          rol_id: asignacionPlano.rol_id,
+          id: asignacionPlano?.id || null,
+          rol_id: accesoTodasSedes
+            ? rolGlobalId
+            : asignacionPlano?.rol_id || null,
           rol_efectivo_id: rolEfectivoId || null,
           rol_codigo: rolEfectivo?.codigo || null,
           rol_nombre: rolEfectivo?.nombre || null,
           permisos: permisosEfectivos,
-          es_sede_principal: Boolean(asignacionPlano.es_sede_principal),
-          puede_operar: Boolean(asignacionPlano.puede_operar),
-          puede_ver_reportes: Boolean(asignacionPlano.puede_ver_reportes),
-          puede_ver_finanzas: Boolean(asignacionPlano.puede_ver_finanzas),
-          activo: Boolean(asignacionPlano.activo)
+          es_sede_principal: accesoTodasSedes
+            ? false
+            : Boolean(asignacionPlano?.es_sede_principal),
+          puede_operar: accesoTodasSedes
+            ? true
+            : Boolean(asignacionPlano?.puede_operar),
+          puede_ver_reportes: accesoTodasSedes
+            ? true
+            : Boolean(asignacionPlano?.puede_ver_reportes),
+          puede_ver_finanzas: accesoTodasSedes
+            ? true
+            : Boolean(asignacionPlano?.puede_ver_finanzas),
+          activo: accesoTodasSedes ? true : Boolean(asignacionPlano?.activo),
+          heredada_acceso_global:
+            accesoTodasSedes && !Boolean(asignacionPlano)
         }
       };
     })
@@ -244,9 +276,17 @@ const construirUsuarioSeguro = async (usuario, ultimoLoginOverride = null) => {
 
   const rol = await buscarRolPorId(usuarioPlano.rol_id);
   const rolPlano = rol && typeof rol.toJSON === 'function' ? rol.toJSON() : rol;
+  const accesoTodasSedes = usuarioTieneAccesoTodasSedes({
+    rol_codigo: rolPlano?.codigo,
+    acceso_todas_sedes: usuarioPlano.acceso_todas_sedes
+  });
 
   const [sedes, contextoRolGlobal] = await Promise.all([
-    buscarSedesUsuario(usuarioPlano.id, usuarioPlano.rol_id),
+    buscarSedesUsuario(
+      usuarioPlano.id,
+      usuarioPlano.rol_id,
+      accesoTodasSedes
+    ),
     buscarContextoRoles([usuarioPlano.rol_id])
   ]);
   const permisos =
@@ -256,6 +296,7 @@ const construirUsuarioSeguro = async (usuario, ultimoLoginOverride = null) => {
     id: usuarioPlano.id,
     rol_id: usuarioPlano.rol_id,
     sede_principal_id: usuarioPlano.sede_principal_id,
+    acceso_todas_sedes: accesoTodasSedes,
     nombre: usuarioPlano.nombre,
     apellido: usuarioPlano.apellido,
     email: usuarioPlano.email,
@@ -286,6 +327,10 @@ const construirPayloadUsuario = async (usuario) => {
     rol_id: usuario.rol_id,
     rol_codigo: rol?.codigo || null,
     sede_principal_id: usuario.sede_principal_id || null,
+    acceso_todas_sedes: usuarioTieneAccesoTodasSedes({
+      rol_codigo: rol?.codigo,
+      acceso_todas_sedes: usuario.acceso_todas_sedes
+    }),
     tipo_auth: 'USUARIO'
   };
 };
@@ -580,7 +625,7 @@ export const requirePermission = (permisosRequeridos = []) => {
       });
     }
 
-    if (!requeridos.length || ROLES_GLOBAL_ACCESS.includes(req.user.rol_codigo)) {
+    if (!requeridos.length || usuarioTieneAccesoTodasSedes(req.user)) {
       return next();
     }
 
@@ -645,7 +690,7 @@ export const requireSedeAccess = async (req, res, next) => {
 
     req.sede = typeof sede.toJSON === 'function' ? sede.toJSON() : sede;
 
-    if (ROLES_GLOBAL_ACCESS.includes(req.user.rol_codigo)) {
+    if (usuarioTieneAccesoTodasSedes(req.user)) {
       return next();
     }
 
@@ -688,7 +733,7 @@ export const requireFinanzasSede = (req, res, next) => {
     });
   }
 
-  if (ROLES_GLOBAL_ACCESS.includes(req.user.rol_codigo)) {
+  if (usuarioTieneAccesoTodasSedes(req.user)) {
     return next();
   }
 

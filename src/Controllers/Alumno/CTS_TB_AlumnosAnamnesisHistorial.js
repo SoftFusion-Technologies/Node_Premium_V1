@@ -20,6 +20,7 @@ import AlumnosModel from '../../Models/Alumno/MD_TB_Alumnos.js';
 import AlumnosAnamnesisModel from '../../Models/Alumno/MD_TB_AlumnosAnamnesis.js';
 import AlumnosAnamnesisHistorialModel from '../../Models/Alumno/MD_TB_AlumnosAnamnesisHistorial.js';
 import UsuariosModel from '../../Models/Usuario/MD_TB_Usuarios.js';
+import { usuarioTieneAccesoTodasSedes } from '../../utils/usuariosAcceso.utils.js';
 
 // ─── Roles ────────────────────────────────────────────────────────────────────
 
@@ -33,8 +34,7 @@ const ROLES_LECTURA_ANAMNESIS = [
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-const usuarioEsGlobal = (user) =>
-  ['SUPER_ADMIN', 'DIRECCION'].includes(user?.rol_codigo);
+const usuarioEsGlobal = (user) => usuarioTieneAccesoTodasSedes(user);
 
 const obtenerSedesPermitidasUsuario = (user) => {
   if (!user || !Array.isArray(user.sedes)) return [];

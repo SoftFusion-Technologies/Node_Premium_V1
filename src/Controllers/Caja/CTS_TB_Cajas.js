@@ -40,6 +40,12 @@ const fechaArgentina = () =>
   }).format(new Date());
 const esFechaValida = (valor) =>
   /^\d{4}-\d{2}-\d{2}$/.test(String(valor || ''));
+const esBooleanoVerdadero = (valor) =>
+  ['1', 'true', 'si', 'sí'].includes(
+    String(valor === undefined || valor === null ? '' : valor)
+      .trim()
+      .toLowerCase()
+  );
 const usuarioId = (req) => Number(req.user?.id || req.user?.usuario_id || 0);
 
 const errorRespuesta = (res, error, nombre) => {
@@ -288,14 +294,16 @@ export const OBR_ResumenCaja_CTS = async (req, res) => {
     const sedeId = Number(req.query.sede_id);
     const fecha = req.query.fecha || fechaArgentina();
     const sesionId = Number(req.query.sesion_id || 0);
+    const priorizarAbierta =
+      req.query.priorizar_abierta === undefined
+        ? fecha === fechaArgentina()
+        : esBooleanoVerdadero(req.query.priorizar_abierta);
 
     if (!esFechaValida(fecha)) {
-      return res
-        .status(400)
-        .json({
-          ok: false,
-          message: 'La fecha debe tener formato YYYY-MM-DD.'
-        });
+      return res.status(400).json({
+        ok: false,
+        message: 'La fecha debe tener formato YYYY-MM-DD.'
+      });
     }
 
     let sesion = null;
@@ -304,9 +312,13 @@ export const OBR_ResumenCaja_CTS = async (req, res) => {
         where: { id: sesionId, sede_id: sedeId }
       });
     } else {
-      // La sesión activa puede venir abierta de un día anterior. Para "hoy"
-      // siempre prevalece sobre el histórico por fecha de apertura.
-      if (fecha === fechaArgentina()) {
+      /*
+       * La pantalla informa explícitamente cuándo debe priorizarse la sesión
+       * abierta. Así una caja iniciada el día anterior continúa visible al
+       * recargar, sin depender de comparar la fecha del navegador con la del
+       * servidor. Los clientes anteriores conservan el comportamiento para hoy.
+       */
+      if (priorizarAbierta) {
         sesion = await CajasSesionesModel.findOne({
           where: { sede_id: sedeId, estado: 'abierta' },
           order: [['id', 'DESC']]

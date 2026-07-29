@@ -5,12 +5,12 @@
 import { Op } from 'sequelize';
 
 import SedesModel from '../../Models/Sede/MD_TB_Sedes.js';
+import { usuarioTieneAccesoTodasSedes } from '../../utils/usuariosAcceso.utils.js';
 import GastosTiposModel from '../../Models/Gastos/MD_TB_GastosTipos.js';
 import GastosProveedoresModel from '../../Models/Gastos/MD_TB_GastosProveedores.js';
 
 export const ROLES_GASTOS_LECTURA = ['SUPER_ADMIN', 'DIRECCION', 'COORD_SEDE'];
 export const ROLES_GASTOS_OPERACION = ['SUPER_ADMIN', 'DIRECCION', 'COORD_SEDE'];
-export const ROLES_GLOBALES_GASTOS = ['SUPER_ADMIN', 'DIRECCION'];
 
 export const ESTADOS_GASTO_VALIDOS = ['pendiente', 'pagado', 'anulado'];
 export const ORIGENES_GASTO_VALIDOS = ['manual', 'periodico'];
@@ -138,7 +138,7 @@ export const buildOrder = ({
 };
 
 export const usuarioEsGlobalGastos = (user) => {
-  return ROLES_GLOBALES_GASTOS.includes(user?.rol_codigo);
+  return usuarioTieneAccesoTodasSedes(user);
 };
 
 export const validarRolLecturaGastos = (user) => {

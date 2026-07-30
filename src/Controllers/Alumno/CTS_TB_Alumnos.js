@@ -11,12 +11,14 @@ import AlumnosMembresiasModel from '../../Models/Alumno/MD_TB_AlumnosMembresias.
 import AlumnosContactosEmergenciaModel from '../../Models/Alumno/MD_TB_AlumnosContactosEmergencia.js';
 import AlumnosAnamnesisModel from '../../Models/Alumno/MD_TB_AlumnosAnamnesis.js';
 import AlumnosLoginModel from '../../Models/Alumno/MD_TB_AlumnosLogin.js';
+import PagosMensualidadesModel from '../../Models/Pago/MD_TB_PagosMensualidades.js';
 import PlanesModel from '../../Models/Plan/MD_TB_Planes.js';
 import PlanesPreciosModel from '../../Models/Plan/MD_TB_PlanesPrecios.js';
 import SedesModel from '../../Models/Sede/MD_TB_Sedes.js';
 import UsuariosModel from '../../Models/Usuario/MD_TB_Usuarios.js';
 import { usuarioTieneAccesoTodasSedes } from '../../utils/usuariosAcceso.utils.js';
 import UsuariosRolesModel from '../../Models/Usuario/MD_TB_UsuariosRoles.js';
+import SistemaAuditoriaLogsModel from '../../Models/Sistema/MD_TB_SistemaAuditoriaLogs.js';
 import { hashPassword } from '../../Security/auth.js';
 import {
   capitalizarTexto,
@@ -34,6 +36,23 @@ const ESTADOS_ALUMNO_VALIDOS = [
   'baja',
   'congelado',
   'prueba_clase_inicial'
+];
+
+// Benjamin Orellana - 2026/07/30 - Estados permitidos en la edición rápida.
+// Baja y congelamiento conservan sus flujos específicos porque requieren
+// fechas, motivos y coordinación con la membresía.
+const ESTADOS_ALUMNO_EDICION_RAPIDA = [
+  'pendiente_validacion',
+  'activo',
+  'pendiente_pago',
+  'inactivo',
+  'prueba_clase_inicial'
+];
+
+const ESTADOS_MEMBRESIA_QUE_BLOQUEAN_CAMBIO_SEDE = [
+  'activa',
+  'pendiente_pago',
+  'congelada'
 ];
 
 const ORIGENES_REGISTRO_VALIDOS = ['interno', 'externo', 'importado'];
@@ -105,6 +124,46 @@ const construirFiltroSinRelacionAlumno = (
       SELECT 1
       FROM ${tablaRelacionada} AS ${aliasRelacion}
       WHERE ${aliasRelacion}.${columnaAlumnoRelacion} = ${aliasPrincipal}.${columnaIdAlumno}
+    )
+  `);
+};
+
+
+/*
+ * Benjamin Orellana - 2026/07/30 - Identifica alumnos con al menos una
+ * mensualidad vencida y saldo pendiente. Se usa EXISTS para contar personas,
+ * no mensualidades, y para respetar el alcance de sede aplicado al alumno.
+ */
+const construirFiltroAlumnoMoroso = () => {
+  const queryGenerator = db.getQueryInterface().queryGenerator;
+  const tablaMensualidades = queryGenerator.quoteTable(
+    PagosMensualidadesModel.getTableName()
+  );
+  const aliasPrincipal = queryGenerator.quoteIdentifier(AlumnosModel.name);
+  const aliasMensualidad = queryGenerator.quoteIdentifier(
+    'mensualidades_morosas_estadisticas'
+  );
+  const columnaIdAlumno = queryGenerator.quoteIdentifier('id');
+  const columnaAlumnoRelacion = queryGenerator.quoteIdentifier('alumno_id');
+  const columnaSaldo = queryGenerator.quoteIdentifier('saldo');
+  const columnaEstado = queryGenerator.quoteIdentifier('estado');
+  const columnaFechaVencimiento =
+    queryGenerator.quoteIdentifier('fecha_vencimiento');
+
+  return db.literal(`
+    EXISTS (
+      SELECT 1
+      FROM ${tablaMensualidades} AS ${aliasMensualidad}
+      WHERE ${aliasMensualidad}.${columnaAlumnoRelacion} = ${aliasPrincipal}.${columnaIdAlumno}
+        AND ${aliasMensualidad}.${columnaSaldo} > 0
+        AND ${aliasMensualidad}.${columnaEstado} <> 'anulada'
+        AND (
+          ${aliasMensualidad}.${columnaEstado} = 'vencida'
+          OR (
+            ${aliasMensualidad}.${columnaFechaVencimiento} < CURDATE()
+            AND ${aliasMensualidad}.${columnaEstado} IN ('pendiente', 'parcial')
+          )
+        )
     )
   `);
 };
@@ -747,6 +806,229 @@ const construirFechaVencimientoMembresia = (fechaInicio, duracionDias) => {
   return sumarDiasDateOnly(fechaInicio, Number(duracionDias) - 1);
 };
 
+// Benjamin Orellana - 2026/07/30 - Normaliza una lista de IDs para operaciones
+// masivas y evita procesar duplicados o valores inválidos.
+const normalizarIdsAlumnos = (valores = []) => {
+  if (!Array.isArray(valores)) return [];
+
+  return [
+    ...new Set(
+      valores
+        .map((valor) => Number(valor))
+        .filter((valor) => Number.isInteger(valor) && valor > 0)
+    )
+  ];
+};
+
+const obtenerUsuarioIdRequest = (req) =>
+  req.user?.id || req.user?.usuario_id || null;
+
+const obtenerIpRequest = (req) =>
+  req.headers['x-forwarded-for'] || req.socket?.remoteAddress || req.ip || null;
+
+const buscarMembresiaQueBloqueaCambioSede = async ({
+  alumnoId,
+  transaction
+}) => {
+  return AlumnosMembresiasModel.findOne({
+    where: {
+      alumno_id: Number(alumnoId),
+      estado: { [Op.in]: ESTADOS_MEMBRESIA_QUE_BLOQUEAN_CAMBIO_SEDE },
+      fecha_vencimiento: { [Op.gte]: obtenerFechaActualDateOnly() }
+    },
+    order: [
+      ['fecha_inicio', 'ASC'],
+      ['id', 'ASC']
+    ],
+    transaction,
+    lock: transaction?.LOCK?.UPDATE
+  });
+};
+
+const registrarAuditoriaActualizacionRapidaAlumno = async ({
+  req,
+  alumno,
+  valoresAnteriores,
+  valoresNuevos,
+  origen = 'individual',
+  transaction
+}) => {
+  const campos = Object.keys(valoresNuevos || {});
+
+  if (!campos.length) return;
+
+  await SistemaAuditoriaLogsModel.create(
+    {
+      usuario_id: obtenerUsuarioIdRequest(req),
+      sede_id:
+        valoresNuevos.sede_id ??
+        valoresAnteriores.sede_id ??
+        alumno.sede_id ??
+        null,
+      modulo: 'ALUMNOS',
+      accion:
+        origen === 'masiva'
+          ? 'ACTUALIZACION_RAPIDA_MASIVA'
+          : 'ACTUALIZACION_RAPIDA',
+      entidad: 'alumnos_alumnos',
+      entidad_id: Number(alumno.id),
+      descripcion: `Actualización rápida de ${campos.join(', ')} para ${alumno.nombre} ${alumno.apellido}.`,
+      valores_anteriores: valoresAnteriores,
+      valores_nuevos: valoresNuevos,
+      ip: obtenerIpRequest(req),
+      user_agent: req.headers['user-agent'] || null
+    },
+    { transaction }
+  );
+};
+
+const prepararActualizacionRapidaAlumno = async ({
+  alumno,
+  body,
+  user,
+  sedeDestino = null,
+  transaction
+}) => {
+  const incluyeSede = Object.prototype.hasOwnProperty.call(body, 'sede_id');
+  const incluyeEstado = Object.prototype.hasOwnProperty.call(body, 'estado');
+
+  if (!incluyeSede && !incluyeEstado) {
+    return {
+      ok: false,
+      status: 400,
+      code: 'SIN_CAMBIOS',
+      message: 'Debe indicar una sede, un estado o ambos.'
+    };
+  }
+
+  const alumnoPlano =
+    typeof alumno.toJSON === 'function' ? alumno.toJSON() : { ...alumno };
+
+  if (
+    incluyeEstado &&
+    ['baja', 'congelado'].includes(normalizarTexto(alumnoPlano.estado))
+  ) {
+    return {
+      ok: false,
+      status: 409,
+      code: 'ESTADO_REQUIERE_FLUJO_ESPECIFICO',
+      message:
+        'Los alumnos dados de baja o congelados deben modificarse desde su ficha mediante la operación específica.'
+    };
+  }
+
+  const sedeIdNueva = incluyeSede ? toNumberOrNull(body.sede_id) : null;
+  const estadoNuevo = incluyeEstado ? normalizarTexto(body.estado) : null;
+
+  if (incluyeSede && !sedeIdNueva) {
+    return {
+      ok: false,
+      status: 400,
+      code: 'SEDE_INVALIDA',
+      message: 'La sede indicada no es válida.'
+    };
+  }
+
+  if (incluyeEstado && !ESTADOS_ALUMNO_EDICION_RAPIDA.includes(estadoNuevo)) {
+    return {
+      ok: false,
+      status: 400,
+      code: 'ESTADO_NO_PERMITIDO',
+      message:
+        'El estado indicado no está disponible en la edición rápida. Para baja o congelamiento utilice la operación específica.',
+      estados_validos: ESTADOS_ALUMNO_EDICION_RAPIDA
+    };
+  }
+
+  if (incluyeSede && !usuarioPuedeOperarSede(user, sedeIdNueva)) {
+    return {
+      ok: false,
+      status: 403,
+      code: 'SEDE_SIN_PERMISO',
+      message: 'No tiene acceso para asignar la sede indicada.'
+    };
+  }
+
+  if (incluyeSede && !sedeDestino) {
+    return {
+      ok: false,
+      status: 400,
+      code: 'SEDE_INACTIVA',
+      message: 'La sede indicada no existe o está inactiva.'
+    };
+  }
+
+  const sedeFinal = incluyeSede ? sedeIdNueva : alumnoPlano.sede_id;
+  const estadoFinal = incluyeEstado ? estadoNuevo : alumnoPlano.estado;
+
+  if (estadoFinal === 'activo' && !sedeFinal) {
+    return {
+      ok: false,
+      status: 409,
+      code: 'SEDE_REQUERIDA_PARA_ACTIVAR',
+      message:
+        'Para activar al alumno primero debe asignarle una sede. También puede seleccionar sede y estado en una sola acción masiva.'
+    };
+  }
+
+  if (incluyeSede && Number(alumnoPlano.sede_id || 0) !== Number(sedeIdNueva)) {
+    const membresiaBloqueante = await buscarMembresiaQueBloqueaCambioSede({
+      alumnoId: alumnoPlano.id,
+      transaction
+    });
+
+    if (
+      membresiaBloqueante &&
+      Number(membresiaBloqueante.sede_id || 0) !== Number(sedeIdNueva)
+    ) {
+      return {
+        ok: false,
+        status: 409,
+        code: 'CAMBIO_SEDE_REQUIERE_FLUJO_MEMBRESIA',
+        message:
+          'El alumno tiene una membresía vigente, pendiente o congelada. Para cambiarlo de sede utilice la operación “Cambiar sede” de su ficha.',
+        membresia_id: Number(membresiaBloqueante.id),
+        sede_membresia_id: Number(membresiaBloqueante.sede_id || 0) || null
+      };
+    }
+  }
+
+  const payload = {};
+  const valoresAnteriores = {};
+  const valoresNuevos = {};
+
+  if (incluyeSede && Number(alumnoPlano.sede_id || 0) !== Number(sedeIdNueva)) {
+    payload.sede_id = sedeIdNueva;
+    valoresAnteriores.sede_id = alumnoPlano.sede_id || null;
+    valoresNuevos.sede_id = sedeIdNueva;
+  }
+
+  if (incluyeEstado && alumnoPlano.estado !== estadoNuevo) {
+    payload.estado = estadoNuevo;
+    valoresAnteriores.estado = alumnoPlano.estado;
+    valoresNuevos.estado = estadoNuevo;
+
+    if (estadoNuevo === 'activo') {
+      payload.usuario_validacion_id = user?.id || user?.usuario_id || null;
+      payload.fecha_baja = null;
+      payload.motivo_baja = null;
+    }
+  }
+
+  if (Object.keys(payload).length > 0) {
+    payload.updated_at = new Date();
+  }
+
+  return {
+    ok: true,
+    payload,
+    valoresAnteriores,
+    valoresNuevos,
+    sedeFinal,
+    estadoFinal
+  };
+};
+
 const construirPayloadContactoEmergenciaPublico = (body = {}) => {
   return {
     nombre: normalizarTexto(body.contacto_emergencia_nombre),
@@ -950,10 +1232,34 @@ export const OBR_Alumnos_CTS = async (req, res) => {
     }
 
     const whereEstadisticas = { ...where };
+    const whereAnamnesisPendiente = {
+      ...whereEstadisticas,
+      [Op.and]: [
+        ...(whereEstadisticas[Op.and] || []),
+        construirFiltroSinRelacionAlumno(
+          AlumnosAnamnesisModel,
+          'anamnesis_pendientes_estadisticas'
+        )
+      ]
+    };
+    const whereMorosos = {
+      ...whereEstadisticas,
+      [Op.and]: [
+        ...(whereEstadisticas[Op.and] || []),
+        construirFiltroAlumnoMoroso()
+      ]
+    };
 
-    const [totalSede, activosSede] = await Promise.all([
+    const [
+      totalSede,
+      activosSede,
+      anamnesisPendientesSede,
+      morososSede
+    ] = await Promise.all([
       AlumnosModel.count({ where: whereEstadisticas }),
-      AlumnosModel.count({ where: { ...whereEstadisticas, estado: 'activo' } })
+      AlumnosModel.count({ where: { ...whereEstadisticas, estado: 'activo' } }),
+      AlumnosModel.count({ where: whereAnamnesisPendiente }),
+      AlumnosModel.count({ where: whereMorosos })
     ]);
 
     if (estado) {
@@ -1063,8 +1369,8 @@ export const OBR_Alumnos_CTS = async (req, res) => {
       estadisticas: {
         total: totalSede,
         activos: activosSede,
-        cant_anamnesis_permanente: 0,
-        cant_morosos: 0
+        cant_anamnesis_permanente: anamnesisPendientesSede,
+        cant_morosos: morososSede
       },
       total: count,
       page: pageNumber,
@@ -1129,16 +1435,13 @@ export const OBR_AlumnosSelectorCobro_CTS = async (req, res) => {
         AND pm.estado IN ('pendiente', 'parcial', 'vencida')
         AND pm.saldo > 0
     ), 0)`;
-    const filtroFinanciero = String(situacion_financiera)
-      .trim()
-      .toLowerCase();
+    const filtroFinanciero = String(situacion_financiera).trim().toLowerCase();
     const filtrosFinancierosValidos = ['todos', 'deuda', 'saldo_favor'];
 
     if (!filtrosFinancierosValidos.includes(filtroFinanciero)) {
       return res.status(400).json({
         ok: false,
-        message:
-          'El filtro financiero debe ser todos, deuda o saldo_favor.'
+        message: 'El filtro financiero debe ser todos, deuda o saldo_favor.'
       });
     }
 
@@ -1912,6 +2215,339 @@ export const UR_Alumnos_CTS = async (req, res) => {
 };
 
 /*
+ * Benjamin Orellana - 2026/07/30 - Actualiza sede y/o estado desde la tabla
+ * principal sin exponer la edición completa del alumno.
+ */
+export const UR_ActualizacionRapidaAlumno_CTS = async (req, res) => {
+  const transaction = await db.transaction();
+
+  try {
+    if (!validarRolOperacionAlumnos(req.user)) {
+      await transaction.rollback();
+
+      return res.status(403).json({
+        ok: false,
+        message: 'No tiene permisos para realizar esta operación.'
+      });
+    }
+
+    const alumnoId = Number(req.params.id);
+
+    if (!Number.isInteger(alumnoId) || alumnoId <= 0) {
+      await transaction.rollback();
+
+      return res.status(400).json({
+        ok: false,
+        message: 'El identificador del alumno no es válido.'
+      });
+    }
+
+    const alumno = await AlumnosModel.findByPk(alumnoId, {
+      transaction,
+      lock: transaction.LOCK.UPDATE
+    });
+
+    if (!alumno) {
+      await transaction.rollback();
+
+      return res.status(404).json({
+        ok: false,
+        message: 'Alumno no encontrado.'
+      });
+    }
+
+    if (!usuarioPuedeOperarSede(req.user, alumno.sede_id)) {
+      await transaction.rollback();
+
+      return res.status(403).json({
+        ok: false,
+        message: 'No tiene acceso al alumno indicado.'
+      });
+    }
+
+    const incluyeSede = Object.prototype.hasOwnProperty.call(
+      req.body || {},
+      'sede_id'
+    );
+    const sedeId = incluyeSede ? toNumberOrNull(req.body.sede_id) : null;
+    const sedeDestino = incluyeSede ? await buscarSedeActiva(sedeId) : null;
+
+    const preparacion = await prepararActualizacionRapidaAlumno({
+      alumno,
+      body: req.body || {},
+      user: req.user,
+      sedeDestino,
+      transaction
+    });
+
+    if (!preparacion.ok) {
+      await transaction.rollback();
+
+      return res.status(preparacion.status).json({
+        ok: false,
+        code: preparacion.code,
+        message: preparacion.message,
+        estados_validos: preparacion.estados_validos,
+        membresia_id: preparacion.membresia_id,
+        sede_membresia_id: preparacion.sede_membresia_id
+      });
+    }
+
+    if (Object.keys(preparacion.payload).length > 0) {
+      await alumno.update(preparacion.payload, { transaction });
+
+      await registrarAuditoriaActualizacionRapidaAlumno({
+        req,
+        alumno,
+        valoresAnteriores: preparacion.valoresAnteriores,
+        valoresNuevos: preparacion.valoresNuevos,
+        transaction
+      });
+    }
+
+    await transaction.commit();
+
+    const data = await construirAlumnoRespuesta(alumno);
+
+    return res.status(200).json({
+      ok: true,
+      message:
+        Object.keys(preparacion.payload).length > 0
+          ? 'Alumno actualizado correctamente.'
+          : 'El alumno ya tenía los valores seleccionados.',
+      data
+    });
+  } catch (error) {
+    if (!transaction.finished) {
+      await transaction.rollback();
+    }
+
+    console.error('Error UR_ActualizacionRapidaAlumno_CTS:', error);
+
+    return res.status(500).json({
+      ok: false,
+      message: 'Error al actualizar rápidamente el alumno.'
+    });
+  }
+};
+
+/*
+ * Benjamin Orellana - 2026/07/30 - Aplica sede y/o estado a varios alumnos.
+ * Los errores operativos se informan por alumno y no impiden actualizar al
+ * resto; cualquier error inesperado sí revierte toda la transacción.
+ */
+export const UR_ActualizacionMasivaAlumnos_CTS = async (req, res) => {
+  const transaction = await db.transaction();
+
+  try {
+    if (!validarRolOperacionAlumnos(req.user)) {
+      await transaction.rollback();
+
+      return res.status(403).json({
+        ok: false,
+        message: 'No tiene permisos para realizar esta operación.'
+      });
+    }
+
+    const alumnoIds = normalizarIdsAlumnos(req.body?.alumno_ids);
+    const incluyeSede = Object.prototype.hasOwnProperty.call(
+      req.body || {},
+      'sede_id'
+    );
+    const incluyeEstado = Object.prototype.hasOwnProperty.call(
+      req.body || {},
+      'estado'
+    );
+
+    if (!alumnoIds.length) {
+      await transaction.rollback();
+
+      return res.status(400).json({
+        ok: false,
+        message: 'Debe seleccionar al menos un alumno.'
+      });
+    }
+
+    if (alumnoIds.length > 500) {
+      await transaction.rollback();
+
+      return res.status(400).json({
+        ok: false,
+        message: 'La operación masiva admite hasta 500 alumnos por solicitud.'
+      });
+    }
+
+    if (!incluyeSede && !incluyeEstado) {
+      await transaction.rollback();
+
+      return res.status(400).json({
+        ok: false,
+        message: 'Debe indicar una sede, un estado o ambos.'
+      });
+    }
+
+    const sedeId = incluyeSede ? toNumberOrNull(req.body.sede_id) : null;
+    const estado = incluyeEstado ? normalizarTexto(req.body.estado) : null;
+
+    if (incluyeSede && !sedeId) {
+      await transaction.rollback();
+
+      return res.status(400).json({
+        ok: false,
+        message: 'La sede indicada no es válida.'
+      });
+    }
+
+    if (incluyeEstado && !ESTADOS_ALUMNO_EDICION_RAPIDA.includes(estado)) {
+      await transaction.rollback();
+
+      return res.status(400).json({
+        ok: false,
+        message: 'El estado indicado no está disponible en la edición rápida.',
+        estados_validos: ESTADOS_ALUMNO_EDICION_RAPIDA
+      });
+    }
+
+    if (incluyeSede && !usuarioPuedeOperarSede(req.user, sedeId)) {
+      await transaction.rollback();
+
+      return res.status(403).json({
+        ok: false,
+        message: 'No tiene acceso para asignar la sede indicada.'
+      });
+    }
+
+    const sedeDestino = incluyeSede ? await buscarSedeActiva(sedeId) : null;
+
+    if (incluyeSede && !sedeDestino) {
+      await transaction.rollback();
+
+      return res.status(400).json({
+        ok: false,
+        message: 'La sede indicada no existe o está inactiva.'
+      });
+    }
+
+    const resultados = [];
+    let actualizados = 0;
+    let sinCambios = 0;
+    let rechazados = 0;
+
+    for (const alumnoId of alumnoIds) {
+      const alumno = await AlumnosModel.findByPk(alumnoId, {
+        transaction,
+        lock: transaction.LOCK.UPDATE
+      });
+
+      if (!alumno) {
+        rechazados += 1;
+        resultados.push({
+          alumno_id: alumnoId,
+          ok: false,
+          code: 'ALUMNO_NO_ENCONTRADO',
+          message: 'Alumno no encontrado.'
+        });
+        continue;
+      }
+
+      if (!usuarioPuedeOperarSede(req.user, alumno.sede_id)) {
+        rechazados += 1;
+        resultados.push({
+          alumno_id: alumnoId,
+          ok: false,
+          code: 'ALUMNO_SIN_PERMISO',
+          message: 'No tiene acceso al alumno.'
+        });
+        continue;
+      }
+
+      const preparacion = await prepararActualizacionRapidaAlumno({
+        alumno,
+        body: {
+          ...(incluyeSede ? { sede_id: sedeId } : {}),
+          ...(incluyeEstado ? { estado } : {})
+        },
+        user: req.user,
+        sedeDestino,
+        transaction
+      });
+
+      if (!preparacion.ok) {
+        rechazados += 1;
+        resultados.push({
+          alumno_id: alumnoId,
+          nombre: `${alumno.nombre} ${alumno.apellido}`.trim(),
+          ok: false,
+          code: preparacion.code,
+          message: preparacion.message
+        });
+        continue;
+      }
+
+      if (Object.keys(preparacion.payload).length === 0) {
+        sinCambios += 1;
+        resultados.push({
+          alumno_id: alumnoId,
+          nombre: `${alumno.nombre} ${alumno.apellido}`.trim(),
+          ok: true,
+          sin_cambios: true,
+          message: 'Ya tenía los valores seleccionados.'
+        });
+        continue;
+      }
+
+      await alumno.update(preparacion.payload, { transaction });
+
+      await registrarAuditoriaActualizacionRapidaAlumno({
+        req,
+        alumno,
+        valoresAnteriores: preparacion.valoresAnteriores,
+        valoresNuevos: preparacion.valoresNuevos,
+        origen: 'masiva',
+        transaction
+      });
+
+      actualizados += 1;
+      resultados.push({
+        alumno_id: alumnoId,
+        nombre: `${alumno.nombre} ${alumno.apellido}`.trim(),
+        ok: true,
+        estado: alumno.estado,
+        sede_id: alumno.sede_id
+      });
+    }
+
+    await transaction.commit();
+
+    return res.status(200).json({
+      ok: true,
+      message:
+        rechazados > 0
+          ? 'La actualización masiva finalizó con algunos alumnos rechazados.'
+          : 'La actualización masiva finalizó correctamente.',
+      data: {
+        solicitados: alumnoIds.length,
+        actualizados,
+        sin_cambios: sinCambios,
+        rechazados,
+        resultados
+      }
+    });
+  } catch (error) {
+    if (!transaction.finished) {
+      await transaction.rollback();
+    }
+
+    console.error('Error UR_ActualizacionMasivaAlumnos_CTS:', error);
+
+    return res.status(500).json({
+      ok: false,
+      message: 'Error al realizar la actualización masiva de alumnos.'
+    });
+  }
+};
+
+/*
  * Benjamin Orellana - 2026/05/26 - Cambia estado operativo de un alumno.
  */
 export const UR_EstadoAlumnos_CTS = async (req, res) => {
@@ -1987,22 +2623,26 @@ export const UR_AlumnoPerfil_CTS = async (req, res) => {
       domicilio,
       localidad,
       provincia,
-      fecha_nacimiento
+      fecha_nacimiento,
+      sede_id
     } = req.body;
 
-    // Campos obligatorios (el email es opcional: el alumno puede no tener uno
-    // cargado desde el registro público, y el campo queda deshabilitado en
-    // el formulario de todos modos, así que nunca se actualiza acá).
+    const sedeId = toNumberOrNull(sede_id);
+
+    // Benjamin Orellana - 2026/07/30 - La sede forma parte de los datos
+    // personales obligatorios del primer acceso. El alumno puede elegir una
+    // sede activa mientras no exista una membresía operativa en otra sede.
     if (
       !telefono?.trim() ||
       !domicilio?.trim() ||
       !localidad?.trim() ||
       !provincia?.trim() ||
-      !fecha_nacimiento
+      !fecha_nacimiento ||
+      !sedeId
     ) {
       return res.status(400).json({
         ok: false,
-        message: 'Todos los campos son obligatorios.'
+        message: 'Todos los campos obligatorios deben estar completos.'
       });
     }
 
@@ -2013,6 +2653,35 @@ export const UR_AlumnoPerfil_CTS = async (req, res) => {
         ok: false,
         message: 'Alumno no encontrado.'
       });
+    }
+
+    const sedeSeleccionada = await buscarSedeActiva(sedeId);
+
+    if (!sedeSeleccionada) {
+      return res.status(400).json({
+        ok: false,
+        field: 'sede_id',
+        message: 'La sede seleccionada no existe o está inactiva.'
+      });
+    }
+
+    if (Number(alumno.sede_id || 0) !== Number(sedeId)) {
+      const membresiaBloqueante = await buscarMembresiaQueBloqueaCambioSede({
+        alumnoId
+      });
+
+      if (
+        membresiaBloqueante &&
+        Number(membresiaBloqueante.sede_id || 0) !== Number(sedeId)
+      ) {
+        return res.status(409).json({
+          ok: false,
+          code: 'CAMBIO_SEDE_REQUIERE_GESTION_ADMINISTRATIVA',
+          field: 'sede_id',
+          message:
+            'Tu membresía está asociada a otra sede. Solicitá el cambio en recepción para conservar correctamente tu plan y tus turnos.'
+        });
+      }
     }
 
     // Normalización
@@ -2098,10 +2767,11 @@ export const UR_AlumnoPerfil_CTS = async (req, res) => {
     }
 
     const payload = {
+      sede_id: sedeId,
       telefono: telefonoNormalizado,
       domicilio: domicilioNormalizado,
       localidad: localidadNormalizada,
-      provincia: provincia,
+      provincia,
       fecha_nacimiento
     };
 

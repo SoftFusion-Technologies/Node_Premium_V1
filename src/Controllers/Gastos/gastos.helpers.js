@@ -9,8 +9,18 @@ import { usuarioTieneAccesoTodasSedes } from '../../utils/usuariosAcceso.utils.j
 import GastosTiposModel from '../../Models/Gastos/MD_TB_GastosTipos.js';
 import GastosProveedoresModel from '../../Models/Gastos/MD_TB_GastosProveedores.js';
 
-export const ROLES_GASTOS_LECTURA = ['SUPER_ADMIN', 'DIRECCION', 'COORD_SEDE'];
-export const ROLES_GASTOS_OPERACION = ['SUPER_ADMIN', 'DIRECCION', 'COORD_SEDE'];
+export const ROLES_GASTOS_LECTURA = [
+  'SUPER_ADMIN',
+  'DIRECCION',
+  'COORD_SEDE',
+  'PROFESOR'
+];
+export const ROLES_GASTOS_OPERACION = [
+  'SUPER_ADMIN',
+  'DIRECCION',
+  'COORD_SEDE',
+  'PROFESOR'
+];
 
 export const ESTADOS_GASTO_VALIDOS = ['pendiente', 'pagado', 'anulado'];
 export const ORIGENES_GASTO_VALIDOS = ['manual', 'periodico'];
@@ -141,12 +151,32 @@ export const usuarioEsGlobalGastos = (user) => {
   return usuarioTieneAccesoTodasSedes(user);
 };
 
+const obtenerRolesEfectivosUsuario = (user) => {
+  const roles = new Set();
+
+  if (user?.rol_codigo) roles.add(String(user.rol_codigo).toUpperCase());
+
+  if (Array.isArray(user?.sedes)) {
+    user.sedes.forEach((sede) => {
+      const rol =
+        sede?.asignacion?.rol_codigo || sede?.rol_codigo || user?.rol_codigo;
+      if (rol) roles.add(String(rol).toUpperCase());
+    });
+  }
+
+  return [...roles];
+};
+
 export const validarRolLecturaGastos = (user) => {
-  return ROLES_GASTOS_LECTURA.includes(user?.rol_codigo);
+  return obtenerRolesEfectivosUsuario(user).some((rol) =>
+    ROLES_GASTOS_LECTURA.includes(rol)
+  );
 };
 
 export const validarRolOperacionGastos = (user) => {
-  return ROLES_GASTOS_OPERACION.includes(user?.rol_codigo);
+  return obtenerRolesEfectivosUsuario(user).some((rol) =>
+    ROLES_GASTOS_OPERACION.includes(rol)
+  );
 };
 
 export const obtenerSedesPermitidasUsuario = (user) => {

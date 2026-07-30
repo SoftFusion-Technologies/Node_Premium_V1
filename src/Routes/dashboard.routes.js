@@ -18,7 +18,7 @@ import {
 
 const router = express.Router();
 
-const ROLES_DASHBOARD = ['SUPER_ADMIN', 'DIRECCION', 'COORD_SEDE'];
+const ROLES_DASHBOARD = ['SUPER_ADMIN', 'DIRECCION'];
 
 /*
  * =========================================================

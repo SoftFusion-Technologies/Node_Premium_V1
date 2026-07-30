@@ -5,6 +5,7 @@
 import { Op } from 'sequelize';
 
 import db from '../../DataBase/db.js';
+import { usuarioEsOperadorDiario } from '../../Security/operationalDayScope.js';
 import GastosProveedoresModel from '../../Models/Gastos/MD_TB_GastosProveedores.js';
 import GastosGastosModel from '../../Models/Gastos/MD_TB_GastosGastos.js';
 import GastosPeriodicosModel from '../../Models/Gastos/MD_TB_GastosPeriodicos.js';
@@ -127,6 +128,9 @@ export const OBR_GastosProveedores_CTS = async (req, res) => {
 
     const { rows, count } = await GastosProveedoresModel.findAndCountAll({
       where,
+      attributes: usuarioEsOperadorDiario(req.user)
+        ? ['id', 'nombre', 'activo']
+        : undefined,
       limit: limitNumber,
       offset,
       order
@@ -156,7 +160,11 @@ export const OBR_GastoProveedorPorId_CTS = async (req, res) => {
     }
 
     const { id } = req.params;
-    const proveedor = await GastosProveedoresModel.findByPk(id);
+    const proveedor = await GastosProveedoresModel.findByPk(id, {
+      attributes: usuarioEsOperadorDiario(req.user)
+        ? ['id', 'nombre', 'activo']
+        : undefined
+    });
 
     if (!proveedor) {
       return res.status(404).json({

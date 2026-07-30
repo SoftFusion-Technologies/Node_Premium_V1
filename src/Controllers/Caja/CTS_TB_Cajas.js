@@ -12,6 +12,13 @@ import CajasModel from '../../Models/Caja/MD_TB_Cajas.js';
 import CajasMovimientosModel from '../../Models/Caja/MD_TB_CajasMovimientos.js';
 import CajasSesionesModel from '../../Models/Caja/MD_TB_CajasSesiones.js';
 import PagosMediosPagoModel from '../../Models/Pago/MD_TB_PagosMediosPago.js';
+import SistemaAuditoriaLogsModel from '../../Models/Sistema/MD_TB_SistemaAuditoriaLogs.js';
+import {
+  fechaArgentina as obtenerFechaOperativaArgentina,
+  usuarioTieneAlcanceOperativoDiario,
+  validarFechaConsultaOperativa,
+  validarRegistroDelDia
+} from '../../Security/operationalDayScope.js';
 
 const ESTADOS_SESION = ['abierta', 'cerrada', 'anulada'];
 const TIPOS_MOVIMIENTO = ['ingreso', 'egreso'];
@@ -31,13 +38,7 @@ const texto = (valor, maximo = 500) => {
   const normalizado = String(valor).trim();
   return normalizado ? normalizado.slice(0, maximo) : null;
 };
-const fechaArgentina = () =>
-  new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'America/Argentina/Buenos_Aires',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit'
-  }).format(new Date());
+const fechaArgentina = obtenerFechaOperativaArgentina;
 const esFechaValida = (valor) =>
   /^\d{4}-\d{2}-\d{2}$/.test(String(valor || ''));
 const esBooleanoVerdadero = (valor) =>
@@ -109,6 +110,96 @@ const obtenerMedioEfectivo = async (transaction = null) => {
   }
 
   return medio;
+};
+
+const obtenerUltimaSesionCerrada = async (sedeId, transaction = null) =>
+  CajasSesionesModel.findOne({
+    where: { sede_id: Number(sedeId), estado: 'cerrada' },
+    order: [
+      ['fecha_cierre', 'DESC'],
+      ['id', 'DESC']
+    ],
+    transaction,
+    lock: transaction ? transaction.LOCK.UPDATE : undefined
+  });
+
+const construirAperturaSugerida = (sesionAnterior) => {
+  if (!sesionAnterior) {
+    return {
+      sesion_anterior_id: null,
+      fecha_cierre_anterior: null,
+      monto_sugerido: 0,
+      monto_contado_anterior: null,
+      monto_esperado_anterior: null,
+      diferencia_cierre_anterior: null
+    };
+  }
+
+  const plano =
+    typeof sesionAnterior.toJSON === 'function'
+      ? sesionAnterior.toJSON()
+      : sesionAnterior;
+  const montoContado =
+    plano.monto_contado === null || plano.monto_contado === undefined
+      ? null
+      : redondear(plano.monto_contado);
+  const montoEsperado =
+    plano.monto_esperado === null || plano.monto_esperado === undefined
+      ? null
+      : redondear(plano.monto_esperado);
+
+  return {
+    sesion_anterior_id: Number(plano.id),
+    fecha_cierre_anterior: plano.fecha_cierre || null,
+    monto_sugerido: redondear(montoContado ?? montoEsperado ?? 0),
+    monto_contado_anterior: montoContado,
+    monto_esperado_anterior: montoEsperado,
+    diferencia_cierre_anterior:
+      plano.diferencia === null || plano.diferencia === undefined
+        ? null
+        : redondear(plano.diferencia)
+  };
+};
+
+const registrarAuditoriaDiferenciaApertura = async ({
+  req,
+  sedeId,
+  sesion,
+  apertura,
+  montoInicial,
+  diferencia,
+  observacion,
+  transaction
+}) => {
+  if (Math.abs(diferencia) < 0.01) return;
+
+  await SistemaAuditoriaLogsModel.create(
+    {
+      usuario_id: usuarioId(req) || null,
+      sede_id: Number(sedeId),
+      modulo: 'CAJA',
+      accion: 'DIFERENCIA_APERTURA',
+      entidad: 'cajas_sesiones',
+      entidad_id: Number(sesion.id),
+      descripcion: `Apertura con diferencia de ${diferencia.toFixed(2)} respecto del último cierre.`,
+      valores_anteriores: {
+        sesion_anterior_id: apertura.sesion_anterior_id,
+        monto_sugerido: apertura.monto_sugerido
+      },
+      valores_nuevos: {
+        monto_inicial: montoInicial,
+        diferencia_apertura: diferencia,
+        observacion: observacion || null
+      },
+      ip:
+        req.headers['x-forwarded-for'] ||
+        req.socket?.remoteAddress ||
+        req.ip ||
+        null,
+      user_agent: req.headers['user-agent'] || null
+    },
+    { transaction }
+  );
 };
 
 const listarMovimientosSesion = async (sesionId, transaction = null) =>
@@ -274,6 +365,46 @@ const responderErrorOperacion = async ({ res, error, transaction, nombre }) => {
   return errorRespuesta(res, error, nombre);
 };
 
+export const OBR_AperturaSugeridaCaja_CTS = async (req, res) => {
+  try {
+    const sedeId = Number(req.query.sede_id);
+    const sesionActiva = await CajasSesionesModel.findOne({
+      where: { sede_id: sedeId, estado: 'abierta' },
+      include: [{ model: CajasModel, as: 'caja' }],
+      order: [['id', 'DESC']]
+    });
+
+    if (sesionActiva) {
+      return res.status(200).json({
+        ok: true,
+        hay_sesion_activa: true,
+        message: 'La sede ya tiene una caja abierta.',
+        data: {
+          sesion_activa: sesionActiva,
+          apertura_sugerida: null
+        }
+      });
+    }
+
+    const anterior = await obtenerUltimaSesionCerrada(sedeId);
+    const apertura = construirAperturaSugerida(anterior);
+
+    return res.status(200).json({
+      ok: true,
+      hay_sesion_activa: false,
+      message: anterior
+        ? 'Saldo de apertura sugerido desde el último cierre.'
+        : 'No existe un cierre anterior; la apertura sugerida es cero.',
+      data: {
+        sesion_activa: null,
+        apertura_sugerida: apertura
+      }
+    });
+  } catch (error) {
+    return errorRespuesta(res, error, 'OBR_AperturaSugeridaCaja_CTS');
+  }
+};
+
 export const OBR_CajaSesionActiva_CTS = async (req, res) => {
   try {
     const sedeId = Number(req.query.sede_id);
@@ -292,7 +423,20 @@ export const OBR_CajaSesionActiva_CTS = async (req, res) => {
 export const OBR_ResumenCaja_CTS = async (req, res) => {
   try {
     const sedeId = Number(req.query.sede_id);
-    const fecha = req.query.fecha || fechaArgentina();
+    const alcanceFecha = validarFechaConsultaOperativa({
+      user: req.user,
+      sedeId,
+      fecha: req.query.fecha,
+      nombreCampo: 'Fecha de caja'
+    });
+    if (!alcanceFecha.ok) {
+      return res.status(alcanceFecha.status).json({
+        ok: false,
+        code: alcanceFecha.code,
+        message: alcanceFecha.message
+      });
+    }
+    const fecha = alcanceFecha.fecha;
     const sesionId = Number(req.query.sesion_id || 0);
     const priorizarAbierta =
       req.query.priorizar_abierta === undefined
@@ -343,6 +487,26 @@ export const OBR_ResumenCaja_CTS = async (req, res) => {
       }
     }
 
+    if (sesion && usuarioTieneAlcanceOperativoDiario(req.user, sedeId)) {
+      const planoSesion =
+        typeof sesion.toJSON === 'function' ? sesion.toJSON() : sesion;
+      const registroValido = validarRegistroDelDia({
+        user: req.user,
+        sedeId,
+        fechaRegistro: planoSesion.fecha_apertura,
+        mensaje:
+          'El perfil operativo no puede consultar sesiones cerradas de días anteriores.'
+      });
+
+      if (!registroValido.ok && planoSesion.estado !== 'abierta') {
+        return res.status(registroValido.status).json({
+          ok: false,
+          code: registroValido.code,
+          message: registroValido.message
+        });
+      }
+    }
+
     const data = await cargarResumenSesion(sesion);
     return res.status(200).json({
       ok: true,
@@ -360,8 +524,28 @@ export const OBR_ResumenCaja_CTS = async (req, res) => {
 export const OBR_SesionesCaja_CTS = async (req, res) => {
   try {
     const sedeId = Number(req.query.sede_id);
-    const desde = req.query.desde || fechaArgentina();
-    const hasta = req.query.hasta || desde;
+    const alcanceDesde = validarFechaConsultaOperativa({
+      user: req.user,
+      sedeId,
+      fecha: req.query.desde,
+      nombreCampo: 'Fecha desde'
+    });
+    const alcanceHasta = validarFechaConsultaOperativa({
+      user: req.user,
+      sedeId,
+      fecha: req.query.hasta,
+      nombreCampo: 'Fecha hasta'
+    });
+    const alcanceInvalido = !alcanceDesde.ok ? alcanceDesde : !alcanceHasta.ok ? alcanceHasta : null;
+    if (alcanceInvalido) {
+      return res.status(alcanceInvalido.status).json({
+        ok: false,
+        code: alcanceInvalido.code,
+        message: alcanceInvalido.message
+      });
+    }
+    const desde = alcanceDesde.fecha;
+    const hasta = alcanceHasta.fecha;
     const estado = req.query.estado ? String(req.query.estado) : null;
 
     if (!esFechaValida(desde) || !esFechaValida(hasta)) {
@@ -403,12 +587,31 @@ export const CR_AbrirCajaPrincipal_CTS = async (req, res) => {
   const transaction = await db.transaction();
   try {
     const sedeId = Number(req.body.sede_id);
-    const montoInicial = numeroNoNegativo(req.body.monto_inicial ?? 0);
     const observaciones = texto(req.body.observaciones);
+    const observacionDiferencia = texto(
+      req.body.observacion_diferencia_apertura || req.body.observaciones_diferencia
+    );
+
+    const sesionAnterior = await obtenerUltimaSesionCerrada(sedeId, transaction);
+    const apertura = construirAperturaSugerida(sesionAnterior);
+    const montoInicial = numeroNoNegativo(
+      req.body.monto_inicial ?? apertura.monto_sugerido
+    );
 
     if (montoInicial === null) {
       const error = new Error(
         'El monto inicial debe ser un número mayor o igual a cero.'
+      );
+      error.status = 400;
+      throw error;
+    }
+
+    const diferenciaApertura = redondear(
+      montoInicial - Number(apertura.monto_sugerido || 0)
+    );
+    if (Math.abs(diferenciaApertura) >= 0.01 && !observacionDiferencia) {
+      const error = new Error(
+        'El monto contado no coincide con el último cierre. Indicá una observación para dejar la diferencia auditada.'
       );
       error.status = 400;
       throw error;
@@ -449,6 +652,12 @@ export const CR_AbrirCajaPrincipal_CTS = async (req, res) => {
         usuario_apertura_id: usuarioId(req),
         fecha_apertura: new Date(),
         monto_inicial: montoInicial.toFixed(2),
+        sesion_anterior_id: apertura.sesion_anterior_id,
+        monto_sugerido_apertura: Number(apertura.monto_sugerido).toFixed(2),
+        diferencia_apertura: diferenciaApertura.toFixed(2),
+        observacion_diferencia_apertura: observacionDiferencia,
+        requiere_revision_apertura:
+          Math.abs(diferenciaApertura) >= 0.01 ? 1 : 0,
         estado: 'abierta',
         // La clave única usa el id de caja: permite una sesión abierta por caja/sede.
         clave_abierta: Number(caja.id),
@@ -457,10 +666,30 @@ export const CR_AbrirCajaPrincipal_CTS = async (req, res) => {
       { transaction }
     );
 
+    await registrarAuditoriaDiferenciaApertura({
+      req,
+      sedeId,
+      sesion,
+      apertura,
+      montoInicial,
+      diferencia: diferenciaApertura,
+      observacion: observacionDiferencia,
+      transaction
+    });
+
     await transaction.commit();
     return res.status(201).json({
       ok: true,
-      message: 'Caja abierta correctamente.',
+      message:
+        Math.abs(diferenciaApertura) >= 0.01
+          ? 'Caja abierta con una diferencia de apertura registrada para revisión.'
+          : 'Caja abierta correctamente.',
+      apertura: {
+        ...apertura,
+        monto_inicial: montoInicial,
+        diferencia_apertura: diferenciaApertura,
+        requiere_revision: Math.abs(diferenciaApertura) >= 0.01
+      },
       // Mantiene el contrato consumido por ConfirmarCobroPanel: data.id es la sesión.
       data: {
         ...(typeof sesion.toJSON === 'function' ? sesion.toJSON() : sesion),

@@ -1,6 +1,10 @@
 /* Rutas del catálogo y de la gestión de productos y servicios PREMIUM. */
 import express from 'express';
-import { authenticateToken, requireRolGlobal } from '../Security/auth.js';
+import {
+  authenticateToken,
+  requirePermission,
+  requireRolGlobal
+} from '../Security/auth.js';
 import {
   OBR_CategoriasServiciosCobro_CTS,
   OBR_ServiciosCobro_CTS,
@@ -32,9 +36,11 @@ import {
 } from '../Controllers/Catalogo/CTS_TB_ServiciosGestion.js';
 
 const router = express.Router();
-const ROLES_COBROS = ['SUPER_ADMIN', 'DIRECCION', 'FRONT_COMERCIAL', 'COORD_SEDE', 'PROFESOR'];
-const ROLES_GESTION = ['SUPER_ADMIN', 'DIRECCION', 'FRONT_COMERCIAL', 'COORD_SEDE'];
-const seguridadCobros = [authenticateToken, requireRolGlobal(ROLES_COBROS)];
+const ROLES_GESTION = ['SUPER_ADMIN', 'DIRECCION', 'FRONT_COMERCIAL'];
+const seguridadCobros = [
+  authenticateToken,
+  requirePermission('cobros.registrar')
+];
 const seguridadGestion = [authenticateToken, requireRolGlobal(ROLES_GESTION)];
 
 router.get('/catalogo-cobros/servicios/categorias', ...seguridadCobros, OBR_CategoriasServiciosCobro_CTS);

@@ -14,7 +14,12 @@
 
 import express from 'express';
 
-import { authenticateToken, requireRolGlobal } from '../Security/auth.js';
+import {
+  authenticateToken,
+  requirePermission,
+  requireRolGlobal
+} from '../Security/auth.js';
+import { requireFechaOperativaActual } from '../Security/operationalDayScope.js';
 
 import {
   OBR_GastosTipos_CTS,
@@ -58,7 +63,13 @@ import {
 
 const router = express.Router();
 
-const ROLES_GASTOS = ['SUPER_ADMIN', 'DIRECCION', 'COORD_SEDE'];
+const ROLES_GASTOS_OPERATIVOS = [
+  'SUPER_ADMIN',
+  'DIRECCION',
+  'COORD_SEDE',
+  'PROFESOR'
+];
+const ROLES_GASTOS_ADMIN = ['SUPER_ADMIN', 'DIRECCION'];
 
 /*
  * =========================================================
@@ -69,35 +80,35 @@ const ROLES_GASTOS = ['SUPER_ADMIN', 'DIRECCION', 'COORD_SEDE'];
 router.get(
   '/gastos-tipos',
   authenticateToken,
-  requireRolGlobal(ROLES_GASTOS),
+  requirePermission('gastos.ver'),
   OBR_GastosTipos_CTS
 );
 
 router.get(
   '/gastos-tipos/:id',
   authenticateToken,
-  requireRolGlobal(ROLES_GASTOS),
+  requireRolGlobal(ROLES_GASTOS_OPERATIVOS),
   OBR_GastoTipoPorId_CTS
 );
 
 router.post(
   '/gastos-tipos',
   authenticateToken,
-  requireRolGlobal(ROLES_GASTOS),
+  requireRolGlobal(ROLES_GASTOS_ADMIN),
   CR_GastosTipos_CTS
 );
 
 router.put(
   '/gastos-tipos/:id',
   authenticateToken,
-  requireRolGlobal(ROLES_GASTOS),
+  requireRolGlobal(ROLES_GASTOS_ADMIN),
   UR_GastosTipos_CTS
 );
 
 router.delete(
   '/gastos-tipos/:id',
   authenticateToken,
-  requireRolGlobal(ROLES_GASTOS),
+  requireRolGlobal(ROLES_GASTOS_ADMIN),
   DR_GastosTipos_CTS
 );
 
@@ -110,35 +121,35 @@ router.delete(
 router.get(
   '/gastos-proveedores',
   authenticateToken,
-  requireRolGlobal(ROLES_GASTOS),
+  requirePermission('gastos.ver'),
   OBR_GastosProveedores_CTS
 );
 
 router.get(
   '/gastos-proveedores/:id',
   authenticateToken,
-  requireRolGlobal(ROLES_GASTOS),
+  requireRolGlobal(ROLES_GASTOS_OPERATIVOS),
   OBR_GastoProveedorPorId_CTS
 );
 
 router.post(
   '/gastos-proveedores',
   authenticateToken,
-  requireRolGlobal(ROLES_GASTOS),
+  requireRolGlobal(ROLES_GASTOS_ADMIN),
   CR_GastosProveedores_CTS
 );
 
 router.put(
   '/gastos-proveedores/:id',
   authenticateToken,
-  requireRolGlobal(ROLES_GASTOS),
+  requireRolGlobal(ROLES_GASTOS_ADMIN),
   UR_GastosProveedores_CTS
 );
 
 router.delete(
   '/gastos-proveedores/:id',
   authenticateToken,
-  requireRolGlobal(ROLES_GASTOS),
+  requireRolGlobal(ROLES_GASTOS_ADMIN),
   DR_GastosProveedores_CTS
 );
 
@@ -151,28 +162,32 @@ router.delete(
 router.get(
   '/gastos-reportes/resumen',
   authenticateToken,
-  requireRolGlobal(ROLES_GASTOS),
+  requirePermission('gastos.ver'),
+  requireFechaOperativaActual,
   OBR_GastosResumen_CTS
 );
 
 router.get(
   '/gastos-reportes/por-tipo',
   authenticateToken,
-  requireRolGlobal(ROLES_GASTOS),
+  requirePermission('gastos.ver'),
+  requireFechaOperativaActual,
   OBR_GastosPorTipo_CTS
 );
 
 router.get(
   '/gastos-reportes/por-sede',
   authenticateToken,
-  requireRolGlobal(ROLES_GASTOS),
+  requirePermission('gastos.ver'),
+  requireFechaOperativaActual,
   OBR_GastosPorSede_CTS
 );
 
 router.get(
   '/gastos-reportes/por-proveedor',
   authenticateToken,
-  requireRolGlobal(ROLES_GASTOS),
+  requirePermission('gastos.ver'),
+  requireFechaOperativaActual,
   OBR_GastosPorProveedor_CTS
 );
 
@@ -185,42 +200,42 @@ router.get(
 router.get(
   '/gastos-periodicos',
   authenticateToken,
-  requireRolGlobal(ROLES_GASTOS),
+  requireRolGlobal(ROLES_GASTOS_ADMIN),
   OBR_GastosPeriodicos_CTS
 );
 
 router.get(
   '/gastos-periodicos/:id',
   authenticateToken,
-  requireRolGlobal(ROLES_GASTOS),
+  requireRolGlobal(ROLES_GASTOS_ADMIN),
   OBR_GastoPeriodicoPorId_CTS
 );
 
 router.post(
   '/gastos-periodicos',
   authenticateToken,
-  requireRolGlobal(ROLES_GASTOS),
+  requireRolGlobal(ROLES_GASTOS_ADMIN),
   CR_GastosPeriodicos_CTS
 );
 
 router.post(
   '/gastos-periodicos/:id/generar',
   authenticateToken,
-  requireRolGlobal(ROLES_GASTOS),
+  requireRolGlobal(ROLES_GASTOS_ADMIN),
   CR_GenerarGastoDesdePeriodico_CTS
 );
 
 router.put(
   '/gastos-periodicos/:id',
   authenticateToken,
-  requireRolGlobal(ROLES_GASTOS),
+  requireRolGlobal(ROLES_GASTOS_ADMIN),
   UR_GastosPeriodicos_CTS
 );
 
 router.delete(
   '/gastos-periodicos/:id',
   authenticateToken,
-  requireRolGlobal(ROLES_GASTOS),
+  requireRolGlobal(ROLES_GASTOS_ADMIN),
   DR_GastosPeriodicos_CTS
 );
 
@@ -233,35 +248,35 @@ router.delete(
 router.get(
   '/gastos',
   authenticateToken,
-  requireRolGlobal(ROLES_GASTOS),
+  requirePermission('gastos.ver'),
   OBR_Gastos_CTS
 );
 
 router.get(
   '/gastos/:id',
   authenticateToken,
-  requireRolGlobal(ROLES_GASTOS),
+  requireRolGlobal(ROLES_GASTOS_OPERATIVOS),
   OBR_GastoPorId_CTS
 );
 
 router.post(
   '/gastos',
   authenticateToken,
-  requireRolGlobal(ROLES_GASTOS),
+  requirePermission('gastos.ver'),
   CR_Gastos_CTS
 );
 
 router.put(
   '/gastos/:id',
   authenticateToken,
-  requireRolGlobal(ROLES_GASTOS),
+  requirePermission('gastos.ver'),
   UR_Gastos_CTS
 );
 
 router.delete(
   '/gastos/:id',
   authenticateToken,
-  requireRolGlobal(ROLES_GASTOS),
+  requireRolGlobal(ROLES_GASTOS_ADMIN),
   DR_Gastos_CTS
 );
 

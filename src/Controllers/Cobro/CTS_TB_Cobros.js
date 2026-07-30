@@ -6,6 +6,13 @@
 import { QueryTypes } from 'sequelize';
 import db from '../../DataBase/db.js';
 import PagosMediosPagoModel from '../../Models/Pago/MD_TB_PagosMediosPago.js';
+import AlumnosModel from '../../Models/Alumno/MD_TB_Alumnos.js';
+import AlumnosSaldosModel from '../../Models/Alumno/MD_TB_AlumnosSaldos.js';
+import {
+  fechaArgentina,
+  usuarioTieneAlcanceOperativoDiario,
+  validarFechaConsultaOperativa
+} from '../../Security/operationalDayScope.js';
 import {
   anularCobroConfirmado,
   CobroOperacionError,
@@ -102,6 +109,59 @@ export const OBR_MediosPagoCobro_CTS = async (_req, res) => {
   }
 };
 
+// Benjamin Orellana - 2026/07/30 - Saldo mínimo necesario para completar un cobro.
+// No expone movimientos, auditoría ni información financiera histórica del alumno.
+export const OBR_SaldoDisponibleCobro_CTS = async (req, res) => {
+  try {
+    const alumnoId = Number(req.params.alumno_id);
+    const sedeId = Number(req.query.sede_id);
+
+    if (!Number.isInteger(alumnoId) || alumnoId <= 0) {
+      return res.status(400).json({
+        ok: false,
+        message: 'Debe indicar un alumno válido.'
+      });
+    }
+
+    if (!Number.isInteger(sedeId) || sedeId <= 0) {
+      return res.status(400).json({
+        ok: false,
+        message: 'Debe indicar una sede válida.'
+      });
+    }
+
+    const alumno = await AlumnosModel.findByPk(alumnoId, {
+      attributes: ['id']
+    });
+
+    if (!alumno) {
+      return res.status(404).json({
+        ok: false,
+        message: 'No se encontró el alumno seleccionado.'
+      });
+    }
+
+    const cuenta = await AlumnosSaldosModel.findOne({
+      where: { alumno_id: alumnoId },
+      attributes: ['saldo', 'moneda']
+    });
+
+    return res.status(200).json({
+      ok: true,
+      data: {
+        saldo: Number(cuenta?.saldo || 0),
+        moneda: cuenta?.moneda || 'ARS'
+      }
+    });
+  } catch (error) {
+    console.error('Error OBR_SaldoDisponibleCobro_CTS:', error);
+    return res.status(500).json({
+      ok: false,
+      message: 'Error al consultar el saldo disponible para el cobro.'
+    });
+  }
+};
+
 export const CR_Cobros_CTS = async (req, res) => {
   try {
     const resultado = await registrarCobro({
@@ -126,10 +186,35 @@ export const CR_Cobros_CTS = async (req, res) => {
 
 export const OBR_Cobros_CTS = async (req, res) => {
   try {
-    const page = Math.max(Number(req.query.page || 1), 1);
-    const limit = Math.min(Math.max(Number(req.query.limit || 20), 1), 100);
+    const sedeId = Number(req.query.sede_id);
+    const desdeScope = validarFechaConsultaOperativa({
+      user: req.user,
+      sedeId,
+      fecha: req.query.desde,
+      nombreCampo: 'Fecha desde'
+    });
+    const hastaScope = validarFechaConsultaOperativa({
+      user: req.user,
+      sedeId,
+      fecha: req.query.hasta,
+      nombreCampo: 'Fecha hasta'
+    });
+    const scopeInvalido = !desdeScope.ok ? desdeScope : !hastaScope.ok ? hastaScope : null;
+    if (scopeInvalido) {
+      return res.status(scopeInvalido.status).json({
+        ok: false,
+        code: scopeInvalido.code,
+        message: scopeInvalido.message
+      });
+    }
+
+    const queryOperativa = usuarioTieneAlcanceOperativoDiario(req.user, sedeId)
+      ? { ...req.query, desde: fechaArgentina(), hasta: fechaArgentina() }
+      : req.query;
+    const page = Math.max(Number(queryOperativa.page || 1), 1);
+    const limit = Math.min(Math.max(Number(queryOperativa.limit || 20), 1), 100);
     const offset = (page - 1) * limit;
-    const { whereSql, replacements } = construirFiltros(req.query);
+    const { whereSql, replacements } = construirFiltros(queryOperativa);
 
     const [rows, totalRows, resumenRows] = await Promise.all([
       db.query(
@@ -234,13 +319,19 @@ export const OBR_CobrosPendientesCount_CTS = async (req, res) => {
       });
     }
 
+    const soloHoy = usuarioTieneAlcanceOperativoDiario(req.user, sedeId);
     const rows = await db.query(
       `SELECT COUNT(*) AS cantidad
       FROM cobros_cobros
       WHERE sede_id = :sedeId
-        AND estado = 'pendiente_validacion'`,
+        AND estado = 'pendiente_validacion'
+        AND (:soloHoy = 0 OR DATE(fecha_cobro) = :hoy)`,
       {
-        replacements: { sedeId },
+        replacements: {
+          sedeId,
+          soloHoy: soloHoy ? 1 : 0,
+          hoy: fechaArgentina()
+        },
         type: QueryTypes.SELECT
       }
     );
@@ -260,9 +351,13 @@ export const OBR_CobrosPendientesCount_CTS = async (req, res) => {
 
 export const OBR_CobroDetalle_CTS = async (req, res) => {
   try {
+    const sedeId = Number(req.query.sede_id);
+    const soloHoy = usuarioTieneAlcanceOperativoDiario(req.user, sedeId);
     const replacements = {
       id: Number(req.params.id),
-      sedeId: Number(req.query.sede_id)
+      sedeId,
+      soloHoy: soloHoy ? 1 : 0,
+      hoy: fechaArgentina()
     };
     const cabeceras = await db.query(
       `SELECT c.*,
@@ -297,7 +392,9 @@ export const OBR_CobroDetalle_CTS = async (req, res) => {
       INNER JOIN cajas_sesiones cs ON cs.id = c.caja_sesion_id
       INNER JOIN cajas_cajas caja ON caja.id = cs.caja_id
       LEFT JOIN usuarios_usuarios anulador ON anulador.id = c.usuario_anulacion_id
-      WHERE c.id = :id AND c.sede_id = :sedeId LIMIT 1`,
+      WHERE c.id = :id AND c.sede_id = :sedeId
+        AND (:soloHoy = 0 OR DATE(c.fecha_cobro) = :hoy)
+      LIMIT 1`,
       { replacements, type: QueryTypes.SELECT }
     );
     if (!cabeceras[0])

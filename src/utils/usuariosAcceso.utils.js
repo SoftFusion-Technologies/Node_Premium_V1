@@ -24,7 +24,7 @@ export const PERFILES_ACCESO_SEDE = {
   PROFESOR: {
     puede_operar: true,
     puede_ver_reportes: false,
-    puede_ver_finanzas: false
+    puede_ver_finanzas: true
   }
 };
 

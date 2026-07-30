@@ -28,6 +28,35 @@ import AlumnosModel                 from '../../Models/Alumno/MD_TB_Alumnos.js';
 import db                           from '../../DataBase/db.js';
 import { obtenerMinutosCancelacion, marcarAsistenciaComoCancelada } from './CTS_TB_AgendaTurnosReservas.js';
 
+const ROLES_SIN_BORRADO_TURNOS = new Set(['PROFESOR', 'COORD_SEDE']);
+
+const obtenerRolEfectivoAgenda = (usuario, sedeId) => {
+  const sedeAsignada = Array.isArray(usuario?.sedes)
+    ? usuario.sedes.find((sede) => Number(sede.id ?? sede.sede_id) === Number(sedeId))
+    : null;
+
+  return String(
+    sedeAsignada?.asignacion?.rol_codigo || usuario?.rol_codigo || ''
+  ).toUpperCase();
+};
+
+const usuarioPuedeEliminarTurnos = (usuario, sedeIds = []) => {
+  return sedeIds.every(
+    (sedeId) => !ROLES_SIN_BORRADO_TURNOS.has(
+      obtenerRolEfectivoAgenda(usuario, sedeId)
+    )
+  );
+};
+
+const responderBorradoTurnosRestringido = (res) => {
+  return res.status(403).json({
+    ok: false,
+    code: 'AGENDA_DELETE_FORBIDDEN',
+    message:
+      'Profesor y Coordinador pueden administrar la agenda, pero no eliminar turnos.'
+  });
+};
+
 // Días de anticipación para marcar el bono/membresía como "por vencer".
 const DIAS_ALERTA_VENCIMIENTO_MEMBRESIA = 3;
 
@@ -1146,6 +1175,11 @@ export const ER_Turno_CTS = async (req, res) => {
       return res.status(404).json({ message: 'Turno no encontrado.' });
     }
 
+    if (!usuarioPuedeEliminarTurnos(req.user, [turno.sede_id])) {
+      await transaccion.rollback();
+      return responderBorradoTurnosRestringido(res);
+    }
+
     const minutosLimite = await obtenerMinutosCancelacion();
     const inicioTurno = dayjs(`${turno.fecha} ${turno.hora_inicio}`);
     const minutosRestantes = inicioTurno.diff(dayjs(), 'minute');
@@ -1377,6 +1411,11 @@ export const ER_TurnosMasivo_CTS = async (req, res) => {
           message:
             'Faltan campos requeridos: sede_ids, fecha_inicio, fecha_fin.'
         });
+    }
+
+    if (!usuarioPuedeEliminarTurnos(req.user, sede_ids)) {
+      await transaccion.rollback();
+      return responderBorradoTurnosRestringido(res);
     }
 
     const where = {

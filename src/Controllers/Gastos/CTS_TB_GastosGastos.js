@@ -12,6 +12,13 @@ import GastosPeriodicosModel from '../../Models/Gastos/MD_TB_GastosPeriodicos.js
 import CajasMovimientosModel from '../../Models/Caja/MD_TB_CajasMovimientos.js';
 import CajasSesionesModel from '../../Models/Caja/MD_TB_CajasSesiones.js';
 import PagosMediosPagoModel from '../../Models/Pago/MD_TB_PagosMediosPago.js';
+import {
+  fechaArgentina,
+  usuarioEsOperadorDiario,
+  usuarioTieneAlcanceOperativoDiario,
+  validarFechaConsultaOperativa,
+  validarRegistroDelDia
+} from '../../Security/operationalDayScope.js';
 
 import {
   anexarSedesARegistros,
@@ -116,70 +123,6 @@ const obtenerMovimientoGastoVigente = async (gastoId, transaction) => {
   });
 };
 
-const validarEfectivoDisponible = async ({
-  sesion,
-  medioPago,
-  importe,
-  transaction
-}) => {
-  const esEfectivo =
-    String(medioPago.tipo || '').toLowerCase() === 'efectivo' ||
-    String(medioPago.codigo || '').toUpperCase() === 'EFECTIVO';
-
-  if (!esEfectivo) return;
-
-  const movimientos = await CajasMovimientosModel.findAll({
-    where: {
-      caja_sesion_id: Number(sesion.id),
-      estado: ESTADO_MOVIMIENTO_VIGENTE
-    },
-    transaction
-  });
-  const mediosIds = [
-    ...new Set(
-      movimientos
-        .map((movimiento) => Number(movimiento.medio_pago_id))
-        .filter(Boolean)
-    )
-  ];
-  const medios = mediosIds.length
-    ? await PagosMediosPagoModel.findAll({
-        where: {
-          id: {
-            [Op.in]: mediosIds
-          }
-        },
-        attributes: ['id', 'codigo', 'tipo'],
-        transaction
-      })
-    : [];
-  const mediosMap = medios.reduce((acc, medio) => {
-    acc[Number(medio.id)] = medio;
-    return acc;
-  }, {});
-
-  const efectivoNeto = movimientos.reduce((total, movimiento) => {
-    const medio = mediosMap[Number(movimiento.medio_pago_id)];
-    const movimientoEsEfectivo =
-      String(medio?.tipo || '').toLowerCase() === 'efectivo' ||
-      String(medio?.codigo || '').toUpperCase() === 'EFECTIVO';
-
-    if (!movimientoEsEfectivo) return total;
-
-    const monto = Number(movimiento.monto || 0);
-    return total + (movimiento.tipo === 'ingreso' ? monto : -monto);
-  }, 0);
-
-  const efectivoEsperado =
-    Number(sesion.monto_inicial || 0) + Number(efectivoNeto || 0);
-
-  if (Number(importe || 0) > efectivoEsperado + 0.009) {
-    throw crearErrorOperacion(
-      'El gasto supera el efectivo esperado en la caja de la sede seleccionada.'
-    );
-  }
-};
-
 const registrarMovimientoCajaGasto = async ({
   gasto,
   medioPagoId,
@@ -194,13 +137,11 @@ const registrarMovimientoCajaGasto = async ({
   const sesion = await obtenerSesionAbierta(gasto.sede_id, transaction);
   const importe = Number(gasto.importe_total || 0);
 
-  await validarEfectivoDisponible({
-    sesion,
-    medioPago,
-    importe,
-    transaction
-  });
-
+  /*
+   * Un gasto operativo puede dejar el efectivo esperado en negativo. Esto
+   * representa fielmente la jornada (por ejemplo, un gasto pagado con dinero
+   * adelantado por el responsable) y la diferencia queda visible al cerrar.
+   */
   return CajasMovimientosModel.create(
     {
       caja_sesion_id: Number(sesion.id),
@@ -494,7 +435,7 @@ const construirWhereGastos = (query = {}) => {
   return where;
 };
 
-const buildIncludeGastos = () => [
+const buildIncludeGastos = (user = null) => [
   {
     model: GastosTiposModel,
     as: 'tipo_gasto',
@@ -504,7 +445,9 @@ const buildIncludeGastos = () => [
   {
     model: GastosProveedoresModel,
     as: 'proveedor',
-    attributes: ['id', 'nombre', 'cuit', 'telefono', 'email', 'activo'],
+    attributes: usuarioEsOperadorDiario(user)
+      ? ['id', 'nombre', 'activo']
+      : ['id', 'nombre', 'cuit', 'telefono', 'email', 'activo'],
     required: false
   },
   {
@@ -532,7 +475,48 @@ export const OBR_Gastos_CTS = async (req, res) => {
       orderDirection = 'DESC'
     } = req.query;
 
-    const where = construirWhereGastos(req.query);
+    if (usuarioEsOperadorDiario(req.user) && !Number(sede_id)) {
+      return res.status(400).json({
+        ok: false,
+        code: 'OPERATIONAL_SEDE_REQUIRED',
+        message: 'Debe indicar la sede activa para consultar los gastos del día.'
+      });
+    }
+
+    const alcanceDesde = validarFechaConsultaOperativa({
+      user: req.user,
+      sedeId: sede_id,
+      fecha: req.query.fecha_desde,
+      nombreCampo: 'Fecha desde'
+    });
+    const alcanceHasta = validarFechaConsultaOperativa({
+      user: req.user,
+      sedeId: sede_id,
+      fecha: req.query.fecha_hasta,
+      nombreCampo: 'Fecha hasta'
+    });
+    const alcanceInvalido = !alcanceDesde.ok
+      ? alcanceDesde
+      : !alcanceHasta.ok
+        ? alcanceHasta
+        : null;
+
+    if (alcanceInvalido) {
+      return res.status(alcanceInvalido.status).json({
+        ok: false,
+        code: alcanceInvalido.code,
+        message: alcanceInvalido.message
+      });
+    }
+
+    const queryOperativa = usuarioTieneAlcanceOperativoDiario(req.user, sede_id)
+      ? {
+          ...req.query,
+          fecha_desde: fechaArgentina(),
+          fecha_hasta: fechaArgentina()
+        }
+      : req.query;
+    const where = construirWhereGastos(queryOperativa);
     const scope = aplicarScopeSedesGastos(where, req.user, sede_id);
 
     if (!scope.ok) {
@@ -577,7 +561,7 @@ export const OBR_Gastos_CTS = async (req, res) => {
 
     const { rows, count } = await GastosGastosModel.findAndCountAll({
       where,
-      include: buildIncludeGastos(),
+      include: buildIncludeGastos(req.user),
       limit: limitNumber,
       offset,
       order,
@@ -612,7 +596,7 @@ export const OBR_GastoPorId_CTS = async (req, res) => {
 
     const { id } = req.params;
     const gasto = await GastosGastosModel.findByPk(id, {
-      include: buildIncludeGastos()
+      include: buildIncludeGastos(req.user)
     });
 
     if (!gasto) {
@@ -628,6 +612,21 @@ export const OBR_GastoPorId_CTS = async (req, res) => {
       return res.status(scope.status).json({
         ok: false,
         message: scope.message
+      });
+    }
+
+    const validacionFecha = validarRegistroDelDia({
+      user: req.user,
+      sedeId: gasto.sede_id,
+      fechaRegistro: gasto.fecha_gasto,
+      mensaje:
+        'El perfil operativo no puede consultar gastos de días anteriores.'
+    });
+    if (!validacionFecha.ok) {
+      return res.status(validacionFecha.status).json({
+        ok: false,
+        code: validacionFecha.code,
+        message: validacionFecha.message
       });
     }
 
@@ -658,6 +657,23 @@ export const CR_Gastos_CTS = async (req, res) => {
     }
 
     const payload = buildPayloadGastoCreate(req.body);
+
+    if (usuarioEsOperadorDiario(req.user) && !Number(payload.sede_id)) {
+      await transaction.rollback();
+      return res.status(400).json({
+        ok: false,
+        code: 'OPERATIONAL_SEDE_REQUIRED',
+        message: 'Debe indicar la sede activa para registrar el gasto del día.'
+      });
+    }
+
+    if (usuarioTieneAlcanceOperativoDiario(req.user, payload.sede_id)) {
+      payload.fecha_gasto = fechaArgentina();
+      payload.fecha_pago =
+        payload.estado === 'pagado' ? fechaArgentina() : null;
+      payload.origen = 'manual';
+      payload.gasto_periodico_id = null;
+    }
     const errores = validarPayloadGasto(payload, 'create');
 
     const erroresRelaciones = await validarSedeTipoProveedor({
@@ -702,7 +718,7 @@ export const CR_Gastos_CTS = async (req, res) => {
     await transaction.commit();
 
     const data = await GastosGastosModel.findByPk(nuevoGasto.id, {
-      include: buildIncludeGastos()
+      include: buildIncludeGastos(req.user)
     });
     const [dataConSede] = await anexarSedesARegistros([data]);
     const [dataConCaja] = await anexarMovimientosCajaAGastos([dataConSede]);
@@ -765,7 +781,31 @@ export const UR_Gastos_CTS = async (req, res) => {
       });
     }
 
+    const validacionFecha = validarRegistroDelDia({
+      user: req.user,
+      sedeId: gasto.sede_id,
+      fechaRegistro: gasto.fecha_gasto,
+      mensaje:
+        'El perfil operativo no puede modificar gastos de días anteriores.'
+    });
+    if (!validacionFecha.ok) {
+      await transaction.rollback();
+      return res.status(validacionFecha.status).json({
+        ok: false,
+        code: validacionFecha.code,
+        message: validacionFecha.message
+      });
+    }
+
     const payload = buildPayloadGastoUpdate(req.body);
+    if (usuarioTieneAlcanceOperativoDiario(req.user, gasto.sede_id)) {
+      delete payload.sede_id;
+      delete payload.fecha_gasto;
+      delete payload.origen;
+      delete payload.gasto_periodico_id;
+      if (payload.estado === 'pagado') payload.fecha_pago = fechaArgentina();
+      if (payload.estado && payload.estado !== 'pagado') payload.fecha_pago = null;
+    }
     const errores = validarPayloadGasto(payload, 'update');
 
     const payloadParaValidar = {
@@ -878,7 +918,7 @@ export const UR_Gastos_CTS = async (req, res) => {
     await transaction.commit();
 
     const actualizado = await GastosGastosModel.findByPk(id, {
-      include: buildIncludeGastos()
+      include: buildIncludeGastos(req.user)
     });
     const [dataConSede] = await anexarSedesARegistros([actualizado]);
     const [data] = await anexarMovimientosCajaAGastos([dataConSede]);
@@ -927,6 +967,16 @@ export const DR_Gastos_CTS = async (req, res) => {
       return res.status(404).json({
         ok: false,
         message: 'Gasto no encontrado.'
+      });
+    }
+
+    if (usuarioTieneAlcanceOperativoDiario(req.user, gasto.sede_id)) {
+      await transaction.rollback();
+      return res.status(403).json({
+        ok: false,
+        code: 'OPERATIONAL_DELETE_DENIED',
+        message:
+          'El perfil operativo puede registrar y actualizar gastos del día, pero no eliminarlos.'
       });
     }
 

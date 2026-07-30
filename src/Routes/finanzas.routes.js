@@ -15,7 +15,7 @@
 import express from 'express';
 
 // Benjamin Orellana - 2026/05/10 - Importa middlewares de seguridad para proteger rutas PREMIUM.
-import { authenticateToken } from '../Security/auth.js';
+import { authenticateToken, requireRolGlobal } from '../Security/auth.js';
 
 import {
   OBR_FinanzasMovimientos_CTS,
@@ -32,6 +32,10 @@ import {
 import { OBR_CotizacionUsdVigente_CTS } from '../Controllers/Finanzas/CTS_TB_FinanzasCotizacionesUsd.js';
 
 const router = express.Router();
+const seguridadFinanzasSensibles = [
+  authenticateToken,
+  requireRolGlobal(['SUPER_ADMIN', 'DIRECCION'])
+];
 
 /*
  * =========================================================
@@ -54,63 +58,63 @@ router.get(
 
 router.get(
   '/finanzas-movimientos',
-  authenticateToken,
+  ...seguridadFinanzasSensibles,
   OBR_FinanzasMovimientos_CTS
 );
 
 router.get(
   '/finanzas-movimientos/resumen',
-  authenticateToken,
+  ...seguridadFinanzasSensibles,
   OBR_ResumenFinanciero_CTS
 );
 
 router.get(
   '/finanzas-movimientos/reporte-cobros-sede',
-  authenticateToken,
+  ...seguridadFinanzasSensibles,
   OBR_ReporteCobrosPorSede_CTS
 );
 
 router.get(
   '/pagos/:pago_id/finanzas-movimientos',
-  authenticateToken,
+  ...seguridadFinanzasSensibles,
   OBR_FinanzasMovimientosPorPago_CTS
 );
 
 router.get(
   '/finanzas-movimientos/:id',
-  authenticateToken,
+  ...seguridadFinanzasSensibles,
   OBR_FinanzaMovimientoPorId_CTS
 );
 
 router.post(
   '/finanzas-movimientos',
-  authenticateToken,
+  ...seguridadFinanzasSensibles,
   CR_FinanzasMovimientos_CTS
 );
 
 router.put(
   '/finanzas-movimientos/:id',
-  authenticateToken,
+  ...seguridadFinanzasSensibles,
   UR_FinanzasMovimientos_CTS
 );
 
 router.patch(
   '/finanzas-movimientos/:id/estado',
-  authenticateToken,
+  ...seguridadFinanzasSensibles,
   UR_EstadoFinanzaMovimiento_CTS
 );
 
 // Benjamin Orellana - 2026/05/30 - Baja lógica del movimiento financiero, cambia estado a anulado.
 router.put(
   '/finanzas-movimientos/:id/desactivar',
-  authenticateToken,
+  ...seguridadFinanzasSensibles,
   DR_FinanzasMovimientos_CTS
 );
 
 // Benjamin Orellana - 2026/05/30 - Eliminación física del movimiento financiero.
 router.delete(
   '/finanzas-movimientos/:id',
-  authenticateToken,
+  ...seguridadFinanzasSensibles,
   ER_FinanzasMovimientos_CTS
 );
 

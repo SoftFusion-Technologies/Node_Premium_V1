@@ -9,6 +9,7 @@ import {
 import {
   CR_AbrirCajaPrincipal_CTS,
   CR_MovimientoManualCaja_CTS,
+  OBR_AperturaSugeridaCaja_CTS,
   OBR_CajaSesionActiva_CTS,
   OBR_ResumenCaja_CTS,
   OBR_SesionesCaja_CTS,
@@ -21,10 +22,12 @@ import {
   OBR_CobrosPendientesCount_CTS,
   OBR_Cobros_CTS,
   OBR_MediosPagoCobro_CTS,
+  OBR_SaldoDisponibleCobro_CTS,
   UR_AnularCobro_CTS,
   UR_ConfirmarCobro_CTS,
   UR_RechazarCobro_CTS
 } from '../Controllers/Cobro/CTS_TB_Cobros.js';
+import { requireCobroDelDiaActual } from '../Security/operationalDayScope.js';
 
 const router = express.Router();
 const seguridadSede = [authenticateToken, requireSedeAccess];
@@ -38,10 +41,24 @@ router.get(
 );
 
 router.get(
+  '/cobros/alumnos/:alumno_id/saldo-disponible',
+  ...seguridadSede,
+  requirePermission('cobros.registrar'),
+  OBR_SaldoDisponibleCobro_CTS
+);
+
+router.get(
   '/cajas/sesion-activa',
   ...seguridadSede,
   requirePermission(['caja.ver', 'cobros.registrar']),
   OBR_CajaSesionActiva_CTS
+);
+
+router.get(
+  '/cajas/apertura-sugerida',
+  ...seguridadCaja,
+  requirePermission('caja.abrir'),
+  OBR_AperturaSugeridaCaja_CTS
 );
 
 router.get(
@@ -75,6 +92,7 @@ router.get(
   '/cobros/:id',
   ...seguridadSede,
   requirePermission('cobros.ver'),
+  requireCobroDelDiaActual,
   OBR_CobroDetalle_CTS
 );
 
@@ -116,6 +134,7 @@ router.patch(
   '/cobros/:id/confirmar',
   ...seguridadSede,
   requirePermission('cobros.validar'),
+  requireCobroDelDiaActual,
   UR_ConfirmarCobro_CTS
 );
 
@@ -123,6 +142,7 @@ router.patch(
   '/cobros/:id/rechazar',
   ...seguridadSede,
   requirePermission('cobros.rechazar'),
+  requireCobroDelDiaActual,
   UR_RechazarCobro_CTS
 );
 
@@ -130,6 +150,7 @@ router.patch(
   '/cobros/:id/anular',
   ...seguridadSede,
   requirePermission('cobros.anular'),
+  requireCobroDelDiaActual,
   UR_AnularCobro_CTS
 );
 

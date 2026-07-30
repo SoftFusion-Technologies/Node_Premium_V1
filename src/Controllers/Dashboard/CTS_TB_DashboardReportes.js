@@ -303,6 +303,74 @@ export const OBR_DashboardCortesActividad_CTS = async (req, res) => {
 };
 
 /*
+ * Sergio Manrique - 2026/07/29
+ * Vencimientos por día del mes: para el Panel principal con "todas las
+ * sedes" seleccionado, cuántas cuotas (pagos_mensualidades) vencen en cada
+ * día del mes consultado. Solo cuenta cuotas todavía no saldadas
+ * (pendiente/parcial/vencida) — una cuota pagada o anulada ya no "vence".
+ */
+export const OBR_DashboardVencimientosPorDia_CTS = async (req, res) => {
+  try {
+    const rango = resolverRangoMes(req.query);
+
+    if (!rango) {
+      return res.status(400).json({ ok: false, message: 'Parámetros anio/mes inválidos.' });
+    }
+
+    const scope = resolverScopeSedesDashboard(req);
+
+    if (!scope.ok) {
+      return res.status(scope.status).json({
+        ok: false,
+        message: scope.message
+      });
+    }
+
+    const scopeSql = scope.sql ? scope.sql.replace(/^AND s\.id/, 'AND m.sede_id') : '';
+
+    const rows = await db.query(
+      `
+      SELECT
+        DAY(m.fecha_vencimiento) AS dia,
+        COUNT(*) AS cantidad
+      FROM pagos_mensualidades m
+      WHERE m.fecha_vencimiento BETWEEN :desde AND :hasta
+        AND m.estado IN ('pendiente', 'parcial', 'vencida')
+        ${scopeSql}
+      GROUP BY DAY(m.fecha_vencimiento)
+      ORDER BY dia
+      `,
+      {
+        replacements: {
+          desde: rango.desde,
+          hasta: rango.hasta,
+          ...scope.replacements
+        },
+        type: QueryTypes.SELECT
+      }
+    );
+
+    const ultimoDiaMes = new Date(rango.anio, rango.mes, 0).getDate();
+    const porDia = new Map(rows.map((fila) => [Number(fila.dia), Number(fila.cantidad)]));
+
+    const data = Array.from({ length: ultimoDiaMes }, (_, i) => {
+      const dia = i + 1;
+      return { dia, cantidad: porDia.get(dia) || 0 };
+    });
+
+    return res.status(200).json({
+      ok: true,
+      message: 'Vencimientos por día del mes obtenidos correctamente.',
+      filtros: { anio: rango.anio, mes: rango.mes, sede_id: scope.sedeId },
+      data
+    });
+  } catch (error) {
+    console.error('Error OBR_DashboardVencimientosPorDia_CTS:', error);
+    return res.status(500).json({ ok: false, message: 'Error interno del servidor.' });
+  }
+};
+
+/*
  * Sergio Manrique - 2026/07/12
  * Cierre mensual por sede: cuotas cobradas, cupo, ocupación, altas, bajas,
  * churn, LTV, facturación bruta/neta (+ en USD), gastos, ticket promedio,

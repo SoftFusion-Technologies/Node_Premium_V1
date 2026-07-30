@@ -13,7 +13,8 @@ import { authenticateToken, requireRolGlobal } from '../Security/auth.js';
 
 import {
   OBR_DashboardCortesActividad_CTS,
-  OBR_DashboardCierreMensual_CTS
+  OBR_DashboardCierreMensual_CTS,
+  OBR_DashboardVencimientosPorDia_CTS
 } from '../Controllers/Dashboard/CTS_TB_DashboardReportes.js';
 
 const router = express.Router();
@@ -38,6 +39,13 @@ router.get(
   authenticateToken,
   requireRolGlobal(ROLES_DASHBOARD),
   OBR_DashboardCierreMensual_CTS
+);
+
+router.get(
+  '/dashboard/vencimientos-por-dia',
+  authenticateToken,
+  requireRolGlobal(ROLES_DASHBOARD),
+  OBR_DashboardVencimientosPorDia_CTS
 );
 
 export default router;

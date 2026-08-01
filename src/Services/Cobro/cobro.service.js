@@ -23,6 +23,7 @@ import FinanzasMovimientosModel from "../../Models/Finanzas/MD_TB_FinanzasMovimi
 import ProductosStockSedesModel from "../../Models/Catalogo/MD_TB_ProductosStockSedes.js";
 import ProductosStockMovimientosModel from "../../Models/Catalogo/MD_TB_ProductosStockMovimientos.js";
 import ProductosModel from "../../Models/Catalogo/MD_TB_Productos.js";
+import SistemaAuditoriaLogsModel from "../../Models/Sistema/MD_TB_SistemaAuditoriaLogs.js";
 import { normalizarCicloMembresiasAlumno } from "../Alumno/membresiaCiclo.service.js";
 
 const TIPOS_CONCEPTO = ["producto", "servicio", "plan"];
@@ -77,6 +78,19 @@ const sumarDias = (fechaDateOnly, dias) => {
   const fecha = new Date(`${fechaDateOnly}T00:00:00Z`);
   fecha.setUTCDate(fecha.getUTCDate() + Number(dias));
   return fecha.toISOString().slice(0, 10);
+};
+
+const esFechaDateOnlyValida = (valor) => {
+  const fecha = String(valor || "").slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(fecha)) return false;
+
+  const fechaUtc = new Date(`${fecha}T00:00:00Z`);
+  return !Number.isNaN(fechaUtc.getTime()) && fechaUtc.toISOString().slice(0, 10) === fecha;
+};
+
+const esEnteroNoNegativo = (valor) => {
+  const numero = Number(valor);
+  return Number.isInteger(numero) && numero >= 0;
 };
 
 const validarSinReservasFuturasParaCambioPlan = async ({
@@ -478,6 +492,299 @@ const aplicarConsumoSaldo = async ({
     },
     { transaction },
   );
+};
+
+// Benjamin Orellana - 2026/08/01 - Valida la configuración manual enviada
+// desde la migración antes de crear una membresía mediante el circuito real de cobro.
+const prepararConfiguracionMembresiaMigracionCobro = async ({
+  configuracion,
+  conceptos,
+  lineaPlan,
+  alumno,
+  sedeId,
+  transaction,
+}) => {
+  if (configuracion === undefined || configuracion === null) return null;
+
+  if (!configuracion || typeof configuracion !== "object" || Array.isArray(configuracion)) {
+    throw new CobroOperacionError(
+      "La configuración de membresía migrada no es válida.",
+      400,
+      "MEMBRESIA_MIGRACION_INVALIDA",
+    );
+  }
+
+  if (!alumno || !lineaPlan || conceptos.length !== 1) {
+    throw new CobroOperacionError(
+      "La carga migrada con cobro debe contener un único plan para un alumno.",
+      409,
+      "MEMBRESIA_MIGRACION_REQUIERE_PLAN_UNICO",
+    );
+  }
+
+  if (["baja", "congelado"].includes(String(alumno.estado || "").toLowerCase())) {
+    throw new CobroOperacionError(
+      "El alumno está dado de baja o congelado. Regularizá su estado antes de asignar y cobrar una membresía migrada.",
+      409,
+      "MEMBRESIA_MIGRACION_ALUMNO_BLOQUEADO",
+    );
+  }
+
+  const planId = Number(configuracion.plan_id);
+  const sedeConfiguradaId = Number(configuracion.sede_id);
+  const fechaInicio = String(configuracion.fecha_inicio || "").slice(0, 10);
+  const fechaVencimiento = String(
+    configuracion.fecha_vencimiento || "",
+  ).slice(0, 10);
+  const clasesIncluidas = Number(configuracion.clases_incluidas);
+  const clasesDisponibles = Number(configuracion.clases_disponibles);
+
+  if (planId !== Number(lineaPlan.referencia_id)) {
+    throw new CobroOperacionError(
+      "El plan seleccionado no coincide con la configuración de migración.",
+      409,
+      "MEMBRESIA_MIGRACION_PLAN_INCONSISTENTE",
+    );
+  }
+
+  if (sedeConfiguradaId !== Number(sedeId)) {
+    throw new CobroOperacionError(
+      "La sede del cobro no coincide con la sede de la membresía migrada.",
+      409,
+      "MEMBRESIA_MIGRACION_SEDE_INCONSISTENTE",
+    );
+  }
+
+  if (!esFechaDateOnlyValida(fechaInicio) || !esFechaDateOnlyValida(fechaVencimiento)) {
+    throw new CobroOperacionError(
+      "Las fechas de la membresía migrada no son válidas.",
+      400,
+      "MEMBRESIA_MIGRACION_FECHAS_INVALIDAS",
+    );
+  }
+
+  if (fechaVencimiento < fechaInicio) {
+    throw new CobroOperacionError(
+      "La fecha de vencimiento no puede ser anterior a la fecha de inicio.",
+      400,
+      "MEMBRESIA_MIGRACION_RANGO_INVALIDO",
+    );
+  }
+
+  if (fechaVencimiento < fechaArgentina()) {
+    throw new CobroOperacionError(
+      "No se puede cobrar una membresía migrada que ya está vencida.",
+      409,
+      "MEMBRESIA_MIGRACION_YA_VENCIDA",
+    );
+  }
+
+  if (!esEnteroNoNegativo(clasesIncluidas) || !esEnteroNoNegativo(clasesDisponibles)) {
+    throw new CobroOperacionError(
+      "Los créditos incluidos y disponibles deben ser números enteros no negativos.",
+      400,
+      "MEMBRESIA_MIGRACION_CREDITOS_INVALIDOS",
+    );
+  }
+
+  if (clasesDisponibles > clasesIncluidas) {
+    throw new CobroOperacionError(
+      "Los créditos disponibles no pueden superar los créditos incluidos.",
+      400,
+      "MEMBRESIA_MIGRACION_CREDITOS_INCONSISTENTES",
+    );
+  }
+
+  const membresiaSuperpuesta = await AlumnosMembresiasModel.findOne({
+    where: {
+      alumno_id: Number(alumno.id),
+      estado: { [Op.in]: ["activa", "pendiente_pago", "congelada"] },
+      fecha_inicio: { [Op.lte]: fechaVencimiento },
+      fecha_vencimiento: { [Op.gte]: fechaInicio },
+    },
+    order: [
+      ["fecha_inicio", "DESC"],
+      ["id", "DESC"],
+    ],
+    transaction,
+    lock: transaction.LOCK.UPDATE,
+  });
+
+  if (membresiaSuperpuesta) {
+    throw new CobroOperacionError(
+      `El alumno ya tiene una membresía operativa entre ${membresiaSuperpuesta.fecha_inicio} y ${membresiaSuperpuesta.fecha_vencimiento}.`,
+      409,
+      "MEMBRESIA_MIGRACION_SUPERPUESTA",
+    );
+  }
+
+  return {
+    plan_id: planId,
+    sede_id: sedeConfiguradaId,
+    fecha_inicio: fechaInicio,
+    fecha_vencimiento: fechaVencimiento,
+    clases_incluidas: clasesIncluidas,
+    clases_usadas: clasesIncluidas - clasesDisponibles,
+    clases_disponibles: clasesDisponibles,
+    observaciones: String(configuracion.observaciones || "").trim() || null,
+  };
+};
+
+// Benjamin Orellana - 2026/08/01 - Crea la membresía con las fechas y créditos
+// declarados durante la migración, reutilizando pagos, caja y finanzas del cobro.
+const crearMembresiaPlanMigracionCobrada = async ({
+  alumno,
+  sedeId,
+  linea,
+  configuracion,
+  estadoCobro,
+  montoPagado,
+  medioPagoId,
+  usuarioId,
+  cobroId,
+  transaction,
+}) => {
+  const hoy = fechaArgentina();
+  const confirmado = estadoCobro === "confirmado";
+  const montoPagadoConfirmado = confirmado
+    ? redondear(Math.min(Number(montoPagado || 0), Number(linea.total)))
+    : 0;
+  const saldoMensualidad = redondear(
+    Math.max(Number(linea.total) - montoPagadoConfirmado, 0),
+  );
+  const estadoMensualidad = confirmado
+    ? saldoMensualidad > 0.009
+      ? "parcial"
+      : "pagada"
+    : "pendiente";
+  const basePlan = redondear(linea.importe - linea.descuento_importe);
+  const observacionesMembresia = [
+    `Generada por cobro #${cobroId} | MIGRACION_MANUAL`,
+    configuracion.observaciones,
+  ]
+    .filter(Boolean)
+    .join(" | ");
+
+  const membresia = await AlumnosMembresiasModel.create(
+    {
+      alumno_id: Number(alumno.id),
+      plan_id: Number(linea.referencia_id),
+      sede_id: Number(sedeId),
+      fecha_inicio: configuracion.fecha_inicio,
+      fecha_vencimiento: configuracion.fecha_vencimiento,
+      estado: confirmado ? "activa" : "pendiente_pago",
+      precio_lista: Number(linea.precio_unitario).toFixed(2),
+      descuento_valor: "0.00",
+      descuento_porcentaje: Number(linea.descuento_porcentaje).toFixed(2),
+      precio_final: basePlan.toFixed(2),
+      clases_incluidas: configuracion.clases_incluidas,
+      clases_usadas: configuracion.clases_usadas,
+      clases_disponibles: configuracion.clases_disponibles,
+      origen_alta: "migracion",
+      observaciones: observacionesMembresia,
+    },
+    { transaction },
+  );
+
+  const fechaBase = new Date(`${configuracion.fecha_inicio}T00:00:00Z`);
+  const mensualidad = await PagosMensualidadesModel.create(
+    {
+      alumno_id: Number(alumno.id),
+      membresia_id: Number(membresia.id),
+      sede_id: Number(sedeId),
+      periodo_anio: fechaBase.getUTCFullYear(),
+      periodo_mes: fechaBase.getUTCMonth() + 1,
+      periodo_desde: configuracion.fecha_inicio,
+      periodo_hasta: configuracion.fecha_vencimiento,
+      fecha_emision: hoy,
+      fecha_vencimiento: configuracion.fecha_vencimiento,
+      monto_total: Number(linea.total).toFixed(2),
+      monto_pagado: montoPagadoConfirmado.toFixed(2),
+      saldo: confirmado
+        ? saldoMensualidad.toFixed(2)
+        : Number(linea.total).toFixed(2),
+      estado: estadoMensualidad,
+      observaciones: `Generada por cobro #${cobroId} | Membresía migrada manualmente`,
+    },
+    { transaction },
+  );
+
+  const pago = await PagosModel.create(
+    {
+      mensualidad_id: Number(mensualidad.id),
+      alumno_id: Number(alumno.id),
+      sede_id: Number(sedeId),
+      medio_pago_id: Number(medioPagoId),
+      usuario_registro_id: Number(usuarioId),
+      usuario_validacion_id: confirmado ? Number(usuarioId) : null,
+      fecha_pago: new Date(),
+      monto: Number(montoPagado).toFixed(2),
+      estado: confirmado ? "confirmado" : "pendiente_validacion",
+      referencia: `COBRO-${cobroId}`,
+      observaciones: `Pago de membresía migrada generado por cobro #${cobroId}`,
+    },
+    { transaction },
+  );
+
+  await SistemaAuditoriaLogsModel.create(
+    {
+      usuario_id: Number(usuarioId),
+      sede_id: Number(sedeId),
+      modulo: "ALUMNOS",
+      accion: "CREAR_MEMBRESIA_MIGRACION_COBRADA",
+      entidad: "alumnos_membresias",
+      entidad_id: Number(membresia.id),
+      descripcion: `Membresía migrada manualmente y vinculada al cobro #${cobroId}.`,
+      valores_anteriores: null,
+      valores_nuevos: {
+        alumno_id: Number(alumno.id),
+        plan_id: Number(linea.referencia_id),
+        sede_id: Number(sedeId),
+        fecha_inicio: configuracion.fecha_inicio,
+        fecha_vencimiento: configuracion.fecha_vencimiento,
+        clases_incluidas: configuracion.clases_incluidas,
+        clases_usadas: configuracion.clases_usadas,
+        clases_disponibles: configuracion.clases_disponibles,
+        cobro_id: Number(cobroId),
+        mensualidad_id: Number(mensualidad.id),
+        pago_id: Number(pago.id),
+      },
+      ip: null,
+      user_agent: null,
+    },
+    { transaction },
+  );
+
+  if (confirmado) {
+    await normalizarCicloMembresiasAlumno({
+      alumnoId: alumno.id,
+      fechaReferencia: hoy,
+      transaction,
+    });
+
+    await alumno.update(
+      {
+        estado: "activo",
+        sede_id: Number(sedeId),
+        fecha_inicio: alumno.fecha_inicio || configuracion.fecha_inicio,
+        usuario_validacion_id:
+          alumno.usuario_validacion_id || Number(usuarioId),
+        updated_at: new Date(),
+      },
+      { transaction },
+    );
+  } else {
+    await alumno.update(
+      {
+        estado: "pendiente_pago",
+        sede_id: Number(sedeId),
+        updated_at: new Date(),
+      },
+      { transaction },
+    );
+  }
+
+  return { membresia, mensualidad, pago };
 };
 
 const crearMembresiaPlan = async ({
@@ -891,6 +1198,15 @@ export const registrarCobro = async ({ payload, usuario }) => {
         "Para cobrar un plan debe seleccionar un alumno.",
       );
     }
+    const configuracionMembresiaMigracion =
+      await prepararConfiguracionMembresiaMigracionCobro({
+        configuracion: payload.membresia_migracion,
+        conceptos,
+        lineaPlan,
+        alumno,
+        sedeId,
+        transaction,
+      });
     const resumen = conceptos.reduce(
       (acc, item) => ({
         importe: redondear(acc.importe + item.importe),
@@ -1026,17 +1342,30 @@ export const registrarCobro = async ({ payload, usuario }) => {
       );
 
       if (linea.tipo === "plan") {
-        const resultadoPlan = await crearMembresiaPlan({
-          alumno,
-          sedeId,
-          linea,
-          estadoCobro,
-          montoPagado: totalPagado,
-          medioPagoId: medioPagoPlan.medio_pago_id,
-          usuarioId,
-          cobroId: cobro.id,
-          transaction,
-        });
+        const resultadoPlan = configuracionMembresiaMigracion
+          ? await crearMembresiaPlanMigracionCobrada({
+              alumno,
+              sedeId,
+              linea,
+              configuracion: configuracionMembresiaMigracion,
+              estadoCobro,
+              montoPagado: totalPagado,
+              medioPagoId: medioPagoPlan.medio_pago_id,
+              usuarioId,
+              cobroId: cobro.id,
+              transaction,
+            })
+          : await crearMembresiaPlan({
+              alumno,
+              sedeId,
+              linea,
+              estadoCobro,
+              montoPagado: totalPagado,
+              medioPagoId: medioPagoPlan.medio_pago_id,
+              usuarioId,
+              cobroId: cobro.id,
+              transaction,
+            });
         pagoPlan = resultadoPlan.pago;
         await detalle.update(
           {

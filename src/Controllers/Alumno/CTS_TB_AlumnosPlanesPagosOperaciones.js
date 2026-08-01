@@ -13,6 +13,7 @@ import PlanesModel from '../../Models/Plan/MD_TB_Planes.js';
 import PlanesPreciosModel from '../../Models/Plan/MD_TB_PlanesPrecios.js';
 import SedesModel from '../../Models/Sede/MD_TB_Sedes.js';
 import PagosMetodosRecurrentesModel from '../../Models/Pago/MD_TB_PagosMetodosRecurrentes.js';
+import SistemaAuditoriaLogsModel from '../../Models/Sistema/MD_TB_SistemaAuditoriaLogs.js';
 
 const responderError = (res, status, message, data = null) => {
   return res.status(status).json({
@@ -485,6 +486,175 @@ const buscarMembresiaSuperpuestaOperativa = async ({
     ],
     transaction
   });
+};
+
+// Benjamin Orellana - 2026/08/01 - Valida enteros no negativos usados por la carga manual de créditos.
+const esEnteroNoNegativo = (valor) => {
+  const numero = Number(valor);
+  return Number.isInteger(numero) && numero >= 0;
+};
+
+const obtenerUsuarioIdRequest = (req) =>
+  Number(req.user?.id || req.user?.usuario_id) || null;
+
+const obtenerIpRequest = (req) =>
+  req.headers['x-forwarded-for'] || req.socket?.remoteAddress || req.ip || null;
+
+const registrarAuditoriaMembresiaMigracion = async ({
+  req,
+  alumno,
+  membresia,
+  accion,
+  valoresAnteriores = null,
+  valoresNuevos,
+  transaction
+}) => {
+  await SistemaAuditoriaLogsModel.create(
+    {
+      usuario_id: obtenerUsuarioIdRequest(req),
+      sede_id: Number(membresia.sede_id || alumno.sede_id) || null,
+      modulo: 'ALUMNOS',
+      accion,
+      entidad: 'alumnos_membresias',
+      entidad_id: Number(membresia.id),
+      descripcion: `${accion === 'CREAR_MEMBRESIA_MIGRACION' ? 'Alta' : 'Actualización'} manual de membresía por migración para ${alumno.nombre} ${alumno.apellido}.`,
+      valores_anteriores: valoresAnteriores,
+      valores_nuevos: valoresNuevos,
+      ip: obtenerIpRequest(req),
+      user_agent: req.headers['user-agent'] || null
+    },
+    { transaction }
+  );
+};
+
+const obtenerPayloadMembresiaMigracion = ({
+  body,
+  plan,
+  fechaInicio,
+  fechaVencimiento,
+  precioLista,
+  estadoActual = null
+}) => {
+  const clasesIncluidas = Number(body.clases_incluidas);
+  const clasesDisponibles = Number(body.clases_disponibles);
+  const clasesUsadas = clasesIncluidas - clasesDisponibles;
+  const hoy = obtenerFechaArgentinaDateOnly();
+  const estado =
+    estadoActual === 'pendiente_pago'
+      ? 'pendiente_pago'
+      : fechaVencimiento < hoy
+        ? 'vencida'
+        : 'activa';
+
+  return {
+    plan_id: Number(plan.id),
+    sede_id: Number(body.sede_id),
+    fecha_inicio: fechaInicio,
+    fecha_vencimiento: fechaVencimiento,
+    estado,
+    precio_lista: Number(precioLista || 0).toFixed(2),
+    descuento_valor: '0.00',
+    descuento_porcentaje: '0.00',
+    precio_final: Number(precioLista || 0).toFixed(2),
+    clases_incluidas: clasesIncluidas,
+    clases_usadas: clasesUsadas,
+    clases_disponibles: clasesDisponibles,
+    origen_alta: 'migracion'
+  };
+};
+
+const validarDatosMembresiaMigracion = ({
+  body,
+  fechaInicio,
+  fechaVencimiento
+}) => {
+  const errores = [];
+
+  if (!esIdValido(body.plan_id)) errores.push('El plan es obligatorio.');
+  if (!esIdValido(body.sede_id)) errores.push('La sede es obligatoria.');
+
+  if (!esFechaDateOnlyValida(fechaInicio)) {
+    errores.push('La fecha de inicio debe tener formato YYYY-MM-DD.');
+  }
+
+  if (!esFechaDateOnlyValida(fechaVencimiento)) {
+    errores.push('La fecha de vencimiento debe tener formato YYYY-MM-DD.');
+  }
+
+  if (
+    esFechaDateOnlyValida(fechaInicio) &&
+    esFechaDateOnlyValida(fechaVencimiento) &&
+    fechaVencimiento < fechaInicio
+  ) {
+    errores.push('La fecha de vencimiento no puede ser anterior al inicio.');
+  }
+
+  if (!esEnteroNoNegativo(body.clases_incluidas)) {
+    errores.push('Los créditos incluidos deben ser un entero mayor o igual a 0.');
+  }
+
+  if (!esEnteroNoNegativo(body.clases_disponibles)) {
+    errores.push('Los créditos disponibles deben ser un entero mayor o igual a 0.');
+  }
+
+  if (
+    esEnteroNoNegativo(body.clases_incluidas) &&
+    esEnteroNoNegativo(body.clases_disponibles) &&
+    Number(body.clases_disponibles) > Number(body.clases_incluidas)
+  ) {
+    errores.push('Los créditos disponibles no pueden superar los incluidos.');
+  }
+
+  return errores;
+};
+
+const normalizarObservacionMigracionUsuario = (valor) => {
+  if (valor === undefined || valor === null) return null;
+
+  const texto = String(valor).trim();
+  return texto || null;
+};
+
+// La observación visible representa el dato actual de la migración. El
+// historial de cada modificación se conserva en sistema_auditoria_logs, por
+// lo que no se vuelven a concatenar leyendas técnicas en cada guardado.
+const construirObservacionesMembresiaMigracion = ({
+  tipo,
+  observacionUsuario
+}) => {
+  const leyenda =
+    tipo === 'crear'
+      ? '[MIGRACIÓN] Membresía cargada manualmente sin generar cobro ni deuda.'
+      : '[MIGRACIÓN] Plan, fechas o créditos ajustados manualmente.';
+  const observacion = normalizarObservacionMigracionUsuario(observacionUsuario);
+
+  return [leyenda, observacion].filter(Boolean).join('\n');
+};
+
+const obtenerPrecioReferenciaMigracion = async ({
+  planId,
+  sedeId,
+  fechaInicio,
+  transaction
+}) => {
+  const hoy = obtenerFechaArgentinaDateOnly();
+  let resultado = await buscarPrecioVigentePlanOperativo({
+    planId,
+    sedeId,
+    fechaConsulta: fechaInicio,
+    transaction
+  });
+
+  if (!resultado.precio && fechaInicio !== hoy) {
+    resultado = await buscarPrecioVigentePlanOperativo({
+      planId,
+      sedeId,
+      fechaConsulta: hoy,
+      transaction
+    });
+  }
+
+  return Number(resultado.precio?.precio || 0);
 };
 
 // Benjamin Orellana - 2026/06/15 - Obtiene vencimientos y estado financiero operativo del alumno.
@@ -986,6 +1156,457 @@ export const CR_GenerarMembresiaAlumnoPlanesPagos_CTS = async (req, res) => {
     console.error('Error en CR_GenerarMembresiaAlumnoPlanesPagos_CTS:', error);
 
     return responderError(res, 500, 'Error interno al generar membresía.');
+  }
+};
+
+// Benjamin Orellana - 2026/08/01 - Crea una membresía manual para migrar alumnos sin generar deuda ni caja.
+export const CR_MembresiaMigracionAlumnoPlanesPagos_CTS = async (req, res) => {
+  const transaction = await db.transaction();
+
+  try {
+    const alumnoId = Number(req.params.alumno_id);
+    const fechaInicio = normalizarFechaDateOnlyOperativa(req.body.fecha_inicio);
+    const fechaVencimiento = normalizarFechaDateOnlyOperativa(
+      req.body.fecha_vencimiento
+    );
+    const errores = validarDatosMembresiaMigracion({
+      body: req.body,
+      fechaInicio,
+      fechaVencimiento
+    });
+
+    if (!esIdValido(alumnoId)) {
+      errores.unshift('El parámetro alumno_id no es válido.');
+    }
+
+    if (errores.length > 0) {
+      await transaction.rollback();
+      return responderError(res, 400, 'Datos inválidos para migrar la membresía.', errores);
+    }
+
+    const alumno = await AlumnosModel.findByPk(alumnoId, {
+      transaction,
+      lock: transaction.LOCK.UPDATE
+    });
+
+    if (!alumno) {
+      await transaction.rollback();
+      return responderError(res, 404, 'No se encontró el alumno solicitado.');
+    }
+
+    if (
+      ['baja', 'congelado'].includes(String(alumno.estado).toLowerCase())
+    ) {
+      await transaction.rollback();
+      return responderError(
+        res,
+        409,
+        'No se puede asignar una membresía a un alumno dado de baja o congelado. Primero debe regularizar su estado.'
+      );
+    }
+
+    const [plan, sede] = await Promise.all([
+      PlanesModel.findOne({
+        where: { id: Number(req.body.plan_id), activo: 1 },
+        transaction
+      }),
+      SedesModel.findOne({
+        where: { id: Number(req.body.sede_id), activo: 1 },
+        transaction
+      })
+    ]);
+
+    if (!plan) {
+      await transaction.rollback();
+      return responderError(res, 404, 'El plan indicado no existe o está inactivo.');
+    }
+
+    if (!sede) {
+      await transaction.rollback();
+      return responderError(res, 404, 'La sede indicada no existe o está inactiva.');
+    }
+
+    const superpuesta = await buscarMembresiaSuperpuestaOperativa({
+      alumnoId,
+      fechaInicio,
+      fechaVencimiento,
+      transaction
+    });
+
+    if (superpuesta) {
+      await transaction.rollback();
+      return responderError(
+        res,
+        409,
+        'El alumno ya tiene una membresía operativa superpuesta con las fechas seleccionadas.',
+        {
+          membresia_id: Number(superpuesta.id),
+          fecha_inicio: superpuesta.fecha_inicio,
+          fecha_vencimiento: superpuesta.fecha_vencimiento,
+          estado: superpuesta.estado
+        }
+      );
+    }
+
+    const precioLista = await obtenerPrecioReferenciaMigracion({
+      planId: plan.id,
+      sedeId: sede.id,
+      fechaInicio,
+      transaction
+    });
+    const payload = obtenerPayloadMembresiaMigracion({
+      body: req.body,
+      plan,
+      fechaInicio,
+      fechaVencimiento,
+      precioLista
+    });
+    const observaciones = construirObservacionesMembresiaMigracion({
+      tipo: 'crear',
+      observacionUsuario: req.body.observaciones
+    });
+
+    const membresia = await AlumnosMembresiasModel.create(
+      {
+        alumno_id: alumnoId,
+        ...payload,
+        observaciones
+      },
+      { transaction }
+    );
+
+    const hoy = obtenerFechaArgentinaDateOnly();
+    const cubreHoy = fechaInicio <= hoy && fechaVencimiento >= hoy;
+
+    await alumno.update(
+      {
+        sede_id: Number(sede.id),
+        fecha_inicio: alumno.fecha_inicio || fechaInicio,
+        ...(cubreHoy && payload.estado === 'activa'
+          ? {
+              estado: 'activo',
+              usuario_validacion_id:
+                alumno.usuario_validacion_id || obtenerUsuarioIdRequest(req)
+            }
+          : {}),
+        updated_at: new Date()
+      },
+      { transaction }
+    );
+
+    await registrarAuditoriaMembresiaMigracion({
+      req,
+      alumno,
+      membresia,
+      accion: 'CREAR_MEMBRESIA_MIGRACION',
+      valoresNuevos: {
+        alumno_id: alumnoId,
+        ...payload,
+        observaciones
+      },
+      transaction
+    });
+
+    await transaction.commit();
+
+    return res.status(201).json({
+      ok: true,
+      message: 'Plan, fechas y créditos migrados correctamente. No se generó deuda ni movimiento de caja.',
+      data: {
+        membresia_id: Number(membresia.id),
+        alumno_id: alumnoId,
+        ...payload,
+        observaciones,
+        cobrar_ahora: false
+      }
+    });
+  } catch (error) {
+    if (!transaction.finished) await transaction.rollback();
+    console.error('Error en CR_MembresiaMigracionAlumnoPlanesPagos_CTS:', error);
+    return responderError(res, 500, 'Error interno al migrar la membresía.');
+  }
+};
+
+// Benjamin Orellana - 2026/08/01 - Ajusta manualmente fechas, plan y créditos de una membresía existente.
+export const UR_MembresiaMigracionAlumnoPlanesPagos_CTS = async (req, res) => {
+  const transaction = await db.transaction();
+
+  try {
+    const alumnoId = Number(req.params.alumno_id);
+    const membresiaId = Number(req.params.membresia_id);
+    const fechaInicio = normalizarFechaDateOnlyOperativa(req.body.fecha_inicio);
+    const fechaVencimiento = normalizarFechaDateOnlyOperativa(
+      req.body.fecha_vencimiento
+    );
+    const errores = validarDatosMembresiaMigracion({
+      body: req.body,
+      fechaInicio,
+      fechaVencimiento
+    });
+
+    if (!esIdValido(alumnoId)) errores.unshift('El parámetro alumno_id no es válido.');
+    if (!esIdValido(membresiaId)) errores.unshift('La membresía indicada no es válida.');
+
+    if (errores.length > 0) {
+      await transaction.rollback();
+      return responderError(res, 400, 'Datos inválidos para actualizar la membresía.', errores);
+    }
+
+    const [alumno, membresia] = await Promise.all([
+      AlumnosModel.findByPk(alumnoId, {
+        transaction,
+        lock: transaction.LOCK.UPDATE
+      }),
+      AlumnosMembresiasModel.findOne({
+        where: { id: membresiaId, alumno_id: alumnoId },
+        transaction,
+        lock: transaction.LOCK.UPDATE
+      })
+    ]);
+
+    if (!alumno) {
+      await transaction.rollback();
+      return responderError(res, 404, 'No se encontró el alumno solicitado.');
+    }
+
+    if (!membresia) {
+      await transaction.rollback();
+      return responderError(res, 404, 'No se encontró la membresía del alumno.');
+    }
+
+    if (
+      ['baja', 'congelado'].includes(String(alumno.estado).toLowerCase())
+    ) {
+      await transaction.rollback();
+      return responderError(
+        res,
+        409,
+        'No se puede editar el plan de un alumno dado de baja o congelado. Primero debe regularizar su estado.'
+      );
+    }
+
+    if (['cancelada', 'congelada'].includes(String(membresia.estado).toLowerCase())) {
+      await transaction.rollback();
+      return responderError(
+        res,
+        409,
+        'No se puede editar manualmente una membresía cancelada o congelada.'
+      );
+    }
+
+    const [plan, sede] = await Promise.all([
+      PlanesModel.findOne({
+        where: { id: Number(req.body.plan_id), activo: 1 },
+        transaction
+      }),
+      SedesModel.findOne({
+        where: { id: Number(req.body.sede_id), activo: 1 },
+        transaction
+      })
+    ]);
+
+    if (!plan) {
+      await transaction.rollback();
+      return responderError(res, 404, 'El plan indicado no existe o está inactivo.');
+    }
+
+    if (!sede) {
+      await transaction.rollback();
+      return responderError(res, 404, 'La sede indicada no existe o está inactiva.');
+    }
+
+    const cambiaDatosEstructurales =
+      Number(membresia.plan_id) !== Number(plan.id) ||
+      Number(membresia.sede_id) !== Number(sede.id) ||
+      String(membresia.fecha_inicio) !== fechaInicio ||
+      String(membresia.fecha_vencimiento) !== fechaVencimiento;
+
+    if (cambiaDatosEstructurales) {
+      await bloquearOperacionConReservas({
+        alumnoId,
+        transaction,
+        operacion: 'modificar el plan o las fechas de la membresía'
+      });
+    }
+
+    const superpuesta = await AlumnosMembresiasModel.findOne({
+      where: {
+        id: { [Op.ne]: membresiaId },
+        alumno_id: alumnoId,
+        estado: { [Op.in]: ['activa', 'pendiente_pago', 'congelada'] },
+        fecha_inicio: { [Op.lte]: fechaVencimiento },
+        fecha_vencimiento: { [Op.gte]: fechaInicio }
+      },
+      transaction
+    });
+
+    if (superpuesta) {
+      await transaction.rollback();
+      return responderError(
+        res,
+        409,
+        'Las nuevas fechas se superponen con otra membresía operativa del alumno.',
+        { membresia_id: Number(superpuesta.id) }
+      );
+    }
+
+    const mensualidad = await PagosMensualidadesModel.findOne({
+      where: { membresia_id: membresiaId, alumno_id: alumnoId },
+      order: [['id', 'DESC']],
+      transaction,
+      lock: transaction.LOCK.UPDATE
+    });
+    const cambiaPlanOSede =
+      Number(membresia.plan_id) !== Number(plan.id) ||
+      Number(membresia.sede_id) !== Number(sede.id);
+
+    if (mensualidad && cambiaPlanOSede) {
+      await transaction.rollback();
+      return responderError(
+        res,
+        409,
+        'La membresía ya tiene una mensualidad financiera asociada. Podés ajustar fechas y créditos, pero el cambio de plan o sede debe realizarse desde la operación específica.'
+      );
+    }
+
+    const clasesUsadasNuevas =
+      Number(req.body.clases_incluidas) - Number(req.body.clases_disponibles);
+
+    if (
+      Number(membresia.clases_usadas || 0) > 0 &&
+      clasesUsadasNuevas < Number(membresia.clases_usadas || 0)
+    ) {
+      await transaction.rollback();
+      return responderError(
+        res,
+        409,
+        `No se pueden reducir los créditos usados por debajo de ${Number(membresia.clases_usadas || 0)}, porque ya fueron consumidos en el sistema.`
+      );
+    }
+
+    const precioLista = cambiaPlanOSede
+      ? await obtenerPrecioReferenciaMigracion({
+          planId: plan.id,
+          sedeId: sede.id,
+          fechaInicio,
+          transaction
+        })
+      : Number(membresia.precio_lista || 0);
+    const valoresAnteriores = {
+      plan_id: Number(membresia.plan_id),
+      sede_id: Number(membresia.sede_id),
+      fecha_inicio: membresia.fecha_inicio,
+      fecha_vencimiento: membresia.fecha_vencimiento,
+      estado: membresia.estado,
+      clases_incluidas: Number(membresia.clases_incluidas || 0),
+      clases_usadas: Number(membresia.clases_usadas || 0),
+      clases_disponibles: Number(membresia.clases_disponibles || 0),
+      origen_alta: membresia.origen_alta,
+      observaciones: membresia.observaciones || null
+    };
+    const payload = obtenerPayloadMembresiaMigracion({
+      body: req.body,
+      plan,
+      fechaInicio,
+      fechaVencimiento,
+      precioLista,
+      estadoActual: membresia.estado
+    });
+
+    // Ajustar fechas o créditos no debe reescribir descuentos, importes ni el
+    // origen histórico de una membresía que ya posee trazabilidad financiera.
+    if (!cambiaPlanOSede) {
+      payload.precio_lista = Number(membresia.precio_lista || 0).toFixed(2);
+      payload.descuento_valor = Number(
+        membresia.descuento_valor || 0
+      ).toFixed(2);
+      payload.descuento_porcentaje = Number(
+        membresia.descuento_porcentaje || 0
+      ).toFixed(2);
+      payload.precio_final = Number(membresia.precio_final || 0).toFixed(2);
+      payload.origen_alta = membresia.origen_alta || 'migracion';
+    }
+
+    const observacionNueva = construirObservacionesMembresiaMigracion({
+      tipo: 'actualizar',
+      observacionUsuario: req.body.observaciones
+    });
+
+    await membresia.update(
+      {
+        ...payload,
+        observaciones: observacionNueva,
+        updated_at: new Date()
+      },
+      { transaction }
+    );
+
+    if (mensualidad) {
+      await mensualidad.update(
+        {
+          sede_id: Number(sede.id),
+          periodo_desde: fechaInicio,
+          periodo_hasta: fechaVencimiento,
+          fecha_vencimiento: fechaVencimiento,
+          updated_at: new Date()
+        },
+        { transaction }
+      );
+    }
+
+    const hoy = obtenerFechaArgentinaDateOnly();
+    const estadoAlumnoResultante = await obtenerEstadoAlumnoPorCoberturaActual({
+      alumnoId,
+      hoy,
+      transaction
+    });
+    const estadoAlumnoActual = String(alumno.estado || '').toLowerCase();
+
+    await alumno.update(
+      {
+        sede_id: Number(sede.id),
+        ...(!['baja', 'congelado'].includes(estadoAlumnoActual)
+          ? { estado: estadoAlumnoResultante }
+          : {}),
+        updated_at: new Date()
+      },
+      { transaction }
+    );
+
+    await registrarAuditoriaMembresiaMigracion({
+      req,
+      alumno,
+      membresia,
+      accion: 'ACTUALIZAR_MEMBRESIA_MIGRACION',
+      valoresAnteriores,
+      valoresNuevos: {
+        ...payload,
+        observaciones: observacionNueva
+      },
+      transaction
+    });
+
+    await transaction.commit();
+
+    return res.status(200).json({
+      ok: true,
+      message: 'Plan, fechas y créditos actualizados correctamente.',
+      data: {
+        membresia_id: membresiaId,
+        alumno_id: alumnoId,
+        ...payload,
+        observaciones: observacionNueva
+      }
+    });
+  } catch (error) {
+    if (!transaction.finished) await transaction.rollback();
+    console.error('Error en UR_MembresiaMigracionAlumnoPlanesPagos_CTS:', error);
+    return responderError(
+      res,
+      Number(error.status || 500),
+      error.status ? error.message : 'Error interno al actualizar la membresía.',
+      error.data || null
+    );
   }
 };
 

@@ -46,6 +46,7 @@ import {
   UR_CongelarAlumnos_CTS,
   UR_ReactivarAlumnos_CTS,
   UR_HabilitarAccesoAlumno_CTS,
+  OBR_PreviewEliminacionAlumno_CTS,
   DR_Alumnos_CTS,
 } from "../Controllers/Alumno/CTS_TB_Alumnos.js";
 
@@ -396,17 +397,24 @@ router.patch(
 );
 
 /*
- * Benjamin Orellana - 2026/05/26 - Marca alumno como inactivo sin eliminarlo físicamente.
+ * Benjamin Orellana - 2026/08/01 - Informa qué registros serán eliminados.
+ * La eliminación física queda reservada exclusivamente a SUPER_ADMIN.
+ */
+router.get(
+  "/alumnos/:id/eliminacion-preview",
+  authenticateToken,
+  requireRolGlobal(["SUPER_ADMIN"]),
+  OBR_PreviewEliminacionAlumno_CTS,
+);
+
+/*
+ * Benjamin Orellana - 2026/08/01 - Elimina físicamente al alumno luego de
+ * validar nuevamente sus relaciones y confirmar el DNI.
  */
 router.delete(
   "/alumnos/:id",
   authenticateToken,
-  requireRolGlobal([
-    "SUPER_ADMIN",
-    "DIRECCION",
-    "FRONT_COMERCIAL",
-    "COORD_SEDE",
-  ]),
+  requireRolGlobal(["SUPER_ADMIN"]),
   DR_Alumnos_CTS,
 );
 

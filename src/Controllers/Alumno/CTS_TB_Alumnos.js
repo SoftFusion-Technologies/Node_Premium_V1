@@ -28,7 +28,7 @@ import {
 } from '../../utils/texto.utils.js';
 import bcrypt from 'bcryptjs';
 
-const ESTADOS_ALUMNO_VALIDOS = [
+export const ESTADOS_ALUMNO_VALIDOS = [
   'pendiente_validacion',
   'activo',
   'pendiente_pago',
@@ -57,14 +57,25 @@ const ESTADOS_MEMBRESIA_QUE_BLOQUEAN_CAMBIO_SEDE = [
 
 const ORIGENES_REGISTRO_VALIDOS = ['interno', 'externo', 'importado'];
 
-const ROLES_OPERATIVOS_ALUMNOS = [
+// Sergio Manrique - 2026/08/01 - Umbrales fijos de seguimiento comercial
+// (ver filtros "Alumnos con X días de inactividad" / "X meses de cuota
+// vencida" pedidos por Coordinación / Gerencia Operativa-Comercial).
+const DIAS_INACTIVIDAD_VALIDOS = [5, 15];
+const MESES_CUOTA_VENCIDA_VALIDOS = [1, 3];
+
+// Sergio Manrique - 2026/08/01 - "Cliente perdido" definido por el PM como
+// alumno con cuota vencida de al menos 1 mes (mismo criterio que el filtro
+// "1 mes de cuota vencida").
+const MESES_CUOTA_VENCIDA_CLIENTE_PERDIDO = 1;
+
+export const ROLES_OPERATIVOS_ALUMNOS = [
   'SUPER_ADMIN',
   'DIRECCION',
   'FRONT_COMERCIAL',
   'COORD_SEDE'
 ];
 
-const ROLES_LECTURA_ALUMNOS = [
+export const ROLES_LECTURA_ALUMNOS = [
   'SUPER_ADMIN',
   'DIRECCION',
   'FRONT_COMERCIAL',
@@ -73,7 +84,7 @@ const ROLES_LECTURA_ALUMNOS = [
 ];
 
 // Benjamin Orellana - 2026/06/15 - Permite buscar alumnos por nombre completo, DNI, email o teléfono.
-const construirWhereBusquedaAlumno = (search) => {
+export const construirWhereBusquedaAlumno = (search) => {
   const terminos = String(search || '')
     .trim()
     .split(/\s+/)
@@ -106,7 +117,7 @@ const construirWhereBusquedaAlumno = (search) => {
  * Se utilizan los nombres reales declarados por Sequelize para evitar
  * acoplar el controlador a nombres físicos escritos manualmente.
  */
-const construirFiltroSinRelacionAlumno = (
+export const construirFiltroSinRelacionAlumno = (
   modeloRelacionado,
   aliasRelacionado
 ) => {
@@ -134,14 +145,24 @@ const construirFiltroSinRelacionAlumno = (
  * mensualidad vencida y saldo pendiente. Se usa EXISTS para contar personas,
  * no mensualidades, y para respetar el alcance de sede aplicado al alumno.
  */
-const construirFiltroAlumnoMoroso = () => {
+const construirFiltroAlumnoMoroso = () => construirFiltroAlumnoCuotaVencida(0);
+
+/*
+ * Benjamin Orellana - 2026/08/01 - Generaliza construirFiltroAlumnoMoroso
+ * para exigir una antigüedad mínima de vencimiento (en meses). Con
+ * mesesMinimos = 0 se comporta igual que antes (cualquier vencimiento);
+ * con 1 o 3 se usa para los filtros de seguimiento comercial "1 mes de
+ * cuota vencida" / "3 meses de cuotas vencidas".
+ */
+export const construirFiltroAlumnoCuotaVencida = (mesesMinimos = 0) => {
+  const meses = Math.max(Number(mesesMinimos) || 0, 0);
   const queryGenerator = db.getQueryInterface().queryGenerator;
   const tablaMensualidades = queryGenerator.quoteTable(
     PagosMensualidadesModel.getTableName()
   );
   const aliasPrincipal = queryGenerator.quoteIdentifier(AlumnosModel.name);
   const aliasMensualidad = queryGenerator.quoteIdentifier(
-    'mensualidades_morosas_estadisticas'
+    `cuota_vencida_filtro_${meses}`
   );
   const columnaIdAlumno = queryGenerator.quoteIdentifier('id');
   const columnaAlumnoRelacion = queryGenerator.quoteIdentifier('alumno_id');
@@ -149,6 +170,8 @@ const construirFiltroAlumnoMoroso = () => {
   const columnaEstado = queryGenerator.quoteIdentifier('estado');
   const columnaFechaVencimiento =
     queryGenerator.quoteIdentifier('fecha_vencimiento');
+  const limiteFecha =
+    meses > 0 ? `DATE_SUB(CURDATE(), INTERVAL ${meses} MONTH)` : 'CURDATE()';
 
   return db.literal(`
     EXISTS (
@@ -157,15 +180,129 @@ const construirFiltroAlumnoMoroso = () => {
       WHERE ${aliasMensualidad}.${columnaAlumnoRelacion} = ${aliasPrincipal}.${columnaIdAlumno}
         AND ${aliasMensualidad}.${columnaSaldo} > 0
         AND ${aliasMensualidad}.${columnaEstado} <> 'anulada'
-        AND (
-          ${aliasMensualidad}.${columnaEstado} = 'vencida'
-          OR (
-            ${aliasMensualidad}.${columnaFechaVencimiento} < CURDATE()
-            AND ${aliasMensualidad}.${columnaEstado} IN ('pendiente', 'parcial')
-          )
-        )
+        AND ${aliasMensualidad}.${columnaEstado} IN ('vencida', 'pendiente', 'parcial')
+        AND ${aliasMensualidad}.${columnaFechaVencimiento} < ${limiteFecha}
     )
   `);
+};
+
+/*
+ * Sergio Manrique - 2026/08/01 - Identifica alumnos con más de `diasMinimos`
+ * sin registrar una asistencia real ('asistio'). Reutiliza el mismo criterio
+ * que OBRS_AlumnosInactivos_CTS (Controllers/Alumno/CTS_TB_AlumnosAsistencias.js):
+ * si nunca asistió, se compara contra su fecha_inicio.
+ */
+export const construirFiltroAlumnoInactivo = (diasMinimos) => {
+  const dias = Math.max(Number(diasMinimos) || 0, 0);
+  const queryGenerator = db.getQueryInterface().queryGenerator;
+  const tablaAsistencias = queryGenerator.quoteTable('alumnos_asistencias');
+  const aliasPrincipal = queryGenerator.quoteIdentifier(AlumnosModel.name);
+  const aliasAsistencia = queryGenerator.quoteIdentifier(
+    `asistencia_inactividad_filtro_${dias}`
+  );
+  const columnaId = queryGenerator.quoteIdentifier('id');
+  const columnaAlumnoRelacion = queryGenerator.quoteIdentifier('alumno_id');
+  const columnaFecha = queryGenerator.quoteIdentifier('fecha');
+  const columnaEstadoAsistencia = queryGenerator.quoteIdentifier('estado');
+  const columnaFechaInicio = queryGenerator.quoteIdentifier('fecha_inicio');
+
+  return db.literal(`
+    COALESCE(
+      DATEDIFF(CURDATE(), (
+        SELECT MAX(${aliasAsistencia}.${columnaFecha})
+        FROM ${tablaAsistencias} AS ${aliasAsistencia}
+        WHERE ${aliasAsistencia}.${columnaAlumnoRelacion} = ${aliasPrincipal}.${columnaId}
+          AND ${aliasAsistencia}.${columnaEstadoAsistencia} = 'asistio'
+      )),
+      DATEDIFF(CURDATE(), ${aliasPrincipal}.${columnaFechaInicio})
+    ) > ${dias}
+  `);
+};
+
+/*
+ * Sergio Manrique - 2026/08/02 - Etiqueta legible de seguimiento comercial
+ * ("Inactivo hace 5 días", "Cuota vencida hace 1 mes", "Pendiente de
+ * validación") a partir de los días reales calculados. Compartida entre el
+ * listado de Alumnos (sub-etiqueta bajo el estado) y Recaptaciones.
+ */
+export const calcularEtiquetaSeguimiento = (diasInactividad, diasCuotaVencida, estadoAlumno) => {
+  if (diasCuotaVencida !== null) {
+    if (diasCuotaVencida >= 30) {
+      const meses = Math.floor(diasCuotaVencida / 30);
+      return `Cuota vencida hace ${meses} ${meses === 1 ? 'mes' : 'meses'}`;
+    }
+
+    return `Cuota vencida hace ${diasCuotaVencida} día${diasCuotaVencida === 1 ? '' : 's'}`;
+  }
+
+  if (diasInactividad !== null) {
+    return `Inactivo hace ${diasInactividad} día${diasInactividad === 1 ? '' : 's'}`;
+  }
+
+  // Autoregistros sin asistencias ni cuotas: no hay días que calcular, pero
+  // igual necesitan seguimiento comercial para validarlos y darles de alta.
+  if (estadoAlumno === 'pendiente_validacion') {
+    return 'Pendiente de validación';
+  }
+
+  return null;
+};
+
+/*
+ * Sergio Manrique - 2026/08/02 - Trae, para un lote de alumno_id, los días
+ * de inactividad y los días de cuota vencida más antigua impaga. Se hace en
+ * 2 consultas batched (no una por alumno) para no golpear la DB por fila.
+ * Compartida entre el listado de Alumnos y Recaptaciones.
+ */
+export const obtenerDiasSeguimientoPorAlumnos = async (alumnoIds) => {
+  if (!alumnoIds.length) {
+    return { asistencias: new Map(), cuotasVencidas: new Map() };
+  }
+
+  const [filasAsistencias, filasCuotas] = await Promise.all([
+    db.query(
+      `
+      SELECT a.id AS alumno_id,
+        COALESCE(DATEDIFF(CURDATE(), MAX(aa.fecha)), DATEDIFF(CURDATE(), a.fecha_inicio)) AS dias_inactividad
+      FROM alumnos_alumnos a
+      LEFT JOIN alumnos_asistencias aa
+        ON aa.alumno_id = a.id AND aa.estado = 'asistio'
+      WHERE a.id IN (:alumnoIds)
+      GROUP BY a.id, a.fecha_inicio
+      `,
+      { replacements: { alumnoIds }, type: QueryTypes.SELECT }
+    ),
+    db.query(
+      `
+      SELECT alumno_id, DATEDIFF(CURDATE(), MIN(fecha_vencimiento)) AS dias_cuota_vencida
+      FROM pagos_mensualidades
+      WHERE alumno_id IN (:alumnoIds)
+        AND saldo > 0
+        AND estado <> 'anulada'
+        AND estado IN ('vencida', 'pendiente', 'parcial')
+        AND fecha_vencimiento < CURDATE()
+      GROUP BY alumno_id
+      `,
+      { replacements: { alumnoIds }, type: QueryTypes.SELECT }
+    )
+  ]);
+
+  // Number(null) da 0 en JS, no NaN: hay que preservar el NULL explícitamente
+  // para no confundir "sin días calculables" con "inactivo hace 0 días".
+  const asistencias = new Map(
+    filasAsistencias.map((fila) => [
+      Number(fila.alumno_id),
+      fila.dias_inactividad === null ? null : Number(fila.dias_inactividad)
+    ])
+  );
+  const cuotasVencidas = new Map(
+    filasCuotas.map((fila) => [
+      Number(fila.alumno_id),
+      fila.dias_cuota_vencida === null ? null : Number(fila.dias_cuota_vencida)
+    ])
+  );
+
+  return { asistencias, cuotasVencidas };
 };
 
 const normalizarTexto = (value) => {
@@ -210,7 +347,7 @@ const sumarDiasDateOnly = (fechaDateOnly, dias) => {
   return fechaBase.toISOString().slice(0, 10);
 };
 
-const normalizarTinyint = (value, defaultValue = 0) => {
+export const normalizarTinyint = (value, defaultValue = 0) => {
   if (value === undefined || value === null || value === '')
     return defaultValue;
 
@@ -278,7 +415,7 @@ const validarRolOperacionAlumnos = (user) => {
   return ROLES_OPERATIVOS_ALUMNOS.includes(user?.rol_codigo);
 };
 
-const validarRolLecturaAlumnos = (user) => {
+export const validarRolLecturaAlumnos = (user) => {
   return ROLES_LECTURA_ALUMNOS.includes(user?.rol_codigo);
 };
 
@@ -313,7 +450,7 @@ const buscarRolAlumno = async () => {
   });
 };
 
-const construirAlumnoRespuesta = async (alumno, transaction = null) => {
+export const construirAlumnoRespuesta = async (alumno, transaction = null) => {
   if (!alumno) return null;
 
   const alumnoPlano =
@@ -687,7 +824,7 @@ const verificarUsuarioLoginDuplicado = async ({ email, telefono }) => {
   });
 };
 
-const aplicarScopeSedesAlumnos = (
+export const aplicarScopeSedesAlumnos = (
   where = {},
   user = null,
   sedeIdQuery = null
@@ -724,7 +861,13 @@ const aplicarScopeSedesAlumnos = (
     return { ok: true, where };
   }
 
-  where.sede_id = { [Op.in]: sedesPermitidas };
+  // Sergio Manrique - 2026/08/02 - Los alumnos autoregistrados (registro
+  // público) se crean sin sede_id hasta que alguien los valida y les asigna
+  // una sede. Como "NULL IN (...)" nunca es verdadero en SQL, sin este OR
+  // esos alumnos quedaban invisibles para cualquier usuario no global
+  // (COORD_SEDE/FRONT_COMERCIAL) incluso con "todas las sedes" seleccionado,
+  // y nadie podía validarlos ni asignarles plan.
+  where.sede_id = { [Op.or]: [{ [Op.in]: sedesPermitidas }, { [Op.is]: null }] };
 
   return { ok: true, where };
 };
@@ -1214,6 +1357,9 @@ export const OBR_Alumnos_CTS = async (req, res) => {
       sin_anamnesis,
       sin_contacto_emergencia,
       sin_asistencias,
+      dias_inactividad,
+      meses_cuota_vencida,
+      cliente_perdido,
       page = 1,
       limit = 20,
       orderBy = 'created_at',
@@ -1330,6 +1476,48 @@ export const OBR_Alumnos_CTS = async (req, res) => {
       where.ultima_asistencia = { [Op.is]: null };
     }
 
+    // Sergio Manrique - 2026/08/01 - Filtros de seguimiento comercial.
+    if (dias_inactividad !== undefined && dias_inactividad !== '') {
+      const diasNumero = Number(dias_inactividad);
+
+      if (!DIAS_INACTIVIDAD_VALIDOS.includes(diasNumero)) {
+        return res.status(400).json({
+          ok: false,
+          message: 'Valor de días de inactividad inválido.',
+          valores_validos: DIAS_INACTIVIDAD_VALIDOS
+        });
+      }
+
+      where[Op.and] = [
+        ...(where[Op.and] || []),
+        construirFiltroAlumnoInactivo(diasNumero)
+      ];
+    }
+
+    if (meses_cuota_vencida !== undefined && meses_cuota_vencida !== '') {
+      const mesesNumero = Number(meses_cuota_vencida);
+
+      if (!MESES_CUOTA_VENCIDA_VALIDOS.includes(mesesNumero)) {
+        return res.status(400).json({
+          ok: false,
+          message: 'Valor de meses de cuota vencida inválido.',
+          valores_validos: MESES_CUOTA_VENCIDA_VALIDOS
+        });
+      }
+
+      where[Op.and] = [
+        ...(where[Op.and] || []),
+        construirFiltroAlumnoCuotaVencida(mesesNumero)
+      ];
+    }
+
+    if (normalizarTinyint(cliente_perdido, 0) === 1) {
+      where[Op.and] = [
+        ...(where[Op.and] || []),
+        construirFiltroAlumnoCuotaVencida(MESES_CUOTA_VENCIDA_CLIENTE_PERDIDO)
+      ];
+    }
+
     const pageNumber = Math.max(Number(page) || 1, 1);
     const limitNumber = Math.min(Math.max(Number(limit) || 20, 1), 200);
     const offset = (pageNumber - 1) * limitNumber;
@@ -1359,8 +1547,38 @@ export const OBR_Alumnos_CTS = async (req, res) => {
       order: [[safeOrderBy, safeOrderDirection]]
     });
 
+    // Sergio Manrique - 2026/08/02 - Sub-etiqueta de seguimiento comercial
+    // ("Inactivo hace 5 días", "Cuota vencida hace 1 mes") bajo el estado,
+    // para que el equipo detecte a simple vista quién necesita seguimiento
+    // sin tener que entrar a Recaptaciones. Misma función que usa ese módulo.
+    const alumnoIds = rows.map((alumno) => alumno.id);
+    const { asistencias, cuotasVencidas } = await obtenerDiasSeguimientoPorAlumnos(alumnoIds);
+
     const data = await Promise.all(
-      rows.map((alumno) => construirAlumnoRespuesta(alumno))
+      rows.map(async (alumno) => {
+        const base = await construirAlumnoRespuesta(alumno);
+        const diasInactividad = asistencias.has(alumno.id) ? asistencias.get(alumno.id) : null;
+        const diasCuotaVencida = cuotasVencidas.has(alumno.id)
+          ? cuotasVencidas.get(alumno.id)
+          : null;
+        // A diferencia de Recaptaciones (donde el WHERE ya garantiza que el
+        // alumno superó un umbral), acá hay que pisar el umbral a mano: si no
+        // lo hacemos, un alumno que asistió ayer mostraría "Inactivo hace 1
+        // día" solo por tener fecha_inicio, cuando en realidad está al día.
+        const diasInactividadRelevante =
+          diasInactividad !== null && diasInactividad >= 5 ? diasInactividad : null;
+
+        return {
+          ...base,
+          dias_inactividad: diasInactividad,
+          dias_cuota_vencida: diasCuotaVencida,
+          etiqueta_seguimiento: calcularEtiquetaSeguimiento(
+            diasInactividadRelevante,
+            diasCuotaVencida,
+            alumno.estado
+          )
+        };
+      })
     );
 
     return res.status(200).json({
@@ -3083,13 +3301,37 @@ export const UR_HabilitarAccesoAlumno_CTS = async (req, res) => {
 export const DR_Alumnos_CTS = async (req, res) => {
   const transaction = await db.transaction();
 
+  const tablasTemporales = [
+    'tmp_delete_alumno_finanzas',
+    'tmp_delete_alumno_cobros_pagos',
+    'tmp_delete_alumno_cobros',
+    'tmp_delete_alumno_bonificaciones',
+    'tmp_delete_alumno_saldos',
+    'tmp_delete_alumno_reservas',
+    'tmp_delete_alumno_anamnesis',
+    'tmp_delete_alumno_pagos',
+    'tmp_delete_alumno_mensualidades',
+    'tmp_delete_alumno_membresias'
+  ];
+
+  const limpiarTemporales = async () => {
+    for (const tabla of tablasTemporales) {
+      await db.query(`DROP TEMPORARY TABLE IF EXISTS ${tabla}`, {
+        transaction
+      });
+    }
+  };
+
   try {
-    if (!validarRolOperacionAlumnos(req.user)) {
+    const esPreviewEliminacion = Boolean(req.esPreviewEliminacion);
+
+    if (String(req.user?.rol_codigo || '').toUpperCase() !== 'SUPER_ADMIN') {
       await transaction.rollback();
 
       return res.status(403).json({
         ok: false,
-        message: 'No tiene permisos para eliminar alumnos.'
+        message:
+          'La eliminación física de alumnos está disponible únicamente para SUPER_ADMIN.'
       });
     }
 
@@ -3109,43 +3351,35 @@ export const DR_Alumnos_CTS = async (req, res) => {
     const alumno = result.alumno;
     const alumnoPlano =
       typeof alumno.toJSON === 'function' ? alumno.toJSON() : alumno;
-
     const alumnoId = Number(alumnoPlano.id);
 
-    /*
-     * Limpieza preventiva por si el mismo connection pool reutilizó
-     * una conexión donde una ejecución anterior falló antes de dropear temporales.
-     */
-    await db.query(
-      'DROP TEMPORARY TABLE IF EXISTS tmp_delete_alumno_membresias',
-      {
-        transaction
+    if (!esPreviewEliminacion) {
+      const dniConfirmacion = String(req.body?.dni_confirmacion || '').replace(
+        /\D/g,
+        ''
+      );
+      const dniAlumno = String(alumnoPlano.dni || '').replace(/\D/g, '');
+
+      if (!dniConfirmacion || dniConfirmacion !== dniAlumno) {
+        await transaction.rollback();
+
+        return res.status(422).json({
+          ok: false,
+          code: 'ALUMNO_DELETE_DNI_CONFIRMATION_INVALID',
+          message:
+            'El DNI ingresado no coincide con el alumno. No se realizó ninguna eliminación.'
+        });
       }
-    );
-    await db.query(
-      'DROP TEMPORARY TABLE IF EXISTS tmp_delete_alumno_mensualidades',
-      {
-        transaction
-      }
-    );
-    await db.query('DROP TEMPORARY TABLE IF EXISTS tmp_delete_alumno_pagos', {
-      transaction
-    });
-    await db.query(
-      'DROP TEMPORARY TABLE IF EXISTS tmp_delete_alumno_anamnesis',
-      {
-        transaction
-      }
-    );
-    await db.query(
-      'DROP TEMPORARY TABLE IF EXISTS tmp_delete_alumno_reservas',
-      {
-        transaction
-      }
-    );
+    }
 
     /*
-     * 1) Se congelan los IDs dependientes antes de borrar.
+     * Limpieza preventiva: una conexión reutilizada por el pool puede conservar
+     * tablas temporales si una ejecución anterior terminó de forma inesperada.
+     */
+    await limpiarTemporales();
+
+    /*
+     * 1) Congelar todos los IDs relacionados antes de comenzar el borrado.
      */
     await db.query(
       `
@@ -3221,119 +3455,300 @@ export const DR_Alumnos_CTS = async (req, res) => {
       }
     );
 
-    /*
-     * 2) Diagnóstico previo: esto se devuelve al front para saber qué se borró.
-     */
-    const relacionesRows = await db.query(
+    await db.query(
       `
-        SELECT 'arca_comprobantes' AS tabla, COUNT(DISTINCT ac.id) AS cantidad
-        FROM arca_comprobantes ac
-        LEFT JOIN tmp_delete_alumno_pagos tp
-          ON tp.id = ac.pago_id
-        WHERE ac.alumno_id = :alumnoId
-           OR tp.id IS NOT NULL
-
-        UNION ALL
-
-        SELECT 'finanzas_movimientos' AS tabla, COUNT(DISTINCT fm.id) AS cantidad
-        FROM finanzas_movimientos fm
-        INNER JOIN tmp_delete_alumno_pagos tp
-          ON tp.id = fm.pago_id
-
-        UNION ALL
-
-        SELECT 'pagos_pagos' AS tabla, COUNT(*) AS cantidad
-        FROM tmp_delete_alumno_pagos
-
-        UNION ALL
-
-        SELECT 'pagos_mensualidades' AS tabla, COUNT(*) AS cantidad
-        FROM tmp_delete_alumno_mensualidades
-
-        UNION ALL
-
-        SELECT 'alumnos_asistencias' AS tabla, COUNT(DISTINCT aa.id) AS cantidad
-        FROM alumnos_asistencias aa
-        LEFT JOIN tmp_delete_alumno_membresias tam
-          ON tam.id = aa.membresia_id
-        LEFT JOIN tmp_delete_alumno_reservas tr
-          ON tr.id = aa.reserva_id
-        WHERE aa.alumno_id = :alumnoId
-           OR tam.id IS NOT NULL
-           OR tr.id IS NOT NULL
-
-        UNION ALL
-
-        SELECT 'agenda_turnos_reservas' AS tabla, COUNT(*) AS cantidad
-        FROM tmp_delete_alumno_reservas
-
-        UNION ALL
-
-        SELECT 'alumnos_anamnesis_historial' AS tabla, COUNT(DISTINCT aah.id) AS cantidad
-        FROM alumnos_anamnesis_historial aah
-        LEFT JOIN tmp_delete_alumno_anamnesis taa
-          ON taa.id = aah.anamnesis_id
-        WHERE aah.alumno_id = :alumnoId
-           OR taa.id IS NOT NULL
-
-        UNION ALL
-
-        SELECT 'alumnos_anamnesis' AS tabla, COUNT(*) AS cantidad
-        FROM tmp_delete_alumno_anamnesis
-
-        UNION ALL
-
-        SELECT 'agenda_turnos_lista_espera' AS tabla, COUNT(*) AS cantidad
-        FROM agenda_turnos_lista_espera
+        CREATE TEMPORARY TABLE tmp_delete_alumno_saldos AS
+        SELECT id
+        FROM alumnos_saldos
         WHERE alumno_id = :alumnoId
-
-        UNION ALL
-
-        SELECT 'pagos_metodos_recurrentes' AS tabla, COUNT(*) AS cantidad
-        FROM pagos_metodos_recurrentes
-        WHERE alumno_id = :alumnoId
-
-        UNION ALL
-
-        SELECT 'sistema_alertas' AS tabla, COUNT(*) AS cantidad
-        FROM sistema_alertas
-        WHERE alumno_id = :alumnoId
-
-        UNION ALL
-
-        SELECT 'alumnos_contactos_emergencia' AS tabla, COUNT(*) AS cantidad
-        FROM alumnos_contactos_emergencia
-        WHERE alumno_id = :alumnoId
-
-        UNION ALL
-
-        SELECT 'alumnos_usuarios' AS tabla, COUNT(*) AS cantidad
-        FROM alumnos_usuarios
-        WHERE alumno_id = :alumnoId
-
-        UNION ALL
-
-        SELECT 'alumnos_login' AS tabla, COUNT(*) AS cantidad
-        FROM alumnos_login
-        WHERE alumno_id = :alumnoId
-
-        UNION ALL
-
-        SELECT 'alumnos_membresias' AS tabla, COUNT(*) AS cantidad
-        FROM tmp_delete_alumno_membresias
-
-        UNION ALL
-
-        SELECT 'alumnos_alumnos' AS tabla, COUNT(*) AS cantidad
-        FROM alumnos_alumnos
-        WHERE id = :alumnoId
       `,
       {
         replacements: { alumnoId },
-        type: QueryTypes.SELECT,
         transaction
       }
     );
+
+    await db.query(
+      `
+        CREATE TEMPORARY TABLE tmp_delete_alumno_bonificaciones AS
+        SELECT DISTINCT ab.id
+        FROM alumnos_bonificaciones ab
+        LEFT JOIN tmp_delete_alumno_mensualidades tm
+          ON tm.id = ab.mensualidad_id
+        WHERE ab.alumno_id = :alumnoId
+           OR tm.id IS NOT NULL
+      `,
+      {
+        replacements: { alumnoId },
+        transaction
+      }
+    );
+
+    await db.query(
+      `
+        CREATE TEMPORARY TABLE tmp_delete_alumno_cobros AS
+        SELECT DISTINCT
+          c.id,
+          c.finanzas_movimiento_id,
+          c.finanzas_reversion_id
+        FROM cobros_cobros c
+        LEFT JOIN cobros_detalles cd
+          ON cd.cobro_id = c.id
+        LEFT JOIN tmp_delete_alumno_membresias tam
+          ON tam.id = cd.membresia_id
+        LEFT JOIN tmp_delete_alumno_mensualidades tm
+          ON tm.id = cd.mensualidad_id
+        LEFT JOIN tmp_delete_alumno_pagos tp
+          ON tp.id = cd.pago_id
+        WHERE c.alumno_id = :alumnoId
+           OR tam.id IS NOT NULL
+           OR tm.id IS NOT NULL
+           OR tp.id IS NOT NULL
+      `,
+      {
+        replacements: { alumnoId },
+        transaction
+      }
+    );
+
+    await db.query(
+      `
+        CREATE TEMPORARY TABLE tmp_delete_alumno_cobros_pagos AS
+        SELECT DISTINCT cp.id
+        FROM cobros_pagos cp
+        INNER JOIN tmp_delete_alumno_cobros tc
+          ON tc.id = cp.cobro_id
+      `,
+      { transaction }
+    );
+
+    /*
+     * MySQL no permite reabrir la misma tabla temporal más de una vez dentro
+     * de una única sentencia. Se consolidan previamente los movimientos
+     * financieros para consultarlos y borrarlos usando una sola referencia.
+     */
+    await db.query(
+      `
+        CREATE TEMPORARY TABLE tmp_delete_alumno_finanzas (
+          id BIGINT UNSIGNED NOT NULL PRIMARY KEY
+        )
+      `,
+      { transaction }
+    );
+
+    await db.query(
+      `
+        INSERT IGNORE INTO tmp_delete_alumno_finanzas (id)
+        SELECT fm.id
+        FROM finanzas_movimientos fm
+        INNER JOIN tmp_delete_alumno_pagos tp
+          ON tp.id = fm.pago_id
+      `,
+      { transaction }
+    );
+
+    await db.query(
+      `
+        INSERT IGNORE INTO tmp_delete_alumno_finanzas (id)
+        SELECT tc.finanzas_movimiento_id
+        FROM tmp_delete_alumno_cobros tc
+        WHERE tc.finanzas_movimiento_id IS NOT NULL
+      `,
+      { transaction }
+    );
+
+    await db.query(
+      `
+        INSERT IGNORE INTO tmp_delete_alumno_finanzas (id)
+        SELECT tc.finanzas_reversion_id
+        FROM tmp_delete_alumno_cobros tc
+        WHERE tc.finanzas_reversion_id IS NOT NULL
+      `,
+      { transaction }
+    );
+
+    /*
+     * 2) Diagnóstico previo para informar exactamente qué registros se quitaron.
+     * Cada conteo se ejecuta en una sentencia independiente. Esto evita
+     * ER_CANT_REOPEN_TABLE de MySQL al reutilizar tablas temporales dentro
+     * de un único SELECT compuesto con UNION ALL.
+     */
+    const consultasRelaciones = [
+      {
+        tabla: 'cajas_movimientos',
+        sql: `
+          SELECT COUNT(DISTINCT cm.id) AS cantidad
+          FROM cajas_movimientos cm
+          INNER JOIN tmp_delete_alumno_cobros_pagos tcp
+            ON tcp.id = cm.cobro_pago_id
+        `
+      },
+      {
+        tabla: 'alumnos_saldos_movimientos',
+        sql: `
+          SELECT COUNT(DISTINCT asm.id) AS cantidad
+          FROM alumnos_saldos_movimientos asm
+          LEFT JOIN tmp_delete_alumno_saldos tas
+            ON tas.id = asm.saldo_id
+          LEFT JOIN tmp_delete_alumno_cobros tc
+            ON tc.id = asm.cobro_id
+          LEFT JOIN tmp_delete_alumno_bonificaciones tab
+            ON tab.id = asm.bonificacion_id
+          WHERE asm.alumno_id = :alumnoId
+             OR tas.id IS NOT NULL
+             OR tc.id IS NOT NULL
+             OR tab.id IS NOT NULL
+        `
+      },
+      {
+        tabla: 'cobros_detalles',
+        sql: `
+          SELECT COUNT(DISTINCT cd.id) AS cantidad
+          FROM cobros_detalles cd
+          INNER JOIN tmp_delete_alumno_cobros tc
+            ON tc.id = cd.cobro_id
+        `
+      },
+      {
+        tabla: 'cobros_pagos',
+        sql: `SELECT COUNT(*) AS cantidad FROM tmp_delete_alumno_cobros_pagos`
+      },
+      {
+        tabla: 'cobros_cobros',
+        sql: `SELECT COUNT(*) AS cantidad FROM tmp_delete_alumno_cobros`
+      },
+      {
+        tabla: 'arca_comprobantes',
+        sql: `
+          SELECT COUNT(DISTINCT ac.id) AS cantidad
+          FROM arca_comprobantes ac
+          LEFT JOIN tmp_delete_alumno_pagos tp
+            ON tp.id = ac.pago_id
+          WHERE ac.alumno_id = :alumnoId
+             OR tp.id IS NOT NULL
+        `
+      },
+      {
+        tabla: 'finanzas_movimientos',
+        sql: `SELECT COUNT(*) AS cantidad FROM tmp_delete_alumno_finanzas`
+      },
+      {
+        tabla: 'alumnos_bonificaciones',
+        sql: `SELECT COUNT(*) AS cantidad FROM tmp_delete_alumno_bonificaciones`
+      },
+      {
+        tabla: 'alumnos_saldos',
+        sql: `SELECT COUNT(*) AS cantidad FROM tmp_delete_alumno_saldos`
+      },
+      {
+        tabla: 'pagos_pagos',
+        sql: `SELECT COUNT(*) AS cantidad FROM tmp_delete_alumno_pagos`
+      },
+      {
+        tabla: 'pagos_mensualidades',
+        sql: `SELECT COUNT(*) AS cantidad FROM tmp_delete_alumno_mensualidades`
+      },
+      {
+        tabla: 'alumnos_asistencias',
+        sql: `
+          SELECT COUNT(DISTINCT aa.id) AS cantidad
+          FROM alumnos_asistencias aa
+          LEFT JOIN tmp_delete_alumno_membresias tam
+            ON tam.id = aa.membresia_id
+          LEFT JOIN tmp_delete_alumno_reservas tr
+            ON tr.id = aa.reserva_id
+          WHERE aa.alumno_id = :alumnoId
+             OR tam.id IS NOT NULL
+             OR tr.id IS NOT NULL
+        `
+      },
+      {
+        tabla: 'agenda_turnos_reservas',
+        sql: `SELECT COUNT(*) AS cantidad FROM tmp_delete_alumno_reservas`
+      },
+      {
+        tabla: 'alumnos_anamnesis_historial',
+        sql: `
+          SELECT COUNT(DISTINCT aah.id) AS cantidad
+          FROM alumnos_anamnesis_historial aah
+          LEFT JOIN tmp_delete_alumno_anamnesis taa
+            ON taa.id = aah.anamnesis_id
+          WHERE aah.alumno_id = :alumnoId
+             OR taa.id IS NOT NULL
+        `
+      },
+      {
+        tabla: 'alumnos_anamnesis',
+        sql: `SELECT COUNT(*) AS cantidad FROM tmp_delete_alumno_anamnesis`
+      },
+      {
+        tabla: 'agenda_turnos_lista_espera',
+        sql: `
+          SELECT COUNT(*) AS cantidad
+          FROM agenda_turnos_lista_espera
+          WHERE alumno_id = :alumnoId
+        `
+      },
+      {
+        tabla: 'pagos_metodos_recurrentes',
+        sql: `
+          SELECT COUNT(*) AS cantidad
+          FROM pagos_metodos_recurrentes
+          WHERE alumno_id = :alumnoId
+        `
+      },
+      {
+        tabla: 'sistema_alertas',
+        sql: `
+          SELECT COUNT(*) AS cantidad
+          FROM sistema_alertas
+          WHERE alumno_id = :alumnoId
+        `
+      },
+      {
+        tabla: 'alumnos_contactos_emergencia',
+        sql: `
+          SELECT COUNT(*) AS cantidad
+          FROM alumnos_contactos_emergencia
+          WHERE alumno_id = :alumnoId
+        `
+      },
+      {
+        tabla: 'alumnos_usuarios',
+        sql: `
+          SELECT COUNT(*) AS cantidad
+          FROM alumnos_usuarios
+          WHERE alumno_id = :alumnoId
+        `
+      },
+      {
+        tabla: 'alumnos_membresias',
+        sql: `SELECT COUNT(*) AS cantidad FROM tmp_delete_alumno_membresias`
+      },
+      {
+        tabla: 'alumnos_alumnos',
+        sql: `
+          SELECT COUNT(*) AS cantidad
+          FROM alumnos_alumnos
+          WHERE id = :alumnoId
+        `
+      }
+    ];
+
+    const relacionesRows = [];
+
+    for (const consulta of consultasRelaciones) {
+      const filas = await db.query(consulta.sql, {
+        replacements: { alumnoId },
+        type: QueryTypes.SELECT,
+        transaction
+      });
+
+      relacionesRows.push({
+        tabla: consulta.tabla,
+        cantidad: Number(filas?.[0]?.cantidad || 0)
+      });
+    }
 
     const relacionesDetectadas = relacionesRows.reduce((acc, row) => {
       acc[row.tabla] = Number(row.cantidad || 0);
@@ -3347,10 +3762,121 @@ export const DR_Alumnos_CTS = async (req, res) => {
         cantidad: Number(row.cantidad || 0)
       }));
 
+    const totalRegistrosAEliminar = relacionesConDatos.reduce(
+      (acc, item) => acc + Number(item.cantidad || 0),
+      0
+    );
+    const totalRelacionesAsociadas = relacionesConDatos
+      .filter((item) => item.tabla !== 'alumnos_alumnos')
+      .reduce((acc, item) => acc + Number(item.cantidad || 0), 0);
+    const tablasFinancieras = new Set([
+      'pagos_mensualidades',
+      'pagos_pagos',
+      'cobros_cobros',
+      'cobros_detalles',
+      'cobros_pagos',
+      'cajas_movimientos',
+      'finanzas_movimientos',
+      'alumnos_saldos',
+      'alumnos_saldos_movimientos',
+      'alumnos_bonificaciones',
+      'pagos_metodos_recurrentes',
+      'arca_comprobantes'
+    ]);
+    const tieneRegistrosFinancieros = relacionesConDatos.some(
+      (item) =>
+        tablasFinancieras.has(item.tabla) && Number(item.cantidad || 0) > 0
+    );
+
+    if (esPreviewEliminacion) {
+      await limpiarTemporales();
+      await transaction.rollback();
+
+      return res.status(200).json({
+        ok: true,
+        message: 'Previsualización de eliminación generada correctamente.',
+        data: {
+          alumno: {
+            id: alumnoId,
+            nombre: alumnoPlano.nombre,
+            apellido: alumnoPlano.apellido,
+            dni: alumnoPlano.dni,
+            sede_id: alumnoPlano.sede_id || null,
+            estado: alumnoPlano.estado || null
+          },
+          total_registros_a_eliminar: totalRegistrosAEliminar,
+          total_relaciones_asociadas: totalRelacionesAsociadas,
+          tiene_registros_financieros: tieneRegistrosFinancieros,
+          relaciones_detectadas: relacionesDetectadas,
+          relaciones_con_datos: relacionesConDatos
+        }
+      });
+    }
+
     /*
-     * 3) Borrado explícito en orden correcto.
-     * Primero hijos más profundos, después padres.
+     * 3) Borrado físico en orden de dependencia.
+     * Se eliminan primero los hijos más profundos y al final el alumno.
      */
+    await db.query(
+      `
+        DELETE cm
+        FROM cajas_movimientos cm
+        INNER JOIN tmp_delete_alumno_cobros_pagos tcp
+          ON tcp.id = cm.cobro_pago_id
+      `,
+      { transaction }
+    );
+
+    await db.query(
+      `
+        DELETE asm
+        FROM alumnos_saldos_movimientos asm
+        LEFT JOIN tmp_delete_alumno_saldos tas
+          ON tas.id = asm.saldo_id
+        LEFT JOIN tmp_delete_alumno_cobros tc
+          ON tc.id = asm.cobro_id
+        LEFT JOIN tmp_delete_alumno_bonificaciones tab
+          ON tab.id = asm.bonificacion_id
+        WHERE asm.alumno_id = :alumnoId
+           OR tas.id IS NOT NULL
+           OR tc.id IS NOT NULL
+           OR tab.id IS NOT NULL
+      `,
+      {
+        replacements: { alumnoId },
+        transaction
+      }
+    );
+
+    await db.query(
+      `
+        DELETE cd
+        FROM cobros_detalles cd
+        INNER JOIN tmp_delete_alumno_cobros tc
+          ON tc.id = cd.cobro_id
+      `,
+      { transaction }
+    );
+
+    await db.query(
+      `
+        DELETE cp
+        FROM cobros_pagos cp
+        INNER JOIN tmp_delete_alumno_cobros_pagos tcp
+          ON tcp.id = cp.id
+      `,
+      { transaction }
+    );
+
+    await db.query(
+      `
+        DELETE c
+        FROM cobros_cobros c
+        INNER JOIN tmp_delete_alumno_cobros tc
+          ON tc.id = c.id
+      `,
+      { transaction }
+    );
 
     await db.query(
       `
@@ -3371,8 +3897,18 @@ export const DR_Alumnos_CTS = async (req, res) => {
       `
         DELETE fm
         FROM finanzas_movimientos fm
-        INNER JOIN tmp_delete_alumno_pagos tp
-          ON tp.id = fm.pago_id
+        INNER JOIN tmp_delete_alumno_finanzas tf
+          ON tf.id = fm.id
+      `,
+      { transaction }
+    );
+
+    await db.query(
+      `
+        DELETE ab
+        FROM alumnos_bonificaciones ab
+        INNER JOIN tmp_delete_alumno_bonificaciones tab
+          ON tab.id = ab.id
       `,
       { transaction }
     );
@@ -3494,20 +4030,13 @@ export const DR_Alumnos_CTS = async (req, res) => {
       }
     );
 
+    /*
+     * El modelo MD_TB_AlumnosLogin usa físicamente alumnos_usuarios.
+     * La tabla alumnos_login no existe y era la causa del error 500.
+     */
     await db.query(
       `
         DELETE FROM alumnos_usuarios
-        WHERE alumno_id = :alumnoId
-      `,
-      {
-        replacements: { alumnoId },
-        transaction
-      }
-    );
-
-    await db.query(
-      `
-        DELETE FROM alumnos_login
         WHERE alumno_id = :alumnoId
       `,
       {
@@ -3526,49 +4055,29 @@ export const DR_Alumnos_CTS = async (req, res) => {
       { transaction }
     );
 
+    await db.query(
+      `
+        DELETE als
+        FROM alumnos_saldos als
+        INNER JOIN tmp_delete_alumno_saldos tas
+          ON tas.id = als.id
+      `,
+      { transaction }
+    );
+
     await alumno.destroy({ transaction });
 
-    await db.query(
-      'DROP TEMPORARY TABLE IF EXISTS tmp_delete_alumno_reservas',
-      {
-        transaction
-      }
-    );
-    await db.query(
-      'DROP TEMPORARY TABLE IF EXISTS tmp_delete_alumno_anamnesis',
-      {
-        transaction
-      }
-    );
-    await db.query('DROP TEMPORARY TABLE IF EXISTS tmp_delete_alumno_pagos', {
-      transaction
-    });
-    await db.query(
-      'DROP TEMPORARY TABLE IF EXISTS tmp_delete_alumno_mensualidades',
-      {
-        transaction
-      }
-    );
-    await db.query(
-      'DROP TEMPORARY TABLE IF EXISTS tmp_delete_alumno_membresias',
-      {
-        transaction
-      }
-    );
-
+    await limpiarTemporales();
     await transaction.commit();
 
-    const totalRelacionesEliminadas = relacionesConDatos.reduce(
-      (acc, item) => acc + Number(item.cantidad || 0),
-      0
-    );
+    const totalRelacionesEliminadas = totalRegistrosAEliminar;
 
     return res.status(200).json({
       ok: true,
       message: 'Alumno eliminado físicamente correctamente.',
       detalle:
         totalRelacionesEliminadas > 1
-          ? 'También se eliminaron las relaciones asociadas del alumno.'
+          ? 'También se eliminaron todas las relaciones asociadas detectadas.'
           : 'El alumno no tenía relaciones asociadas fuera de su propio registro.',
       total_relaciones_eliminadas: totalRelacionesEliminadas,
       relaciones_detectadas: relacionesDetectadas,
@@ -3588,30 +4097,49 @@ export const DR_Alumnos_CTS = async (req, res) => {
 
     console.error('Error DR_Alumnos_CTS:', error);
 
+    const codigo = error?.original?.code || error?.parent?.code || null;
+    const tabla = error?.table || error?.original?.table || null;
+    const constraint =
+      error?.index ||
+      error?.constraint ||
+      error?.original?.constraint ||
+      null;
+
     if (
       error?.name === 'SequelizeForeignKeyConstraintError' ||
-      error?.original?.code === 'ER_ROW_IS_REFERENCED_2'
+      codigo === 'ER_ROW_IS_REFERENCED_2'
     ) {
       return res.status(409).json({
         ok: false,
+        code: codigo || 'ALUMNO_DELETE_RELATION_NOT_HANDLED',
         message:
-          'No se pudo completar el borrado físico porque existe una relación adicional no contemplada en el orden de borrado.',
+          'No se pudo completar el borrado físico porque existe una relación adicional no contemplada.',
         detalle: {
-          tabla: error?.table || error?.original?.table || null,
-          constraint:
-            error?.index ||
-            error?.constraint ||
-            error?.original?.constraint ||
-            null,
-          campos: error?.fields || [],
-          sqlMessage: error?.original?.sqlMessage || error?.message
+          tabla,
+          constraint,
+          campos: error?.fields || []
         }
       });
     }
 
     return res.status(500).json({
       ok: false,
-      message: 'Error al eliminar físicamente el alumno.'
+      code: codigo || 'ALUMNO_DELETE_ERROR',
+      message: 'Error al eliminar físicamente el alumno.',
+      detalle: {
+        tabla,
+        constraint
+      }
     });
   }
 };
+
+/*
+ * Benjamin Orellana - 2026/08/01 - Previsualiza todas las relaciones que
+ * serán eliminadas antes de confirmar el borrado físico del alumno.
+ */
+export const OBR_PreviewEliminacionAlumno_CTS = async (req, res) => {
+  req.esPreviewEliminacion = true;
+  return DR_Alumnos_CTS(req, res);
+};
+

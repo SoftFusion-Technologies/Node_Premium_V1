@@ -18,6 +18,7 @@ import AlumnosAnamnesisModel from "./MD_TB_AlumnosAnamnesis.js";
 import AlumnosMembresiasModel from "./MD_TB_AlumnosMembresias.js";
 import AlumnosAsistenciasModel from "./MD_TB_AlumnosAsistencias.js";
 import AlumnosAnamnesisHistorialModel from "./MD_TB_AlumnosAnamnesisHistorial.js";
+import AlumnosRecaptacionesContactosModel from "./MD_TB_AlumnosRecaptacionesContactos.js";
 
 import SedesModel from "../Sede/MD_TB_Sedes.js";
 import UsuariosModel from "../Usuario/MD_TB_Usuarios.js";
@@ -296,5 +297,33 @@ export const initAlumnoRelaciones = () => {
   AlumnosAnamnesisHistorialModel.belongsTo(UsuariosModel, {
     foreignKey: "usuario_modificacion_id",
     as: "usuario_modificacion",
+  });
+
+  /*
+   * alumnos_alumnos -> alumnos_recaptaciones_contactos
+   * Un alumno puede tener muchos contactos de seguimiento comercial (recaptación).
+   */
+  AlumnosModel.hasMany(AlumnosRecaptacionesContactosModel, {
+    foreignKey: "alumno_id",
+    as: "recaptaciones_contactos",
+  });
+
+  AlumnosRecaptacionesContactosModel.belongsTo(AlumnosModel, {
+    foreignKey: "alumno_id",
+    as: "alumno",
+  });
+
+  /*
+   * usuarios_usuarios -> alumnos_recaptaciones_contactos
+   * Usuario que registró el contacto de recaptación.
+   */
+  UsuariosModel.hasMany(AlumnosRecaptacionesContactosModel, {
+    foreignKey: "usuario_id",
+    as: "recaptaciones_contactos_registrados",
+  });
+
+  AlumnosRecaptacionesContactosModel.belongsTo(UsuariosModel, {
+    foreignKey: "usuario_id",
+    as: "usuario",
   });
 };

@@ -281,18 +281,31 @@ export const loginAlumno = async (req, res) => {
       });
     }
 
-    // 5. Verificar bloqueo temporal por intentos fallidos
+    // 5. Verificar bloqueo temporal por intentos fallidos.
+    // Si el plazo ya venció, se inicia automáticamente un nuevo ciclo de intentos.
     if (loginRecord.bloqueado_hasta) {
       const ahora = new Date();
       const bloqueadoHasta = new Date(loginRecord.bloqueado_hasta);
+      const fechaBloqueoValida = !Number.isNaN(bloqueadoHasta.getTime());
 
-      if (ahora < bloqueadoHasta) {
-        const minutosRestantes = Math.ceil((bloqueadoHasta - ahora) / 1000 / 60);
+      if (fechaBloqueoValida && ahora < bloqueadoHasta) {
+        const minutosRestantes = Math.max(
+          Math.ceil((bloqueadoHasta.getTime() - ahora.getTime()) / 1000 / 60),
+          1
+        );
+
         return res.status(429).json({
           ok: false,
-          message: `Demasiados intentos fallidos. Intentá de nuevo en ${minutosRestantes} minuto${minutosRestantes !== 1 ? 's' : ''}.`
+          codigo: 'ALUMNO_BLOQUEADO_TEMPORALMENTE',
+          message: `Demasiados intentos fallidos. Intentá de nuevo en ${minutosRestantes} minuto${minutosRestantes !== 1 ? 's' : ''}.`,
+          bloqueado_hasta: loginRecord.bloqueado_hasta
         });
       }
+
+      await loginRecord.update({
+        intentos_fallidos: 0,
+        bloqueado_hasta: null
+      });
     }
 
     // 6. Verificar contraseña

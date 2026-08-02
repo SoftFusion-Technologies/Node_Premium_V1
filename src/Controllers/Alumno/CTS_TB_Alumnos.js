@@ -3296,6 +3296,24 @@ export const UR_HabilitarAccesoAlumno_CTS = async (req, res) => {
   }
 };
 
+const limpiarBloqueoTemporalVencido = async (loginRecord) => {
+  if (!loginRecord?.bloqueado_hasta) return false;
+
+  const bloqueadoHasta = new Date(loginRecord.bloqueado_hasta);
+  const bloqueoVigente =
+    !Number.isNaN(bloqueadoHasta.getTime()) &&
+    bloqueadoHasta.getTime() > Date.now();
+
+  if (bloqueoVigente) return false;
+
+  await loginRecord.update({
+    intentos_fallidos: 0,
+    bloqueado_hasta: null
+  });
+
+  return true;
+};
+
 const construirEstadoAccesoAlumno = (loginRecord) => {
   if (!loginRecord) {
     return {
@@ -3392,6 +3410,10 @@ export const OBR_AccesoAlumno_CTS = async (req, res) => {
     const loginRecord = await AlumnosLoginModel.findOne({
       where: { alumno_id: Number(result.alumno.id) }
     });
+
+    // La consulta administrativa también sanea bloqueos temporales ya vencidos.
+    // Así el perfil refleja el estado real sin depender de un cron ni de un login exitoso.
+    await limpiarBloqueoTemporalVencido(loginRecord);
 
     return res.status(200).json({
       ok: true,

@@ -49,3 +49,5 @@ pids/
 *.swp
 *.swo
 *~
+.env.*
+!.env.example

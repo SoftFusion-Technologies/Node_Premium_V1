@@ -46,6 +46,9 @@ import {
   UR_CongelarAlumnos_CTS,
   UR_ReactivarAlumnos_CTS,
   UR_HabilitarAccesoAlumno_CTS,
+  OBR_AccesoAlumno_CTS,
+  UR_DesbloquearAccesoAlumno_CTS,
+  UR_RestablecerPasswordAccesoAlumno_CTS,
   OBR_PreviewEliminacionAlumno_CTS,
   DR_Alumnos_CTS,
 } from "../Controllers/Alumno/CTS_TB_Alumnos.js";
@@ -394,6 +397,31 @@ router.patch(
     "COORD_SEDE",
   ]),
   UR_HabilitarAccesoAlumno_CTS,
+);
+
+/*
+ * Benjamin Orellana - 2026/08/02 - Consulta y administra el acceso al portal
+ * del alumno. Estas acciones quedan reservadas a SUPER_ADMIN.
+ */
+router.get(
+  "/alumnos/:id/acceso",
+  authenticateToken,
+  requireRolGlobal(["SUPER_ADMIN"]),
+  OBR_AccesoAlumno_CTS,
+);
+
+router.patch(
+  "/alumnos/:id/acceso/desbloquear",
+  authenticateToken,
+  requireRolGlobal(["SUPER_ADMIN"]),
+  UR_DesbloquearAccesoAlumno_CTS,
+);
+
+router.patch(
+  "/alumnos/:id/acceso/restablecer-password",
+  authenticateToken,
+  requireRolGlobal(["SUPER_ADMIN"]),
+  UR_RestablecerPasswordAccesoAlumno_CTS,
 );
 
 /*

@@ -3295,6 +3295,355 @@ export const UR_HabilitarAccesoAlumno_CTS = async (req, res) => {
     });
   }
 };
+
+const construirEstadoAccesoAlumno = (loginRecord) => {
+  if (!loginRecord) {
+    return {
+      tiene_acceso: false,
+      estado: null,
+      requiere_cambio_password: false,
+      password_cambiado_at: null,
+      intentos_fallidos: 0,
+      bloqueado_hasta: null,
+      bloqueado_temporalmente: false,
+      motivo_bloqueo: null,
+      ultimo_login: null,
+      ultimo_login_ip: null,
+      created_at: null,
+      updated_at: null
+    };
+  }
+
+  const acceso =
+    typeof loginRecord.toJSON === 'function'
+      ? loginRecord.toJSON()
+      : { ...loginRecord };
+
+  const bloqueadoHasta = acceso.bloqueado_hasta
+    ? new Date(acceso.bloqueado_hasta)
+    : null;
+
+  return {
+    tiene_acceso: true,
+    id: acceso.id,
+    alumno_id: acceso.alumno_id,
+    estado: acceso.estado,
+    requiere_cambio_password:
+      Number(acceso.requiere_cambio_password || 0) === 1,
+    password_cambiado_at: acceso.password_cambiado_at || null,
+    intentos_fallidos: Number(acceso.intentos_fallidos || 0),
+    bloqueado_hasta: acceso.bloqueado_hasta || null,
+    bloqueado_temporalmente: Boolean(
+      bloqueadoHasta &&
+        !Number.isNaN(bloqueadoHasta.getTime()) &&
+        bloqueadoHasta.getTime() > Date.now()
+    ),
+    motivo_bloqueo: acceso.motivo_bloqueo || null,
+    ultimo_login: acceso.ultimo_login || null,
+    ultimo_login_ip: acceso.ultimo_login_ip || null,
+    created_at: acceso.created_at || null,
+    updated_at: acceso.updated_at || null
+  };
+};
+
+const registrarAuditoriaAccesoAlumno = async ({
+  req,
+  alumno,
+  entidadId = null,
+  accion,
+  descripcion,
+  valoresAnteriores,
+  valoresNuevos,
+  transaction
+}) => {
+  await SistemaAuditoriaLogsModel.create(
+    {
+      usuario_id: obtenerUsuarioIdRequest(req),
+      sede_id: alumno?.sede_id || null,
+      modulo: 'ALUMNOS',
+      accion,
+      entidad: 'alumnos_usuarios',
+      entidad_id: Number(entidadId || alumno?.id),
+      descripcion,
+      valores_anteriores: valoresAnteriores || null,
+      valores_nuevos: valoresNuevos || null,
+      ip: obtenerIpRequest(req),
+      user_agent: req.headers['user-agent'] || null
+    },
+    { transaction }
+  );
+};
+
+/*
+ * Benjamin Orellana - 2026/08/02 - Consulta el estado de acceso al portal
+ * sin exponer el hash de contraseña ni los tokens de restablecimiento.
+ */
+export const OBR_AccesoAlumno_CTS = async (req, res) => {
+  try {
+    const result = await buscarAlumnoPorIdConPermiso(req.params.id, req.user);
+
+    if (!result.ok) {
+      return res.status(result.status).json({
+        ok: false,
+        message: result.message
+      });
+    }
+
+    const loginRecord = await AlumnosLoginModel.findOne({
+      where: { alumno_id: Number(result.alumno.id) }
+    });
+
+    return res.status(200).json({
+      ok: true,
+      message: 'Estado de acceso obtenido correctamente.',
+      data: construirEstadoAccesoAlumno(loginRecord)
+    });
+  } catch (error) {
+    console.error('Error OBR_AccesoAlumno_CTS:', error);
+
+    return res.status(500).json({
+      ok: false,
+      message: 'Error al consultar el acceso del alumno.'
+    });
+  }
+};
+
+/*
+ * Benjamin Orellana - 2026/08/02 - Quita el bloqueo temporal causado por
+ * intentos fallidos. No reactiva accesos suspendidos administrativamente.
+ */
+export const UR_DesbloquearAccesoAlumno_CTS = async (req, res) => {
+  const transaction = await db.transaction();
+
+  try {
+    const result = await buscarAlumnoPorIdConPermiso(req.params.id, req.user);
+
+    if (!result.ok) {
+      await transaction.rollback();
+
+      return res.status(result.status).json({
+        ok: false,
+        message: result.message
+      });
+    }
+
+    const alumno = result.alumno;
+    const loginRecord = await AlumnosLoginModel.findOne({
+      where: { alumno_id: Number(alumno.id) },
+      transaction,
+      lock: transaction.LOCK.UPDATE
+    });
+
+    if (!loginRecord) {
+      await transaction.rollback();
+
+      return res.status(404).json({
+        ok: false,
+        message: 'El alumno no tiene acceso al portal configurado.'
+      });
+    }
+
+    if (loginRecord.estado === 'suspendido') {
+      await transaction.rollback();
+
+      return res.status(409).json({
+        ok: false,
+        message:
+          'El acceso está suspendido administrativamente. El desbloqueo temporal no modifica esa suspensión.'
+      });
+    }
+
+    const valoresAnteriores = {
+      estado: loginRecord.estado,
+      motivo_bloqueo: loginRecord.motivo_bloqueo,
+      intentos_fallidos: Number(loginRecord.intentos_fallidos || 0),
+      bloqueado_hasta: loginRecord.bloqueado_hasta || null
+    };
+
+    const valoresNuevos = {
+      estado: loginRecord.estado === 'bloqueado' ? 'activo' : loginRecord.estado,
+      motivo_bloqueo: null,
+      intentos_fallidos: 0,
+      bloqueado_hasta: null,
+      updated_at: new Date()
+    };
+
+    await loginRecord.update(valoresNuevos, { transaction });
+
+    await registrarAuditoriaAccesoAlumno({
+      req,
+      alumno,
+      entidadId: loginRecord.id,
+      accion: 'DESBLOQUEAR_ACCESO',
+      descripcion: `Se quitó el bloqueo de acceso al portal de ${alumno.nombre} ${alumno.apellido}.`,
+      valoresAnteriores,
+      valoresNuevos: {
+        estado: valoresNuevos.estado,
+        motivo_bloqueo: valoresNuevos.motivo_bloqueo,
+        intentos_fallidos: 0,
+        bloqueado_hasta: null
+      },
+      transaction
+    });
+
+    await transaction.commit();
+
+    return res.status(200).json({
+      ok: true,
+      message: 'Bloqueo quitado correctamente. El alumno ya puede volver a intentar.',
+      data: construirEstadoAccesoAlumno(loginRecord)
+    });
+  } catch (error) {
+    if (!transaction.finished) {
+      await transaction.rollback();
+    }
+
+    console.error('Error UR_DesbloquearAccesoAlumno_CTS:', error);
+
+    return res.status(500).json({
+      ok: false,
+      message: 'Error al quitar el bloqueo del alumno.'
+    });
+  }
+};
+
+/*
+ * Benjamin Orellana - 2026/08/02 - Establece una contraseña temporal desde el
+ * panel interno. El alumno deberá reemplazarla después de iniciar sesión.
+ */
+export const UR_RestablecerPasswordAccesoAlumno_CTS = async (req, res) => {
+  const transaction = await db.transaction();
+
+  try {
+    const passwordNueva = normalizarTexto(req.body?.password_nueva);
+
+    if (!passwordNueva) {
+      await transaction.rollback();
+
+      return res.status(400).json({
+        ok: false,
+        message: 'Debe indicar una contraseña temporal.'
+      });
+    }
+
+    if (passwordNueva.length < 8) {
+      await transaction.rollback();
+
+      return res.status(400).json({
+        ok: false,
+        message: 'La contraseña temporal debe tener al menos 8 caracteres.'
+      });
+    }
+
+    if (passwordNueva.length > 72) {
+      await transaction.rollback();
+
+      return res.status(400).json({
+        ok: false,
+        message: 'La contraseña temporal no puede superar los 72 caracteres.'
+      });
+    }
+
+    const result = await buscarAlumnoPorIdConPermiso(req.params.id, req.user);
+
+    if (!result.ok) {
+      await transaction.rollback();
+
+      return res.status(result.status).json({
+        ok: false,
+        message: result.message
+      });
+    }
+
+    const alumno = result.alumno;
+    const loginRecord = await AlumnosLoginModel.findOne({
+      where: { alumno_id: Number(alumno.id) },
+      transaction,
+      lock: transaction.LOCK.UPDATE
+    });
+
+    if (!loginRecord) {
+      await transaction.rollback();
+
+      return res.status(404).json({
+        ok: false,
+        message: 'El alumno no tiene acceso al portal configurado.'
+      });
+    }
+
+    const valoresAnteriores = {
+      estado: loginRecord.estado,
+      requiere_cambio_password:
+        Number(loginRecord.requiere_cambio_password || 0) === 1,
+      password_cambiado_at: loginRecord.password_cambiado_at || null,
+      intentos_fallidos: Number(loginRecord.intentos_fallidos || 0),
+      bloqueado_hasta: loginRecord.bloqueado_hasta || null
+    };
+
+    const nuevoHash = await bcrypt.hash(String(passwordNueva), 10);
+    const estadoNuevo =
+      loginRecord.estado === 'suspendido' ? 'suspendido' : 'activo';
+
+    await loginRecord.update(
+      {
+        password_hash: nuevoHash,
+        requiere_cambio_password: 1,
+        password_cambiado_at: null,
+        estado: estadoNuevo,
+        motivo_bloqueo:
+          loginRecord.estado === 'suspendido'
+            ? loginRecord.motivo_bloqueo
+            : null,
+        intentos_fallidos: 0,
+        bloqueado_hasta: null,
+        reset_token_hash: null,
+        reset_token_expira: null,
+        updated_at: new Date()
+      },
+      { transaction }
+    );
+
+    await registrarAuditoriaAccesoAlumno({
+      req,
+      alumno,
+      entidadId: loginRecord.id,
+      accion: 'RESTABLECER_PASSWORD',
+      descripcion: `Se estableció una contraseña temporal para ${alumno.nombre} ${alumno.apellido}.`,
+      valoresAnteriores,
+      valoresNuevos: {
+        estado: estadoNuevo,
+        requiere_cambio_password: true,
+        password_temporal_configurada: true,
+        intentos_fallidos: 0,
+        bloqueado_hasta: null
+      },
+      transaction
+    });
+
+    await transaction.commit();
+
+    return res.status(200).json({
+      ok: true,
+      message:
+        estadoNuevo === 'suspendido'
+          ? 'Contraseña actualizada. El acceso continúa suspendido.'
+          : 'Contraseña temporal actualizada. El alumno deberá cambiarla al ingresar.',
+      data: construirEstadoAccesoAlumno(loginRecord)
+    });
+  } catch (error) {
+    if (!transaction.finished) {
+      await transaction.rollback();
+    }
+
+    console.error('Error UR_RestablecerPasswordAccesoAlumno_CTS:', error);
+
+    return res.status(500).json({
+      ok: false,
+      message: 'Error al restablecer la contraseña del alumno.'
+    });
+  }
+};
+
 /*
  * Benjamin Orellana - 2026/06/30 - Elimina físicamente un alumno y sus relaciones conocidas en orden controlado.
  */

@@ -16,6 +16,7 @@ import AlumnosModel from '../../Models/Alumno/MD_TB_Alumnos.js';
 import AlumnosAsistenciasModel from '../../Models/Alumno/MD_TB_AlumnosAsistencias.js';
 import AlumnosMembresiasModel from '../../Models/Alumno/MD_TB_AlumnosMembresias.js';
 import AgendaTurnosModel from '../../Models/Agenda/MD_TB_AgendaTurnos.js';
+import AgendaTurnosReservasModel from '../../Models/Agenda/MD_TB_AgendaTurnosReservas.js';
 import SedesModel from '../../Models/Sede/MD_TB_Sedes.js';
 import UsuariosModel from '../../Models/Usuario/MD_TB_Usuarios.js';
 import db from '../../DataBase/db.js';
@@ -85,6 +86,151 @@ const nombreClaseAsistencia = (asistencia) => {
  * ficha del alumno — no incluye estadísticas calculadas, eso lo arma el
  * frontend a partir de esta lista.
  */
+const obtenerCreditoDevueltoReserva = (observaciones) => {
+  const coincidencia = String(observaciones || '').match(
+    /\[CREDITO_DEVUELTO:(SI|NO)\]/i
+  );
+
+  if (!coincidencia) return null;
+  return coincidencia[1].toUpperCase() === 'SI';
+};
+
+
+const limpiarObservacionesCredito = (observaciones) => {
+  const valor = String(observaciones || '')
+    .replace(/\s*\[CREDITO_DEVUELTO:(?:SI|NO)\]\s*/gi, '\n')
+    .trim();
+
+  return valor || null;
+};
+
+const fechaHoraTurno = (turno) => {
+  if (!turno?.fecha || !turno?.hora_inicio) return null;
+
+  const valor = new Date(
+    `${String(turno.fecha).slice(0, 10)}T${String(turno.hora_inicio).slice(0, 8)}`
+  );
+
+  return Number.isNaN(valor.getTime()) ? null : valor;
+};
+
+const determinarEstadoHistorialReserva = (reserva, asistencia, turno) => {
+  if (reserva?.estado === 'cancelada') return 'cancelo';
+  if (reserva?.estado === 'reprogramada') return 'reprogramada';
+  if (reserva?.estado === 'ausente') return 'ausente';
+  if (reserva?.estado === 'asistio') return 'asistio';
+
+  const inicioTurno = fechaHoraTurno(turno);
+
+  if (
+    reserva?.estado === 'reservada' &&
+    inicioTurno &&
+    inicioTurno.getTime() > Date.now()
+  ) {
+    return 'reservada';
+  }
+
+  return asistencia?.estado || reserva?.estado || 'reservada';
+};
+
+const construirRegistroHistorialReserva = (reserva, asistencia) => {
+  const reservaPlano =
+    typeof reserva?.toJSON === 'function' ? reserva.toJSON() : reserva;
+  const asistenciaPlano =
+    typeof asistencia?.toJSON === 'function' ? asistencia.toJSON() : asistencia;
+  const turno = reservaPlano?.turno || asistenciaPlano?.turno || null;
+  const estado = determinarEstadoHistorialReserva(
+    reservaPlano,
+    asistenciaPlano,
+    turno
+  );
+  const creditoDevuelto =
+    estado === 'cancelo'
+      ? obtenerCreditoDevueltoReserva(reservaPlano?.observaciones)
+      : null;
+
+  return {
+    ...(asistenciaPlano || {}),
+    id: asistenciaPlano?.id || `reserva-${reservaPlano.id}`,
+    historial_id: `reserva-${reservaPlano.id}`,
+    tipo_registro: 'reserva',
+    asistencia_id: asistenciaPlano?.id || null,
+    reserva_id: reservaPlano.id,
+    alumno_id: reservaPlano.alumno_id,
+    membresia_id:
+      reservaPlano.membresia_id ?? asistenciaPlano?.membresia_id ?? null,
+    turno_id: reservaPlano.turno_id,
+    fecha: turno?.fecha || asistenciaPlano?.fecha || null,
+    hora_registro: asistenciaPlano?.hora_registro || null,
+    estado,
+    observaciones: limpiarObservacionesCredito(
+      asistenciaPlano?.observaciones || reservaPlano?.observaciones
+    ),
+    created_at:
+      asistenciaPlano?.created_at || reservaPlano?.created_at || null,
+    updated_at:
+      asistenciaPlano?.updated_at || reservaPlano?.updated_at || null,
+    fecha_reserva: reservaPlano.fecha_reserva || null,
+    fecha_cancelacion: reservaPlano.fecha_cancelacion || null,
+    motivo_cancelacion: reservaPlano.motivo_cancelacion || null,
+    credito_devuelto: creditoDevuelto,
+    credito_devuelto_registrado: creditoDevuelto !== null,
+    fecha_clase: turno?.fecha || asistenciaPlano?.fecha || null,
+    hora_inicio: turno?.hora_inicio || null,
+    hora_fin: turno?.hora_fin || null,
+    origen_reserva: reservaPlano.origen_reserva || null,
+    turno,
+    sede: turno?.sede || asistenciaPlano?.sede || null,
+    profesor: turno?.profesor || null,
+    registrado_por: asistenciaPlano?.registrado_por || null,
+    reserva: {
+      id: reservaPlano.id,
+      estado: reservaPlano.estado,
+      origen_reserva: reservaPlano.origen_reserva,
+      fecha_reserva: reservaPlano.fecha_reserva,
+      fecha_cancelacion: reservaPlano.fecha_cancelacion,
+      motivo_cancelacion: reservaPlano.motivo_cancelacion
+    }
+  };
+};
+
+const construirRegistroHistorialManual = (asistencia) => {
+  const asistenciaPlano =
+    typeof asistencia?.toJSON === 'function' ? asistencia.toJSON() : asistencia;
+
+  return {
+    ...asistenciaPlano,
+    historial_id: `asistencia-${asistenciaPlano.id}`,
+    tipo_registro: 'manual',
+    asistencia_id: asistenciaPlano.id,
+    reserva_id: null,
+    fecha_reserva: null,
+    fecha_cancelacion: null,
+    motivo_cancelacion: null,
+    credito_devuelto: null,
+    credito_devuelto_registrado: false,
+    fecha_clase: asistenciaPlano.fecha || null,
+    hora_inicio: asistenciaPlano.turno?.hora_inicio || null,
+    hora_fin: asistenciaPlano.turno?.hora_fin || null,
+    profesor: asistenciaPlano.turno?.profesor || null
+  };
+};
+
+const timestampOrdenHistorial = (registro) => {
+  const fecha = registro?.fecha_clase || registro?.fecha || '0000-00-00';
+  const hora = registro?.hora_inicio || registro?.hora_registro || '00:00:00';
+  const valor = new Date(
+    `${String(fecha).slice(0, 10)}T${String(hora).slice(0, 8)}`
+  );
+
+  if (!Number.isNaN(valor.getTime())) return valor.getTime();
+
+  const respaldo = new Date(
+    registro?.fecha_reserva || registro?.created_at || 0
+  );
+  return Number.isNaN(respaldo.getTime()) ? 0 : respaldo.getTime();
+};
+
 export const OBRS_AsistenciasAlumno_CTS = async (req, res) => {
   try {
     const { alumno_id } = req.params;
@@ -96,42 +242,123 @@ export const OBRS_AsistenciasAlumno_CTS = async (req, res) => {
       return res.status(404).json({ message: 'Alumno no encontrado.' });
     }
 
-    const asistencias = await AlumnosAsistenciasModel.findAll({
-      where: { alumno_id },
-      include: [
-        { model: SedesModel, as: 'sede', attributes: ['id', 'nombre'] },
-        {
-          model: AgendaTurnosModel,
-          as: 'turno',
-          attributes: ['id', 'nombre_clase', 'hora_inicio', 'hora_fin']
-        },
-        {
-          model: UsuariosModel,
-          as: 'registrado_por',
-          attributes: ['id', 'nombre', 'apellido']
-        }
-      ],
-      order: [
-        ['fecha', 'DESC'],
-        ['hora_registro', 'DESC']
-      ]
-    });
+    const [reservas, asistencias] = await Promise.all([
+      AgendaTurnosReservasModel.findAll({
+        where: { alumno_id },
+        include: [
+          {
+            model: AgendaTurnosModel,
+            as: 'turno',
+            attributes: [
+              'id',
+              'fecha',
+              'hora_inicio',
+              'hora_fin',
+              'nombre_clase',
+              'sede_id',
+              'profesor_id'
+            ],
+            include: [
+              {
+                model: SedesModel,
+                as: 'sede',
+                attributes: ['id', 'nombre']
+              },
+              {
+                model: UsuariosModel,
+                as: 'profesor',
+                attributes: ['id', 'nombre', 'apellido']
+              }
+            ]
+          }
+        ],
+        order: [
+          ['fecha_reserva', 'DESC'],
+          ['id', 'DESC']
+        ]
+      }),
+      AlumnosAsistenciasModel.findAll({
+        where: { alumno_id },
+        include: [
+          { model: SedesModel, as: 'sede', attributes: ['id', 'nombre'] },
+          {
+            model: AgendaTurnosModel,
+            as: 'turno',
+            attributes: [
+              'id',
+              'fecha',
+              'hora_inicio',
+              'hora_fin',
+              'nombre_clase',
+              'sede_id',
+              'profesor_id'
+            ],
+            include: [
+              {
+                model: UsuariosModel,
+                as: 'profesor',
+                attributes: ['id', 'nombre', 'apellido']
+              }
+            ]
+          },
+          {
+            model: UsuariosModel,
+            as: 'registrado_por',
+            attributes: ['id', 'nombre', 'apellido']
+          }
+        ],
+        order: [
+          ['fecha', 'DESC'],
+          ['hora_registro', 'DESC'],
+          ['id', 'DESC']
+        ]
+      })
+    ]);
 
-    return res
-      .status(200)
-      .json({
-        status: 'success',
-        data: asistencias,
-        total: asistencias.length
-      });
+    const asistenciaPorReserva = new Map();
+
+    for (const asistencia of asistencias) {
+      if (
+        asistencia.reserva_id &&
+        !asistenciaPorReserva.has(Number(asistencia.reserva_id))
+      ) {
+        asistenciaPorReserva.set(Number(asistencia.reserva_id), asistencia);
+      }
+    }
+
+    const reservasIds = new Set(reservas.map((reserva) => Number(reserva.id)));
+
+    const historialReservas = reservas.map((reserva) =>
+      construirRegistroHistorialReserva(
+        reserva,
+        asistenciaPorReserva.get(Number(reserva.id)) || null
+      )
+    );
+
+    const historialSinReserva = asistencias
+      .filter(
+        (asistencia) =>
+          !asistencia.reserva_id ||
+          !reservasIds.has(Number(asistencia.reserva_id))
+      )
+      .map(construirRegistroHistorialManual);
+
+    const historial = [...historialReservas, ...historialSinReserva].sort(
+      (a, b) => timestampOrdenHistorial(b) - timestampOrdenHistorial(a)
+    );
+
+    return res.status(200).json({
+      status: 'success',
+      data: historial,
+      total: historial.length
+    });
   } catch (error) {
     console.error('[OBRS_AsistenciasAlumno_CTS]', error);
     return res
       .status(500)
-      .json({ message: 'Error al obtener las asistencias del alumno.' });
+      .json({ message: 'Error al obtener el historial del alumno.' });
   }
 };
-
 /*
  * Benjamin Orellana - 2026/07/13
  * Historial propio para el portal del alumno. El alumno_id se obtiene del

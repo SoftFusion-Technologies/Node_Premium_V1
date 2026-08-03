@@ -31,6 +31,58 @@ import { normalizarCicloMembresiasAlumno } from '../../Services/Alumno/membresia
 
 // ─── Helper interno ───────────────────────────────────────────────────────────
 
+// Compatibilidad con reservas históricas: versiones anteriores guardaban
+// 'asistio' o 'ausente' en agenda_turnos_reservas. Esas filas siguen
+// representando una inscripción y ocupan cupo.
+export const ESTADOS_RESERVA_QUE_OCUPAN_CUPO = [
+  'reservada',
+  'asistio',
+  'ausente'
+];
+
+export const sincronizarCuposTurno = async ({
+  turnoId,
+  transaction = null,
+  turnoBloqueado = null
+}) => {
+  const turno =
+    turnoBloqueado ||
+    (await AgendaTurnosModel.findByPk(turnoId, { transaction }));
+
+  if (!turno) return 0;
+
+  const cuposReales = await AgendaTurnosReservasModel.count({
+    where: {
+      turno_id: turno.id,
+      estado: { [Op.in]: ESTADOS_RESERVA_QUE_OCUPAN_CUPO }
+    },
+    transaction
+  });
+
+  const estadoActual = String(turno.estado || 'disponible');
+  const estadoCalculado = ['bloqueado', 'cancelado'].includes(estadoActual)
+    ? estadoActual
+    : cuposReales >= Number(turno.cupo_maximo || 0)
+      ? 'completo'
+      : 'disponible';
+
+  if (
+    Number(turno.cupos_reservados || 0) !== cuposReales ||
+    estadoActual !== estadoCalculado
+  ) {
+    await turno.update(
+      {
+        cupos_reservados: cuposReales,
+        estado: estadoCalculado,
+        updated_at: new Date()
+      },
+      { transaction }
+    );
+  }
+
+  return cuposReales;
+};
+
 /*
  * Benjamin Orellana - 2026/07/18
  * Cuando no existe una membresía elegible, prioriza para el diagnóstico el
@@ -70,6 +122,19 @@ export const obtenerMinutosCancelacion = async () => {
     where: { clave: 'minutos_cancelacion_anticipada', activo: 1 }
   });
   return config ? parseInt(config.valor) : 60;
+};
+
+
+const construirObservacionesCreditoDevuelto = (
+  observaciones,
+  creditoDevuelto
+) => {
+  const base = String(observaciones || '')
+    .replace(/\s*\[CREDITO_DEVUELTO:(?:SI|NO)\]\s*/gi, '\n')
+    .trim();
+  const marcador = `[CREDITO_DEVUELTO:${creditoDevuelto ? 'SI' : 'NO'}]`;
+
+  return base ? `${base}\n${marcador}` : marcador;
 };
 
 /*
@@ -184,7 +249,13 @@ const promoverListaEspera = async (turno_id) => {
       return;
     }
 
-    if (turno.cupos_reservados >= turno.cupo_maximo) {
+    const cuposActuales = await sincronizarCuposTurno({
+      turnoId: turno.id,
+      transaction: transaccion,
+      turnoBloqueado: turno
+    });
+
+    if (cuposActuales >= turno.cupo_maximo) {
       await transaccion.rollback();
       return;
     }
@@ -276,13 +347,12 @@ const promoverListaEspera = async (turno_id) => {
       updated_at:       new Date()
     }, { transaction: transaccion });
 
-    // Actualizar contador de cupos del turno (antes no se tocaba, dejando el
-    // turno desincronizado respecto a la gente realmente anotada).
-    await turno.update({
-      cupos_reservados: turno.cupos_reservados + 1,
-      estado:           turno.cupos_reservados + 1 >= turno.cupo_maximo ? 'completo' : 'disponible',
-      updated_at:       new Date()
-    }, { transaction: transaccion });
+    // Recalcular desde las reservas que realmente ocupan cupo.
+    await sincronizarCuposTurno({
+      turnoId: turno.id,
+      transaction: transaccion,
+      turnoBloqueado: turno
+    });
 
     // Reordenar posiciones de los restantes
     const restantes = await AgendaTurnosListaEsperaModel.findAll({
@@ -367,7 +437,7 @@ export const OBRS_ClientesDisponiblesTurno_CTS = async (req, res) => {
     // Quien ya esta reservado no vuelve a aparecer en el selector. Ademas de
     // mejorar la UX, evita que una seleccion masiva intente duplicarlo.
     const reservasActivas = await AgendaTurnosReservasModel.findAll({
-      where: { turno_id, estado: 'reservada' },
+      where: { turno_id, estado: { [Op.in]: ESTADOS_RESERVA_QUE_OCUPAN_CUPO } },
       attributes: ['alumno_id'],
       raw: true
     });
@@ -541,7 +611,11 @@ export const CR_ReservaAdmin_CTS = async (req, res) => {
 
     // Verificar si el alumno ya tiene una reserva activa en este turno
     const reservaExistente = await AgendaTurnosReservasModel.findOne({
-      where:       { turno_id, alumno_id, estado: 'reservada' },
+      where: {
+        turno_id,
+        alumno_id,
+        estado: { [Op.in]: ESTADOS_RESERVA_QUE_OCUPAN_CUPO }
+      },
       transaction: transaccion
     });
     if (reservaExistente) {
@@ -549,8 +623,14 @@ export const CR_ReservaAdmin_CTS = async (req, res) => {
       return res.status(400).json({ message: 'El alumno ya tiene una reserva activa en este turno.' });
     }
 
-    // Verificar cupo (dentro de la transacción, con el turno ya bloqueado)
-    if (turno.cupos_reservados >= turno.cupo_maximo) {
+    // Verificar cupo desde las reservas reales; el contador persistido puede
+    // venir desfasado en datos históricos.
+    const cuposActuales = await sincronizarCuposTurno({
+      turnoId: turno.id,
+      transaction: transaccion,
+      turnoBloqueado: turno
+    });
+    if (cuposActuales >= turno.cupo_maximo) {
       await transaccion.rollback();
       return res.status(400).json({ message: 'El turno no tiene cupos disponibles.' });
     }
@@ -664,12 +744,12 @@ export const CR_ReservaAdmin_CTS = async (req, res) => {
       registradoPorId: req.user?.id ?? req.user?.usuario_id ?? null
     });
 
-    // Actualizar contador de cupos
-    await turno.update({
-      cupos_reservados: turno.cupos_reservados + 1,
-      estado:           turno.cupos_reservados + 1 >= turno.cupo_maximo ? 'completo' : 'disponible',
-      updated_at:       new Date()
-    }, { transaction: transaccion });
+    // Recalcular desde las reservas que realmente ocupan cupo.
+    await sincronizarCuposTurno({
+      turnoId: turno.id,
+      transaction: transaccion,
+      turnoBloqueado: turno
+    });
 
     await transaccion.commit();
 
@@ -708,7 +788,7 @@ export const UR_AsistenciaAdmin_CTS = async (req, res) => {
     if (!reserva) {
       return res.status(404).json({ message: 'Reserva no encontrada.' });
     }
-    if (reserva.estado !== 'reservada') {
+    if (!ESTADOS_RESERVA_QUE_OCUPAN_CUPO.includes(reserva.estado)) {
       return res.status(400).json({ message: 'Solo se puede marcar asistencia de una reserva activa.' });
     }
 
@@ -774,7 +854,7 @@ export const ER_ReservaAdmin_CTS = async (req, res) => {
       return res.status(404).json({ message: 'Reserva no encontrada.' });
     }
 
-    if (reserva.estado !== 'reservada') {
+    if (!ESTADOS_RESERVA_QUE_OCUPAN_CUPO.includes(reserva.estado)) {
       await transaccion.rollback();
       return res.status(400).json({ message: 'Solo se pueden cancelar reservas activas.' });
     }
@@ -821,12 +901,12 @@ export const ER_ReservaAdmin_CTS = async (req, res) => {
       req.user?.id ?? req.user?.usuario_id ?? null
     );
 
-    // Liberar cupo en el turno
-    await turno.update({
-      cupos_reservados: Math.max(0, turno.cupos_reservados - 1),
-      estado:           'disponible',
-      updated_at:       new Date()
-    }, { transaction: transaccion });
+    // Recalcular el cupo real después de cancelar.
+    await sincronizarCuposTurno({
+      turnoId: turno.id,
+      transaction: transaccion,
+      turnoBloqueado: turno
+    });
 
     let creditoDevuelto = false;
     if (reserva.membresia_id && correspondeReembolso) {
@@ -843,6 +923,17 @@ export const ER_ReservaAdmin_CTS = async (req, res) => {
         creditoDevuelto = true;
       }
     }
+
+    await reserva.update(
+      {
+        observaciones: construirObservacionesCreditoDevuelto(
+          reserva.observaciones,
+          creditoDevuelto
+        ),
+        updated_at: new Date()
+      },
+      { transaction: transaccion }
+    );
 
     await transaccion.commit();
 
@@ -872,7 +963,7 @@ export const OBRS_MisReservas_CTS = async (req, res) => {
     const alumno_id = req.alumno.id;
 
     const reservas = await AgendaTurnosReservasModel.findAll({
-      where: { alumno_id, estado: 'reservada' },
+      where: { alumno_id, estado: { [Op.in]: ESTADOS_RESERVA_QUE_OCUPAN_CUPO } },
       include: [
         {
           model:      AgendaTurnosModel,
@@ -947,7 +1038,11 @@ export const CR_MiReserva_CTS = async (req, res) => {
 
     // Verificar que el alumno no tenga ya una reserva activa
     const reservaExistente = await AgendaTurnosReservasModel.findOne({
-      where:       { turno_id, alumno_id, estado: 'reservada' },
+      where: {
+        turno_id,
+        alumno_id,
+        estado: { [Op.in]: ESTADOS_RESERVA_QUE_OCUPAN_CUPO }
+      },
       transaction: transaccion
     });
     if (reservaExistente) {
@@ -1027,10 +1122,14 @@ export const CR_MiReserva_CTS = async (req, res) => {
       });
     }
 
-    // Si no hay cupo, agregar a lista de espera (dentro de la misma transacción
-    // para evitar que dos alumnos reciban la misma posición).
-    // No se descuentan créditos hasta que se concrete la inscripción efectiva.
-    if (turno.cupos_reservados >= turno.cupo_maximo) {
+    // Si no hay cupo, agregar a lista de espera. Se usa el conteo real de
+    // inscripciones para no depender de un contador histórico desfasado.
+    const cuposActuales = await sincronizarCuposTurno({
+      turnoId: turno.id,
+      transaction: transaccion,
+      turnoBloqueado: turno
+    });
+    if (cuposActuales >= turno.cupo_maximo) {
       // Evita duplicarlo en la lista de espera si ya está anotado (doble
       // click, reintento de red, dos pestañas): sin este chequeo quedaba
       // dos veces, con dos posiciones distintas.
@@ -1097,12 +1196,12 @@ export const CR_MiReserva_CTS = async (req, res) => {
       transaction: transaccion
     });
 
-    // Actualizar contador de cupos
-    await turno.update({
-      cupos_reservados: turno.cupos_reservados + 1,
-      estado:           turno.cupos_reservados + 1 >= turno.cupo_maximo ? 'completo' : 'disponible',
-      updated_at:       new Date()
-    }, { transaction: transaccion });
+    // Recalcular desde las reservas que realmente ocupan cupo.
+    await sincronizarCuposTurno({
+      turnoId: turno.id,
+      transaction: transaccion,
+      turnoBloqueado: turno
+    });
 
     await transaccion.commit();
 
@@ -1133,7 +1232,7 @@ export const ER_MiReserva_CTS = async (req, res) => {
       return res.status(404).json({ message: 'Reserva no encontrada.' });
     }
 
-    if (reserva.estado !== 'reservada') {
+    if (!ESTADOS_RESERVA_QUE_OCUPAN_CUPO.includes(reserva.estado)) {
       await transaccion.rollback();
       return res.status(400).json({ message: 'Solo podés cancelar reservas activas.' });
     }
@@ -1163,14 +1262,16 @@ export const ER_MiReserva_CTS = async (req, res) => {
     // ningún miembro del staff intervino en esta cancelación).
     await marcarAsistenciaComoCancelada(reserva.id, transaccion);
 
-    // Liberar cupo
-    await turno.update({
-      cupos_reservados: Math.max(0, turno.cupos_reservados - 1),
-      estado:           'disponible',
-      updated_at:       new Date()
-    }, { transaction: transaccion });
+    // Recalcular el cupo real después de cancelar.
+    await sincronizarCuposTurno({
+      turnoId: turno.id,
+      transaction: transaccion,
+      turnoBloqueado: turno
+    });
 
     // Restaurar crédito si la clase es futura y la reserva tiene membresía
+    let creditoDevuelto = false;
+
     if (reserva.membresia_id && inicioTurno.isAfter(dayjs())) {
       const membresia = await AlumnosMembresiasModel.findByPk(reserva.membresia_id, {
         transaction: transaccion,
@@ -1182,8 +1283,20 @@ export const ER_MiReserva_CTS = async (req, res) => {
           clases_disponibles: membresia.clases_disponibles + 1,
           updated_at:         new Date()
         }, { transaction: transaccion });
+        creditoDevuelto = true;
       }
     }
+
+    await reserva.update(
+      {
+        observaciones: construirObservacionesCreditoDevuelto(
+          reserva.observaciones,
+          creditoDevuelto
+        ),
+        updated_at: new Date()
+      },
+      { transaction: transaccion }
+    );
 
     await transaccion.commit();
 

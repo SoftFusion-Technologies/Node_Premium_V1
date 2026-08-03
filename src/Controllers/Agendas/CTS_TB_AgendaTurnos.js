@@ -26,7 +26,12 @@ import SedesHorariosModel           from '../../Models/Sede/MD_TB_SedesHorarios.
 import UsuariosModel                from '../../Models/Usuario/MD_TB_Usuarios.js';
 import AlumnosModel                 from '../../Models/Alumno/MD_TB_Alumnos.js';
 import db                           from '../../DataBase/db.js';
-import { obtenerMinutosCancelacion, marcarAsistenciaComoCancelada } from './CTS_TB_AgendaTurnosReservas.js';
+import {
+  ESTADOS_RESERVA_QUE_OCUPAN_CUPO,
+  obtenerMinutosCancelacion,
+  marcarAsistenciaComoCancelada,
+  sincronizarCuposTurno
+} from './CTS_TB_AgendaTurnosReservas.js';
 
 const ROLES_SIN_BORRADO_TURNOS = new Set(['PROFESOR', 'COORD_SEDE']);
 
@@ -59,6 +64,19 @@ const responderBorradoTurnosRestringido = (res) => {
 
 // Días de anticipación para marcar el bono/membresía como "por vencer".
 const DIAS_ALERTA_VENCIMIENTO_MEMBRESIA = 3;
+
+
+const construirObservacionesCreditoDevuelto = (
+  observaciones,
+  creditoDevuelto
+) => {
+  const base = String(observaciones || '')
+    .replace(/\s*\[CREDITO_DEVUELTO:(?:SI|NO)\]\s*/gi, '\n')
+    .trim();
+  const marcador = `[CREDITO_DEVUELTO:${creditoDevuelto ? 'SI' : 'NO'}]`;
+
+  return base ? `${base}\n${marcador}` : marcador;
+};
 
 /*
  * Sergio Manrique - 2026/07/05
@@ -204,7 +222,7 @@ export const OBRS_Turnos_CTS = async (req, res) => {
           model: AgendaTurnosReservasModel,
           as: 'reservas',
           attributes: ['id', 'alumno_id', 'estado', 'origen_reserva'],
-          where: { estado: 'reservada' },
+          where: { estado: { [Op.in]: ESTADOS_RESERVA_QUE_OCUPAN_CUPO } },
           required: false
         }
       ],
@@ -214,7 +232,21 @@ export const OBRS_Turnos_CTS = async (req, res) => {
       ]
     });
 
-    return res.status(200).json(turnos);
+    const turnosPlanos = await Promise.all(
+      turnos.map(async (turno) => {
+        const plano = turno.toJSON();
+        const cuposReales = Array.isArray(plano.reservas) ? plano.reservas.length : 0;
+        plano.cupos_reservados = cuposReales;
+
+        if (Number(turno.cupos_reservados || 0) !== cuposReales) {
+          await sincronizarCuposTurno({ turnoId: turno.id });
+        }
+
+        return plano;
+      })
+    );
+
+    return res.status(200).json(turnosPlanos);
   } catch (error) {
     console.error('[OBRS_Turnos_CTS]', error);
     return res.status(500).json({ message: 'Error al obtener turnos.' });
@@ -249,7 +281,7 @@ export const OBRS_TurnosAsistenciaDia_CTS = async (req, res) => {
         {
           model:      AgendaTurnosReservasModel,
           as:         'reservas',
-          where:      { estado: 'reservada' },
+          where: { estado: { [Op.in]: ESTADOS_RESERVA_QUE_OCUPAN_CUPO } },
           required:   false,
           include: [
             { model: AlumnosModel, as: 'alumno', attributes: ['id', 'nombre', 'apellido', 'dni'] }
@@ -383,7 +415,7 @@ export const OBRS_AsistenciasRango_CTS = async (req, res) => {
         {
           model: AgendaTurnosReservasModel,
           as: 'reservas',
-          where: { estado: 'reservada' },
+          where: { estado: { [Op.in]: ESTADOS_RESERVA_QUE_OCUPAN_CUPO } },
           required: false,
           include: [
             { model: AlumnosModel, as: 'alumno', attributes: ['id', 'nombre', 'apellido', 'dni'] }
@@ -548,6 +580,14 @@ export const OBRS_DetTurno_CTS = async (req, res) => {
     }
 
     const turnoPlano = turno.toJSON();
+    const reservasQueOcupanCupo = (turnoPlano.reservas || []).filter((reserva) =>
+      ESTADOS_RESERVA_QUE_OCUPAN_CUPO.includes(reserva.estado)
+    );
+    turnoPlano.cupos_reservados = reservasQueOcupanCupo.length;
+
+    if (Number(turno.cupos_reservados || 0) !== reservasQueOcupanCupo.length) {
+      await sincronizarCuposTurno({ turnoId: turno.id });
+    }
 
     // Enriquece a cada alumno inscripto con los indicadores para los iconos
     // de estado (bono por vencer, deuda). Solo se hace para los inscriptos
@@ -1082,6 +1122,8 @@ export const UR_EstadoTurno_CTS = async (req, res) => {
           req.user?.id ?? req.user?.usuario_id ?? null
         );
 
+        let creditoDevueltoReserva = false;
+
         if (reserva.membresia_id && correspondeReembolso) {
           const membresia = await AlumnosMembresiasModel.findByPk(reserva.membresia_id, {
             transaction: transaccion,
@@ -1094,8 +1136,21 @@ export const UR_EstadoTurno_CTS = async (req, res) => {
               updated_at:         new Date()
             }, { transaction: transaccion });
             creditosDevueltos++;
+            creditoDevueltoReserva = true;
           }
         }
+
+        await reserva.update(
+          {
+            observaciones: construirObservacionesCreditoDevuelto(
+              reserva.observaciones,
+              creditoDevueltoReserva
+            ),
+            updated_at: new Date()
+          },
+          { transaction: transaccion }
+        );
+
         reservasCanceladas++;
       }
 

@@ -1415,39 +1415,79 @@ export const UR_MembresiaMigracionAlumnoPlanesPagos_CTS = async (req, res) => {
       return responderError(res, 404, 'La sede indicada no existe o está inactiva.');
     }
 
-    const cambiaDatosEstructurales =
-      Number(membresia.plan_id) !== Number(plan.id) ||
-      Number(membresia.sede_id) !== Number(sede.id) ||
-      String(membresia.fecha_inicio) !== fechaInicio ||
-      String(membresia.fecha_vencimiento) !== fechaVencimiento;
+    const cambiaPlan = Number(membresia.plan_id) !== Number(plan.id);
+    const cambiaSede = Number(membresia.sede_id) !== Number(sede.id);
+    const fechaInicioActual = String(membresia.fecha_inicio);
+    const fechaVencimientoActual = String(membresia.fecha_vencimiento);
+    const cambiaFechaInicio = fechaInicioActual !== fechaInicio;
+    const cambiaFechaVencimiento =
+      fechaVencimientoActual !== fechaVencimiento;
+    const acortaFechaVencimiento =
+      fechaVencimiento < fechaVencimientoActual;
 
-    if (cambiaDatosEstructurales) {
+    // Regalar créditos o extender el vencimiento no invalida reservas existentes.
+    // Se mantiene la protección cuando cambia plan/sede/inicio o se acorta la cobertura.
+    if (
+      cambiaPlan ||
+      cambiaSede ||
+      cambiaFechaInicio ||
+      acortaFechaVencimiento
+    ) {
       await bloquearOperacionConReservas({
         alumnoId,
         transaction,
-        operacion: 'modificar el plan o las fechas de la membresía'
+        operacion: 'modificar el plan o reducir la cobertura de la membresía'
       });
     }
 
-    const superpuesta = await AlumnosMembresiasModel.findOne({
-      where: {
-        id: { [Op.ne]: membresiaId },
-        alumno_id: alumnoId,
-        estado: { [Op.in]: ['activa', 'pendiente_pago', 'congelada'] },
-        fecha_inicio: { [Op.lte]: fechaVencimiento },
-        fecha_vencimiento: { [Op.gte]: fechaInicio }
-      },
-      transaction
-    });
+    // Los ajustes exclusivos de créditos u observaciones no deben quedar
+    // bloqueados por superposiciones históricas que ya existían en los datos.
+    // Si cambia el período, solo se bloquea cuando aparece una superposición
+    // con una membresía que no se superponía antes de esta edición.
+    if (cambiaFechaInicio || cambiaFechaVencimiento) {
+      const estadosOperativos = ['activa', 'pendiente_pago', 'congelada'];
 
-    if (superpuesta) {
-      await transaction.rollback();
-      return responderError(
-        res,
-        409,
-        'Las nuevas fechas se superponen con otra membresía operativa del alumno.',
-        { membresia_id: Number(superpuesta.id) }
+      const [superpuestasPrevias, superpuestasPropuestas] = await Promise.all([
+        AlumnosMembresiasModel.findAll({
+          attributes: ['id'],
+          where: {
+            id: { [Op.ne]: membresiaId },
+            alumno_id: alumnoId,
+            estado: { [Op.in]: estadosOperativos },
+            fecha_inicio: { [Op.lte]: fechaVencimientoActual },
+            fecha_vencimiento: { [Op.gte]: fechaInicioActual }
+          },
+          transaction
+        }),
+        AlumnosMembresiasModel.findAll({
+          attributes: ['id'],
+          where: {
+            id: { [Op.ne]: membresiaId },
+            alumno_id: alumnoId,
+            estado: { [Op.in]: estadosOperativos },
+            fecha_inicio: { [Op.lte]: fechaVencimiento },
+            fecha_vencimiento: { [Op.gte]: fechaInicio }
+          },
+          transaction
+        })
+      ]);
+
+      const idsSuperpuestosPrevios = new Set(
+        superpuestasPrevias.map((item) => Number(item.id))
       );
+      const superposicionNueva = superpuestasPropuestas.find(
+        (item) => !idsSuperpuestosPrevios.has(Number(item.id))
+      );
+
+      if (superposicionNueva) {
+        await transaction.rollback();
+        return responderError(
+          res,
+          409,
+          'Las nuevas fechas se superponen con otra membresía operativa del alumno.',
+          { membresia_id: Number(superposicionNueva.id) }
+        );
+      }
     }
 
     const mensualidad = await PagosMensualidadesModel.findOne({
@@ -1456,9 +1496,7 @@ export const UR_MembresiaMigracionAlumnoPlanesPagos_CTS = async (req, res) => {
       transaction,
       lock: transaction.LOCK.UPDATE
     });
-    const cambiaPlanOSede =
-      Number(membresia.plan_id) !== Number(plan.id) ||
-      Number(membresia.sede_id) !== Number(sede.id);
+    const cambiaPlanOSede = cambiaPlan || cambiaSede;
 
     if (mensualidad && cambiaPlanOSede) {
       await transaction.rollback();
@@ -1469,20 +1507,15 @@ export const UR_MembresiaMigracionAlumnoPlanesPagos_CTS = async (req, res) => {
       );
     }
 
-    const clasesUsadasNuevas =
-      Number(req.body.clases_incluidas) - Number(req.body.clases_disponibles);
-
-    if (
-      Number(membresia.clases_usadas || 0) > 0 &&
-      clasesUsadasNuevas < Number(membresia.clases_usadas || 0)
-    ) {
-      await transaction.rollback();
-      return responderError(
-        res,
-        409,
-        `No se pueden reducir los créditos usados por debajo de ${Number(membresia.clases_usadas || 0)}, porque ya fueron consumidos en el sistema.`
-      );
-    }
+    const clasesUsadasActuales = Math.max(
+      Number(membresia.clases_usadas || 0),
+      0
+    );
+    const clasesDisponiblesSolicitadas = Number(
+      req.body.clases_disponibles
+    );
+    const clasesIncluidasNormalizadas =
+      clasesUsadasActuales + clasesDisponiblesSolicitadas;
 
     const precioLista = cambiaPlanOSede
       ? await obtenerPrecioReferenciaMigracion({
@@ -1505,13 +1538,23 @@ export const UR_MembresiaMigracionAlumnoPlanesPagos_CTS = async (req, res) => {
       observaciones: membresia.observaciones || null
     };
     const payload = obtenerPayloadMembresiaMigracion({
-      body: req.body,
+      body: {
+        ...req.body,
+        clases_incluidas: clasesIncluidasNormalizadas,
+        clases_disponibles: clasesDisponiblesSolicitadas
+      },
       plan,
       fechaInicio,
       fechaVencimiento,
       precioLista,
       estadoActual: membresia.estado
     });
+
+    // Los créditos consumidos son históricos y nunca se reescriben.
+    // Al aumentar disponibles, se incrementan automáticamente los incluidos.
+    payload.clases_incluidas = clasesIncluidasNormalizadas;
+    payload.clases_usadas = clasesUsadasActuales;
+    payload.clases_disponibles = clasesDisponiblesSolicitadas;
 
     // Ajustar fechas o créditos no debe reescribir descuentos, importes ni el
     // origen histórico de una membresía que ya posee trazabilidad financiera.
@@ -1590,7 +1633,7 @@ export const UR_MembresiaMigracionAlumnoPlanesPagos_CTS = async (req, res) => {
 
     return res.status(200).json({
       ok: true,
-      message: 'Plan, fechas y créditos actualizados correctamente.',
+      message: 'Plan, vencimiento y créditos actualizados correctamente.',
       data: {
         membresia_id: membresiaId,
         alumno_id: alumnoId,

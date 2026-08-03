@@ -1716,40 +1716,72 @@ export const confirmarCobroPendiente = async ({
       ),
     );
 
+    // Un cobro confirmado que fue editado puede quedar pendiente porque el
+    // nuevo medio requiere validación. En ese caso, los conceptos, el stock y
+    // la membresía ya fueron aplicados antes de la edición y no deben volver a
+    // impactarse al aprobar el nuevo medio de pago.
+    const esRevalidacionDeEdicion = idValido(cobro.finanzas_movimiento_id);
+
     let pagoPlan = null;
-    for (const detalle of detalles) {
-      const pagoAplicado = await aplicarPlanPendiente({
-        detalle,
-        usuarioId,
-        transaction,
-      });
-      if (pagoAplicado) pagoPlan = pagoAplicado;
-      await aplicarStockPendiente({
-        detalle,
-        sedeId: Number(sedeId),
-        usuarioId,
-        transaction,
-      });
+    if (!esRevalidacionDeEdicion) {
+      for (const detalle of detalles) {
+        const pagoAplicado = await aplicarPlanPendiente({
+          detalle,
+          usuarioId,
+          transaction,
+        });
+        if (pagoAplicado) pagoPlan = pagoAplicado;
+        await aplicarStockPendiente({
+          detalle,
+          sedeId: Number(sedeId),
+          usuarioId,
+          transaction,
+        });
+      }
     }
 
     const esCobroExclusivoDePlan = detalles.length === 1 && Boolean(pagoPlan);
-    const movimientoFinanciero = await FinanzasMovimientosModel.create(
-      {
-        sede_id: Number(sedeId),
-        categoria_id: null,
-        pago_id: esCobroExclusivoDePlan ? Number(pagoPlan.id) : null,
-        tipo: "ingreso",
-        fecha: fechaArgentina(),
-        descripcion: `Cobro #${cobro.id} validado`,
-        monto: totalPagado.toFixed(2),
-        origen: esCobroExclusivoDePlan ? "pago_alumno" : "manual",
-        referencia: `COBRO-${cobro.id}`,
-        usuario_registro_id: usuarioId,
-        estado: "vigente",
-        observaciones: observaciones || "Confirmado desde historial de cobros",
-      },
-      { transaction },
-    );
+    const movimientoFinanciero = esRevalidacionDeEdicion
+      ? await FinanzasMovimientosModel.findByPk(
+          Number(cobro.finanzas_movimiento_id),
+          { transaction, lock: transaction.LOCK.UPDATE },
+        )
+      : await FinanzasMovimientosModel.create(
+          {
+            sede_id: Number(sedeId),
+            categoria_id: null,
+            pago_id: esCobroExclusivoDePlan ? Number(pagoPlan.id) : null,
+            tipo: "ingreso",
+            fecha: fechaArgentina(),
+            descripcion: `Cobro #${cobro.id} validado`,
+            monto: totalPagado.toFixed(2),
+            origen: esCobroExclusivoDePlan ? "pago_alumno" : "manual",
+            referencia: `COBRO-${cobro.id}`,
+            usuario_registro_id: usuarioId,
+            estado: "vigente",
+            observaciones:
+              observaciones || "Confirmado desde historial de cobros",
+          },
+          { transaction },
+        );
+
+    if (esRevalidacionDeEdicion && movimientoFinanciero) {
+      await movimientoFinanciero.update(
+        {
+          observaciones: [
+            movimientoFinanciero.observaciones,
+            `[VALIDACIÓN EDICIÓN COBRO] ${
+              observaciones || "Medio de pago aprobado"
+            }`,
+          ]
+            .filter(Boolean)
+            .join(" | ")
+            .slice(0, 500),
+          updated_at: new Date(),
+        },
+        { transaction },
+      );
+    }
 
     for (const pagoCobro of pagosCobro) {
       await pagoCobro.update(
@@ -1790,7 +1822,9 @@ export const confirmarCobroPendiente = async ({
     await cobro.update(
       {
         estado: "confirmado",
-        finanzas_movimiento_id: Number(movimientoFinanciero.id),
+        finanzas_movimiento_id: movimientoFinanciero?.id
+          ? Number(movimientoFinanciero.id)
+          : cobro.finanzas_movimiento_id,
         updated_at: new Date(),
       },
       { transaction },
@@ -2174,6 +2208,902 @@ const actualizarEstadoAlumnoTrasAnulacion = async ({
     },
     { transaction },
   );
+};
+
+
+export const corregirMedioPagoCobroConfirmado = async ({
+  cobroId,
+  sedeId,
+  medioPagoId,
+  referencia,
+  motivo,
+  usuario,
+  ip = null,
+  userAgent = null,
+}) => {
+  const transaction = await db.transaction();
+  try {
+    const usuarioId = obtenerUsuarioId(usuario);
+    const motivoLimpio = String(motivo || "").trim();
+    const referenciaLimpia = String(referencia || "").trim();
+
+    if (!idValido(usuarioId)) {
+      throw new CobroOperacionError("No se pudo identificar al usuario.", 401);
+    }
+    if (!idValido(medioPagoId)) {
+      throw new CobroOperacionError("Debe seleccionar un medio de pago válido.");
+    }
+    if (motivoLimpio.length < 3) {
+      throw new CobroOperacionError(
+        "Debe indicar el motivo de la corrección con al menos 3 caracteres.",
+      );
+    }
+    if (motivoLimpio.length > 500) {
+      throw new CobroOperacionError(
+        "El motivo no puede superar los 500 caracteres.",
+      );
+    }
+    if (referenciaLimpia.length > 120) {
+      throw new CobroOperacionError(
+        "La referencia no puede superar los 120 caracteres.",
+      );
+    }
+
+    const cobro = await cargarCobroBloqueado({ cobroId, sedeId, transaction });
+    if (cobro.estado !== "confirmado") {
+      throw new CobroOperacionError(
+        "Solo puede corregirse el medio de pago de un cobro confirmado.",
+        409,
+        "ESTADO_COBRO_INVALIDO",
+      );
+    }
+
+    const pagosCobro = await CobrosPagosModel.findAll({
+      where: { cobro_id: Number(cobro.id) },
+      transaction,
+      lock: transaction.LOCK.UPDATE,
+    });
+    if (pagosCobro.length !== 1) {
+      throw new CobroOperacionError(
+        "Los cobros con pagos combinados no pueden corregirse desde esta acción.",
+        409,
+        "COBRO_PAGO_COMBINADO",
+      );
+    }
+
+    const pagoCobro = pagosCobro[0];
+    if (pagoCobro.estado !== "confirmado") {
+      throw new CobroOperacionError(
+        "El pago del cobro debe estar confirmado para poder corregirlo.",
+        409,
+        "PAGO_COBRO_NO_CONFIRMADO",
+      );
+    }
+
+    const [medioAnterior, medioNuevo] = await Promise.all([
+      PagosMediosPagoModel.findByPk(Number(pagoCobro.medio_pago_id), {
+        transaction,
+        lock: transaction.LOCK.UPDATE,
+      }),
+      PagosMediosPagoModel.findOne({
+        where: { id: Number(medioPagoId), activo: 1 },
+        transaction,
+        lock: transaction.LOCK.UPDATE,
+      }),
+    ]);
+
+    if (!medioAnterior) {
+      throw new CobroOperacionError(
+        "No se encontró el medio de pago original del cobro.",
+        409,
+        "MEDIO_ORIGINAL_NO_ENCONTRADO",
+      );
+    }
+    if (!medioNuevo) {
+      throw new CobroOperacionError(
+        "El nuevo medio de pago no existe o se encuentra inactivo.",
+        404,
+        "MEDIO_NUEVO_NO_ENCONTRADO",
+      );
+    }
+    if (
+      String(medioAnterior.codigo || "").toUpperCase() === CODIGO_SALDO_FAVOR ||
+      String(medioNuevo.codigo || "").toUpperCase() === CODIGO_SALDO_FAVOR
+    ) {
+      throw new CobroOperacionError(
+        "Los movimientos de saldo a favor no pueden corregirse desde esta acción.",
+        409,
+        "SALDO_FAVOR_NO_EDITABLE",
+      );
+    }
+    if (Number(medioNuevo.requiere_validacion) === 1) {
+      throw new CobroOperacionError(
+        "El medio seleccionado requiere validación y no puede aplicarse mediante una corrección directa.",
+        409,
+        "MEDIO_REQUIERE_VALIDACION",
+      );
+    }
+    if (Number(medioAnterior.id) === Number(medioNuevo.id)) {
+      await transaction.commit();
+      return {
+        cobro: await CobrosModel.findByPk(cobro.id, {
+          include: incluirCobroCompleto,
+        }),
+        repetido: true,
+      };
+    }
+
+    const impactabaCaja = Number(medioAnterior.impacta_caja) === 1;
+    const impactaCaja = Number(medioNuevo.impacta_caja) === 1;
+    let sesionOriginal = null;
+    let movimientoCaja = null;
+
+    if (impactabaCaja || impactaCaja) {
+      sesionOriginal = await CajasSesionesModel.findOne({
+        where: {
+          id: Number(cobro.caja_sesion_id),
+          sede_id: Number(sedeId),
+          estado: "abierta",
+        },
+        transaction,
+        lock: transaction.LOCK.UPDATE,
+      });
+      if (!sesionOriginal) {
+        throw new CobroOperacionError(
+          "La caja original del cobro debe permanecer abierta para corregir el medio de pago.",
+          409,
+          "CAJA_ORIGINAL_CERRADA",
+        );
+      }
+
+      movimientoCaja = await CajasMovimientosModel.findOne({
+        where: {
+          cobro_pago_id: Number(pagoCobro.id),
+          origen: "cobro",
+          estado: "vigente",
+        },
+        transaction,
+        lock: transaction.LOCK.UPDATE,
+      });
+
+      if (impactabaCaja && !movimientoCaja) {
+        throw new CobroOperacionError(
+          "No se encontró el movimiento de caja original asociado al pago.",
+          409,
+          "MOVIMIENTO_CAJA_NO_ENCONTRADO",
+        );
+      }
+      if (!impactabaCaja && movimientoCaja) {
+        throw new CobroOperacionError(
+          "El cobro presenta un movimiento de caja incompatible con su medio original.",
+          409,
+          "MOVIMIENTO_CAJA_INCONSISTENTE",
+        );
+      }
+    }
+
+    const referenciaAnterior = pagoCobro.referencia || null;
+    const movimientoCajaIdAnterior = movimientoCaja?.id
+      ? Number(movimientoCaja.id)
+      : null;
+    const resumenCorreccion = `Medio corregido de ${medioAnterior.nombre} a ${medioNuevo.nombre}. Motivo: ${motivoLimpio}`;
+    const observacionesPago = [
+      pagoCobro.observaciones_validacion,
+      `[CORRECCIÓN MEDIO] ${resumenCorreccion}`,
+    ]
+      .filter(Boolean)
+      .join(" | ")
+      .slice(0, 500);
+
+    await pagoCobro.update(
+      {
+        medio_pago_id: Number(medioNuevo.id),
+        referencia: referenciaLimpia || pagoCobro.referencia || null,
+        usuario_validacion_id: Number(usuarioId),
+        fecha_validacion: new Date(),
+        observaciones_validacion: observacionesPago,
+        updated_at: new Date(),
+      },
+      { transaction },
+    );
+
+    const [pagosAlumnoActualizados] = await PagosModel.update(
+      {
+        medio_pago_id: Number(medioNuevo.id),
+        updated_at: new Date(),
+      },
+      {
+        where: {
+          referencia: `COBRO-${cobro.id}`,
+          medio_pago_id: Number(medioAnterior.id),
+          estado: "confirmado",
+        },
+        transaction,
+      },
+    );
+
+    if (impactabaCaja && impactaCaja) {
+      const observacionesCaja = [
+        movimientoCaja.observaciones,
+        `[CORRECCIÓN MEDIO] ${resumenCorreccion}`,
+      ]
+        .filter(Boolean)
+        .join(" | ")
+        .slice(0, 500);
+      await movimientoCaja.update(
+        {
+          medio_pago_id: Number(medioNuevo.id),
+          observaciones: observacionesCaja,
+          updated_at: new Date(),
+        },
+        { transaction },
+      );
+    } else if (impactabaCaja && !impactaCaja) {
+      const observacionesCaja = [
+        movimientoCaja.observaciones,
+        `[CORRECCIÓN MEDIO] Movimiento retirado de caja. ${resumenCorreccion}`,
+      ]
+        .filter(Boolean)
+        .join(" | ")
+        .slice(0, 500);
+      await movimientoCaja.update(
+        {
+          estado: "anulado",
+          observaciones: observacionesCaja,
+          updated_at: new Date(),
+        },
+        { transaction },
+      );
+    } else if (!impactabaCaja && impactaCaja) {
+      movimientoCaja = await CajasMovimientosModel.create(
+        {
+          caja_sesion_id: Number(sesionOriginal.id),
+          caja_id: Number(sesionOriginal.caja_id),
+          sede_id: Number(sedeId),
+          cobro_pago_id: Number(pagoCobro.id),
+          medio_pago_id: Number(medioNuevo.id),
+          usuario_registro_id: Number(usuarioId),
+          tipo: "ingreso",
+          origen: "cobro",
+          fecha_movimiento: new Date(),
+          monto: Number(pagoCobro.monto).toFixed(2),
+          descripcion: `Cobro #${cobro.id}`,
+          estado: "vigente",
+          referencia: `COBRO-${cobro.id}`,
+          observaciones: `[CORRECCIÓN MEDIO] ${resumenCorreccion}`.slice(0, 500),
+        },
+        { transaction },
+      );
+    }
+
+    await cobro.update({ updated_at: new Date() }, { transaction });
+
+    await SistemaAuditoriaLogsModel.create(
+      {
+        usuario_id: Number(usuarioId),
+        sede_id: Number(sedeId),
+        modulo: "COBROS",
+        accion: "CORREGIR_MEDIO_PAGO_COBRO",
+        entidad: "cobros_cobros",
+        entidad_id: Number(cobro.id),
+        descripcion: resumenCorreccion,
+        valores_anteriores: {
+          cobro_pago_id: Number(pagoCobro.id),
+          medio_pago_id: Number(medioAnterior.id),
+          medio_pago: medioAnterior.nombre,
+          referencia: referenciaAnterior,
+          movimiento_caja_id: movimientoCajaIdAnterior,
+        },
+        valores_nuevos: {
+          cobro_pago_id: Number(pagoCobro.id),
+          medio_pago_id: Number(medioNuevo.id),
+          medio_pago: medioNuevo.nombre,
+          referencia: referenciaLimpia || pagoCobro.referencia || null,
+          pagos_alumno_actualizados: Number(pagosAlumnoActualizados || 0),
+          motivo: motivoLimpio,
+        },
+        ip,
+        user_agent: userAgent,
+      },
+      { transaction },
+    );
+
+    await transaction.commit();
+    return {
+      cobro: await CobrosModel.findByPk(cobro.id, {
+        include: incluirCobroCompleto,
+      }),
+      repetido: false,
+    };
+  } catch (error) {
+    if (!transaction.finished) await transaction.rollback();
+    throw error;
+  }
+};
+
+
+export const editarCobroConfirmado = async ({
+  cobroId,
+  payload,
+  usuario,
+  ip = null,
+  userAgent = null,
+}) => {
+  const transaction = await db.transaction();
+
+  try {
+    const usuarioId = obtenerUsuarioId(usuario);
+    const sedeId = Number(payload?.sede_id);
+    const motivoLimpio = String(payload?.motivo_edicion || "").trim();
+    const observacionesNuevas = String(payload?.observaciones || "").trim();
+
+    if (!idValido(usuarioId)) {
+      throw new CobroOperacionError("No se pudo identificar al usuario.", 401);
+    }
+    if (!idValido(sedeId)) {
+      throw new CobroOperacionError("Debe indicar una sede válida.");
+    }
+    if (motivoLimpio.length < 3) {
+      throw new CobroOperacionError(
+        "Debe indicar el motivo de la edición con al menos 3 caracteres.",
+      );
+    }
+    if (motivoLimpio.length > 500) {
+      throw new CobroOperacionError(
+        "El motivo de la edición no puede superar los 500 caracteres.",
+      );
+    }
+
+    const cobro = await cargarCobroBloqueado({
+      cobroId,
+      sedeId,
+      transaction,
+    });
+
+    if (cobro.estado !== "confirmado") {
+      throw new CobroOperacionError(
+        "Solo pueden editarse cobros confirmados.",
+        409,
+        "ESTADO_COBRO_INVALIDO",
+      );
+    }
+
+    const sesionOriginal = await CajasSesionesModel.findOne({
+      where: {
+        id: Number(cobro.caja_sesion_id),
+        sede_id: sedeId,
+        estado: "abierta",
+      },
+      transaction,
+      lock: transaction.LOCK.UPDATE,
+    });
+
+    if (!sesionOriginal) {
+      throw new CobroOperacionError(
+        "La caja original del cobro debe permanecer abierta para editarlo.",
+        409,
+        "CAJA_ORIGINAL_CERRADA",
+      );
+    }
+
+    const detallesAnteriores = await CobrosDetallesModel.findAll({
+      where: { cobro_id: Number(cobro.id) },
+      order: [["id", "ASC"]],
+      transaction,
+      lock: transaction.LOCK.UPDATE,
+    });
+    const pagosAnteriores = await CobrosPagosModel.findAll({
+      where: {
+        cobro_id: Number(cobro.id),
+        estado: "confirmado",
+      },
+      order: [["id", "ASC"]],
+      transaction,
+      lock: transaction.LOCK.UPDATE,
+    });
+
+    if (pagosAnteriores.length === 0) {
+      throw new CobroOperacionError(
+        "El cobro no conserva medios de pago confirmados para editar.",
+        409,
+        "PAGOS_COBRO_INCONSISTENTES",
+      );
+    }
+
+    const medioSaldo = await PagosMediosPagoModel.findOne({
+      where: { codigo: CODIGO_SALDO_FAVOR },
+      transaction,
+    });
+    if (
+      medioSaldo &&
+      pagosAnteriores.some(
+        (pago) => Number(pago.medio_pago_id) === Number(medioSaldo.id),
+      )
+    ) {
+      throw new CobroOperacionError(
+        "Los cobros que utilizaron saldo a favor no pueden editarse. Deben anularse y registrarse nuevamente.",
+        409,
+        "SALDO_FAVOR_NO_EDITABLE",
+      );
+    }
+
+    const cobradorUsuarioId = Number(
+      payload?.cobrador_usuario_id || cobro.cobrador_usuario_id,
+    );
+    const clienteTipo = String(payload?.cliente_tipo || cobro.cliente_tipo);
+    const { alumno } = await validarCliente({
+      clienteTipo,
+      alumnoId: payload?.alumno_id,
+      clienteUsuarioId: payload?.cliente_usuario_id,
+      cobradorUsuarioId,
+      transaction,
+    });
+
+    const conceptosNuevos = await resolverConceptos({
+      conceptos: payload?.conceptos,
+      sedeId,
+      transaction,
+    });
+    const planAnterior = detallesAnteriores.find(
+      (detalle) => detalle.tipo === "plan",
+    );
+    const planesNuevos = conceptosNuevos.filter(
+      (concepto) => concepto.tipo === "plan",
+    );
+    const planNuevo = planesNuevos[0] || null;
+
+    if (planAnterior) {
+      const clienteAnteriorId = Number(cobro.alumno_id || 0);
+      const clienteNuevoId = Number(payload?.alumno_id || 0);
+      if (
+        clienteTipo !== "alumno" ||
+        clienteAnteriorId <= 0 ||
+        clienteNuevoId !== clienteAnteriorId
+      ) {
+        throw new CobroOperacionError(
+          "Un cobro con plan no puede cambiar de alumno.",
+          409,
+          "PLAN_CLIENTE_NO_EDITABLE",
+        );
+      }
+      if (
+        planesNuevos.length !== 1 ||
+        Number(planNuevo?.referencia_id) !== Number(planAnterior.referencia_id)
+      ) {
+        throw new CobroOperacionError(
+          "El plan asociado no puede reemplazarse ni eliminarse desde la edición del cobro.",
+          409,
+          "PLAN_NO_EDITABLE",
+        );
+      }
+    } else if (planNuevo) {
+      throw new CobroOperacionError(
+        "No se puede agregar un plan a un cobro existente. Registrá un cobro nuevo para generar la membresía.",
+        409,
+        "PLAN_NO_AGREGABLE",
+      );
+    }
+
+    const resumen = conceptosNuevos.reduce(
+      (acc, item) => ({
+        importe: redondear(acc.importe + item.importe),
+        descuentos: redondear(acc.descuentos + item.descuento_importe),
+        impuestos: redondear(acc.impuestos + item.impuesto_importe),
+        total: redondear(acc.total + item.total),
+      }),
+      { importe: 0, descuentos: 0, impuestos: 0, total: 0 },
+    );
+
+    if (resumen.total <= 0) {
+      throw new CobroOperacionError(
+        "El total del cobro debe ser mayor a cero.",
+      );
+    }
+
+    const pagosResueltos = await resolverPagos({
+      pagos: payload?.pagos,
+      total: resumen.total,
+      transaction,
+    });
+    const pagosNuevos = pagosResueltos.pagos;
+    const totalPagado = pagosResueltos.totalPagado;
+
+    if (Math.abs(totalPagado - resumen.total) > 0.009) {
+      throw new CobroOperacionError(
+        "En una edición, la suma de los medios de pago debe coincidir con el total del cobro.",
+        409,
+        "PAGO_EDICION_INCOMPLETO",
+      );
+    }
+    if (pagosNuevos.some((item) => item.es_saldo_favor)) {
+      throw new CobroOperacionError(
+        "No se puede agregar saldo a favor al editar un cobro confirmado.",
+        409,
+        "SALDO_FAVOR_NO_EDITABLE",
+      );
+    }
+    const requiereValidacionEdicion = pagosNuevos.some(
+      (item) => Number(item.medio?.requiere_validacion || 0) === 1,
+    );
+
+    const snapshotAnterior = {
+      cliente_tipo: cobro.cliente_tipo,
+      alumno_id: cobro.alumno_id,
+      cliente_usuario_id: cobro.cliente_usuario_id,
+      cobrador_usuario_id: cobro.cobrador_usuario_id,
+      importe: Number(cobro.importe || 0),
+      descuentos: Number(cobro.descuentos || 0),
+      impuestos: Number(cobro.impuestos || 0),
+      total: Number(cobro.total || 0),
+      observaciones: cobro.observaciones || null,
+      conceptos: detallesAnteriores.map((item) => ({
+        id: Number(item.id),
+        tipo: item.tipo,
+        referencia_id: Number(item.referencia_id),
+        cantidad: Number(item.cantidad),
+        precio_unitario: Number(item.precio_unitario),
+        descuento_porcentaje: Number(item.descuento_porcentaje),
+        impuesto_porcentaje: Number(item.impuesto_porcentaje),
+        total: Number(item.total),
+      })),
+      pagos: pagosAnteriores.map((item) => ({
+        id: Number(item.id),
+        medio_pago_id: Number(item.medio_pago_id),
+        monto: Number(item.monto),
+        referencia: item.referencia || null,
+      })),
+    };
+
+    for (const detalle of detallesAnteriores) {
+      if (detalle.tipo === "producto") {
+        await devolverStockCobro({
+          detalle,
+          sedeId,
+          usuarioId,
+          motivo: `Edición de cobro #${cobro.id}: ${motivoLimpio}`,
+          transaction,
+        });
+      }
+    }
+
+    for (const pagoAnterior of pagosAnteriores) {
+      const movimientosCaja = await CajasMovimientosModel.findAll({
+        where: {
+          cobro_pago_id: Number(pagoAnterior.id),
+          origen: "cobro",
+          estado: "vigente",
+        },
+        transaction,
+        lock: transaction.LOCK.UPDATE,
+      });
+
+      for (const movimiento of movimientosCaja) {
+        const observacionesMovimiento = [
+          movimiento.observaciones,
+          `[EDICIÓN COBRO] Movimiento reemplazado. Motivo: ${motivoLimpio}`,
+        ]
+          .filter(Boolean)
+          .join(" | ")
+          .slice(0, 500);
+        await movimiento.update(
+          {
+            estado: "anulado",
+            observaciones: observacionesMovimiento,
+            updated_at: new Date(),
+          },
+          { transaction },
+        );
+      }
+
+      const observacionesPago = [
+        pagoAnterior.observaciones_validacion,
+        `[EDICIÓN COBRO] Pago reemplazado. Motivo: ${motivoLimpio}`,
+      ]
+        .filter(Boolean)
+        .join(" | ")
+        .slice(0, 500);
+      await pagoAnterior.update(
+        {
+          estado: "anulado",
+          observaciones_validacion: observacionesPago,
+          updated_at: new Date(),
+        },
+        { transaction },
+      );
+    }
+
+    await CobrosDetallesModel.destroy({
+      where: {
+        cobro_id: Number(cobro.id),
+        tipo: { [Op.ne]: "plan" },
+      },
+      transaction,
+    });
+
+    const detallesNuevos = [];
+    for (const linea of conceptosNuevos) {
+      let detalle;
+      if (linea.tipo === "plan" && planAnterior) {
+        await planAnterior.update(
+          {
+            nombre_snapshot: linea.nombre,
+            categoria_snapshot: linea.categoria_nombre || null,
+            cantidad: linea.cantidad,
+            precio_catalogo: linea.precio_catalogo.toFixed(2),
+            precio_unitario: linea.precio_unitario.toFixed(2),
+            descuento_porcentaje: linea.descuento_porcentaje.toFixed(2),
+            descuento_importe: linea.descuento_importe.toFixed(2),
+            impuesto_porcentaje: linea.impuesto_porcentaje.toFixed(2),
+            impuesto_importe: linea.impuesto_importe.toFixed(2),
+            importe: linea.importe.toFixed(2),
+            total: linea.total.toFixed(2),
+          },
+          { transaction },
+        );
+        detalle = planAnterior;
+      } else {
+        detalle = await CobrosDetallesModel.create(
+          {
+            cobro_id: Number(cobro.id),
+            tipo: linea.tipo,
+            referencia_id: linea.referencia_id,
+            nombre_snapshot: linea.nombre,
+            categoria_snapshot: linea.categoria_nombre || null,
+            cantidad: linea.cantidad,
+            precio_catalogo: linea.precio_catalogo.toFixed(2),
+            precio_unitario: linea.precio_unitario.toFixed(2),
+            descuento_porcentaje: linea.descuento_porcentaje.toFixed(2),
+            descuento_importe: linea.descuento_importe.toFixed(2),
+            impuesto_porcentaje: linea.impuesto_porcentaje.toFixed(2),
+            impuesto_importe: linea.impuesto_importe.toFixed(2),
+            importe: linea.importe.toFixed(2),
+            total: linea.total.toFixed(2),
+          },
+          { transaction },
+        );
+      }
+      detallesNuevos.push({ detalle, linea });
+    }
+
+    for (const { detalle, linea } of detallesNuevos) {
+      if (linea.tipo === "producto") {
+        await descontarStock({
+          linea,
+          detalleId: detalle.id,
+          sedeId,
+          usuarioId,
+          transaction,
+        });
+      }
+    }
+
+    const pagosCreados = [];
+    for (const item of pagosNuevos) {
+      const pagoRequiereValidacion =
+        Number(item.medio?.requiere_validacion || 0) === 1;
+
+      pagosCreados.push(
+        await CobrosPagosModel.create(
+          {
+            cobro_id: Number(cobro.id),
+            medio_pago_id: item.medio_pago_id,
+            monto: item.monto.toFixed(2),
+            estado: pagoRequiereValidacion
+              ? "pendiente_validacion"
+              : "confirmado",
+            referencia: item.referencia,
+            comprobante_url: item.comprobante_url,
+            usuario_validacion_id: pagoRequiereValidacion
+              ? null
+              : Number(usuarioId),
+            fecha_validacion: pagoRequiereValidacion ? null : new Date(),
+            observaciones_validacion: `[EDICIÓN COBRO] ${motivoLimpio}`.slice(
+              0,
+              500,
+            ),
+            updated_at: new Date(),
+          },
+          { transaction },
+        ),
+      );
+    }
+
+    for (let indice = 0; indice < pagosCreados.length; indice += 1) {
+      const pagoResuelto = pagosNuevos[indice];
+      const pagoCreado = pagosCreados[indice];
+      if (pagoCreado.estado !== "confirmado") continue;
+      if (!pagoResuelto.impacta_caja) continue;
+      await CajasMovimientosModel.create(
+        {
+          caja_sesion_id: Number(sesionOriginal.id),
+          caja_id: Number(sesionOriginal.caja_id),
+          sede_id: sedeId,
+          cobro_pago_id: Number(pagosCreados[indice].id),
+          medio_pago_id: Number(pagoResuelto.medio_pago_id),
+          usuario_registro_id: usuarioId,
+          tipo: "ingreso",
+          origen: "cobro",
+          fecha_movimiento: new Date(),
+          monto: Number(pagoResuelto.monto).toFixed(2),
+          descripcion: `Cobro #${cobro.id} editado`,
+          estado: "vigente",
+          referencia: `COBRO-${cobro.id}`,
+          observaciones: `[EDICIÓN COBRO] ${motivoLimpio}`.slice(0, 500),
+        },
+        { transaction },
+      );
+    }
+
+    if (planAnterior && planNuevo) {
+      const medioPagoPlan = pagosNuevos[0];
+      const montoPlanPagado = redondear(
+        Math.min(totalPagado, Number(planNuevo.total)),
+      );
+      const saldoPlan = redondear(
+        Math.max(Number(planNuevo.total) - montoPlanPagado, 0),
+      );
+
+      if (idValido(planAnterior.mensualidad_id)) {
+        await PagosMensualidadesModel.update(
+          {
+            monto_total: Number(planNuevo.total).toFixed(2),
+            monto_pagado: montoPlanPagado.toFixed(2),
+            saldo: saldoPlan.toFixed(2),
+            estado: saldoPlan > 0.009 ? "parcial" : "pagada",
+            observaciones: `Ajustada por edición del cobro #${cobro.id}. Motivo: ${motivoLimpio}`,
+            updated_at: new Date(),
+          },
+          {
+            where: { id: Number(planAnterior.mensualidad_id) },
+            transaction,
+          },
+        );
+      }
+
+      if (idValido(planAnterior.pago_id)) {
+        await PagosModel.update(
+          {
+            medio_pago_id: Number(medioPagoPlan.medio_pago_id),
+            monto: totalPagado.toFixed(2),
+            referencia: medioPagoPlan.referencia || `COBRO-${cobro.id}`,
+            observaciones: `Pago ajustado por edición del cobro #${cobro.id}. Motivo: ${motivoLimpio}`,
+            updated_at: new Date(),
+          },
+          {
+            where: { id: Number(planAnterior.pago_id), estado: "confirmado" },
+            transaction,
+          },
+        );
+      }
+
+      if (idValido(planAnterior.membresia_id)) {
+        const basePlan = redondear(
+          planNuevo.importe - planNuevo.descuento_importe,
+        );
+        await AlumnosMembresiasModel.update(
+          {
+            precio_lista: Number(planNuevo.precio_unitario).toFixed(2),
+            descuento_valor: "0.00",
+            descuento_porcentaje: Number(
+              planNuevo.descuento_porcentaje,
+            ).toFixed(2),
+            precio_final: basePlan.toFixed(2),
+            updated_at: new Date(),
+          },
+          {
+            where: { id: Number(planAnterior.membresia_id) },
+            transaction,
+          },
+        );
+      }
+    }
+
+    if (idValido(cobro.finanzas_movimiento_id)) {
+      await FinanzasMovimientosModel.update(
+        {
+          monto: totalPagado.toFixed(2),
+          descripcion: `Cobro #${cobro.id}`,
+          observaciones: [
+            observacionesNuevas || cobro.observaciones,
+            `[EDICIÓN COBRO] ${motivoLimpio}`,
+          ]
+            .filter(Boolean)
+            .join(" | "),
+          updated_at: new Date(),
+        },
+        {
+          where: {
+            id: Number(cobro.finanzas_movimiento_id),
+            estado: "vigente",
+          },
+          transaction,
+        },
+      );
+    }
+
+    await cobro.update(
+      {
+        cliente_tipo: clienteTipo,
+        alumno_id:
+          clienteTipo === "alumno" ? Number(payload?.alumno_id) : null,
+        cliente_usuario_id:
+          clienteTipo === "empleado"
+            ? Number(payload?.cliente_usuario_id)
+            : null,
+        cobrador_usuario_id: cobradorUsuarioId,
+        importe: resumen.importe.toFixed(2),
+        descuentos: resumen.descuentos.toFixed(2),
+        impuestos: resumen.impuestos.toFixed(2),
+        total: resumen.total.toFixed(2),
+        observaciones: observacionesNuevas || null,
+        estado: requiereValidacionEdicion
+          ? "pendiente_validacion"
+          : "confirmado",
+        updated_at: new Date(),
+      },
+      { transaction },
+    );
+
+    await SistemaAuditoriaLogsModel.create(
+      {
+        usuario_id: usuarioId,
+        sede_id: sedeId,
+        modulo: "COBROS",
+        accion: "EDITAR_COBRO_CONFIRMADO",
+        entidad: "cobros_cobros",
+        entidad_id: Number(cobro.id),
+        descripcion: `Cobro #${cobro.id} editado. Motivo: ${motivoLimpio}`,
+        valores_anteriores: snapshotAnterior,
+        valores_nuevos: {
+          cliente_tipo: clienteTipo,
+          alumno_id:
+            clienteTipo === "alumno" ? Number(payload?.alumno_id) : null,
+          cliente_usuario_id:
+            clienteTipo === "empleado"
+              ? Number(payload?.cliente_usuario_id)
+              : null,
+          cobrador_usuario_id: cobradorUsuarioId,
+          importe: resumen.importe,
+          descuentos: resumen.descuentos,
+          impuestos: resumen.impuestos,
+          total: resumen.total,
+          estado: requiereValidacionEdicion
+            ? "pendiente_validacion"
+            : "confirmado",
+          observaciones: observacionesNuevas || null,
+          conceptos: conceptosNuevos.map((item) => ({
+            tipo: item.tipo,
+            referencia_id: item.referencia_id,
+            cantidad: item.cantidad,
+            precio_unitario: item.precio_unitario,
+            descuento_porcentaje: item.descuento_porcentaje,
+            impuesto_porcentaje: item.impuesto_porcentaje,
+            total: item.total,
+          })),
+          pagos: pagosNuevos.map((item) => ({
+            medio_pago_id: item.medio_pago_id,
+            monto: item.monto,
+            referencia: item.referencia,
+          })),
+          motivo: motivoLimpio,
+        },
+        ip,
+        user_agent: userAgent,
+      },
+      { transaction },
+    );
+
+    await transaction.commit();
+    return {
+      cobro: await CobrosModel.findByPk(cobro.id, {
+        include: incluirCobroCompleto,
+      }),
+      repetido: false,
+    };
+  } catch (error) {
+    if (!transaction.finished) await transaction.rollback();
+    throw error;
+  }
 };
 
 export const anularCobroConfirmado = async ({

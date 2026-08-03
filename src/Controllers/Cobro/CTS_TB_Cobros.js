@@ -15,6 +15,8 @@ import {
 } from '../../Security/operationalDayScope.js';
 import {
   anularCobroConfirmado,
+  corregirMedioPagoCobroConfirmado,
+  editarCobroConfirmado,
   CobroOperacionError,
   confirmarCobroPendiente,
   rechazarCobroPendiente,
@@ -58,6 +60,7 @@ const construirFiltros = (query) => {
     where.push(`EXISTS (
       SELECT 1 FROM cobros_pagos cp_f
       WHERE cp_f.cobro_id = c.id AND cp_f.medio_pago_id = :medioPagoId
+        AND cp_f.estado IN ('confirmado', 'pendiente_validacion')
     )`);
     replacements.medioPagoId = Number(query.medio_pago_id);
   }
@@ -225,6 +228,7 @@ export const OBR_Cobros_CTS = async (req, res) => {
             SELECT SUM(cp_total.monto)
             FROM cobros_pagos cp_total
             WHERE cp_total.cobro_id = c.id
+            AND cp_total.estado IN ('confirmado', 'pendiente_validacion')
           ), 0) AS total_pagado,
           CASE
             WHEN c.estado IN ('confirmado', 'pendiente_validacion') THEN
@@ -232,6 +236,7 @@ export const OBR_Cobros_CTS = async (req, res) => {
                 SELECT SUM(cp_saldo.monto)
                 FROM cobros_pagos cp_saldo
                 WHERE cp_saldo.cobro_id = c.id
+                AND cp_saldo.estado IN ('confirmado', 'pendiente_validacion')
               ), 0), 0)
             ELSE 0
           END AS saldo_pendiente,
@@ -249,6 +254,7 @@ export const OBR_Cobros_CTS = async (req, res) => {
         INNER JOIN usuarios_usuarios cobrador ON cobrador.id = c.cobrador_usuario_id
         LEFT JOIN cobros_detalles cd ON cd.cobro_id = c.id
         LEFT JOIN cobros_pagos cp ON cp.cobro_id = c.id
+          AND cp.estado IN ('confirmado', 'pendiente_validacion')
         LEFT JOIN pagos_medios_pago mp ON mp.id = cp.medio_pago_id
         WHERE ${whereSql}
         GROUP BY c.id
@@ -365,6 +371,7 @@ export const OBR_CobroDetalle_CTS = async (req, res) => {
           SELECT SUM(cp_total.monto)
           FROM cobros_pagos cp_total
           WHERE cp_total.cobro_id = c.id
+            AND cp_total.estado IN ('confirmado', 'pendiente_validacion')
         ), 0) AS total_pagado,
         CASE
           WHEN c.estado IN ('confirmado', 'pendiente_validacion') THEN
@@ -372,6 +379,7 @@ export const OBR_CobroDetalle_CTS = async (req, res) => {
               SELECT SUM(cp_saldo.monto)
               FROM cobros_pagos cp_saldo
               WHERE cp_saldo.cobro_id = c.id
+                AND cp_saldo.estado IN ('confirmado', 'pendiente_validacion')
             ), 0), 0)
           ELSE 0
         END AS saldo_pendiente,
@@ -413,7 +421,9 @@ export const OBR_CobroDetalle_CTS = async (req, res) => {
         FROM cobros_pagos cp
         INNER JOIN pagos_medios_pago mp ON mp.id = cp.medio_pago_id
         LEFT JOIN usuarios_usuarios uv ON uv.id = cp.usuario_validacion_id
-        WHERE cp.cobro_id = :id ORDER BY cp.id ASC`,
+        WHERE cp.cobro_id = :id
+          AND cp.estado IN ('confirmado', 'pendiente_validacion')
+        ORDER BY cp.id ASC`,
         { replacements, type: QueryTypes.SELECT }
       )
     ]);
@@ -469,6 +479,65 @@ export const UR_RechazarCobro_CTS = async (req, res) => {
     });
   } catch (error) {
     return manejarErrorCobro(error, res, 'UR_RechazarCobro_CTS');
+  }
+};
+
+
+export const UR_CorregirMedioPagoCobro_CTS = async (req, res) => {
+  try {
+    const resultado = await corregirMedioPagoCobroConfirmado({
+      cobroId: req.params.id,
+      sedeId: req.body.sede_id,
+      medioPagoId: req.body.medio_pago_id,
+      referencia: req.body.referencia,
+      motivo: req.body.motivo,
+      usuario: req.user,
+      ip:
+        req.headers['x-forwarded-for']?.split(',')[0]?.trim() ||
+        req.socket?.remoteAddress ||
+        req.ip ||
+        null,
+      userAgent: req.headers['user-agent'] || null
+    });
+
+    return res.status(200).json({
+      ok: true,
+      repetido: resultado.repetido,
+      message: resultado.repetido
+        ? 'El cobro ya utiliza el medio de pago seleccionado.'
+        : 'Medio de pago corregido correctamente.',
+      data: resultado.cobro
+    });
+  } catch (error) {
+    return manejarErrorCobro(error, res, 'UR_CorregirMedioPagoCobro_CTS');
+  }
+};
+
+
+export const UR_EditarCobro_CTS = async (req, res) => {
+  try {
+    const resultado = await editarCobroConfirmado({
+      cobroId: req.params.id,
+      payload: req.body,
+      usuario: req.user,
+      ip:
+        req.headers['x-forwarded-for']?.split(',')[0]?.trim() ||
+        req.socket?.remoteAddress ||
+        req.ip ||
+        null,
+      userAgent: req.headers['user-agent'] || null
+    });
+
+    return res.status(200).json({
+      ok: true,
+      message:
+        resultado.cobro?.estado === 'pendiente_validacion'
+          ? 'Cobro actualizado y pendiente de validación.'
+          : 'Cobro actualizado correctamente.',
+      data: resultado.cobro
+    });
+  } catch (error) {
+    return manejarErrorCobro(error, res, 'UR_EditarCobro_CTS');
   }
 };
 

@@ -24,6 +24,8 @@ import {
   OBR_MediosPagoCobro_CTS,
   OBR_SaldoDisponibleCobro_CTS,
   UR_AnularCobro_CTS,
+  UR_CorregirMedioPagoCobro_CTS,
+  UR_EditarCobro_CTS,
   UR_ConfirmarCobro_CTS,
   UR_RechazarCobro_CTS
 } from '../Controllers/Cobro/CTS_TB_Cobros.js';
@@ -36,7 +38,7 @@ const seguridadCaja = [authenticateToken, requireSedeAccess, requireFinanzasSede
 router.get(
   '/cobros/medios-pago',
   ...seguridadSede,
-  requirePermission(['cobros.registrar', 'medios_pago.ver']),
+  requirePermission(['cobros.registrar', 'medios_pago.ver', 'cobros.anular']),
   OBR_MediosPagoCobro_CTS
 );
 
@@ -144,6 +146,22 @@ router.patch(
   requirePermission('cobros.rechazar'),
   requireCobroDelDiaActual,
   UR_RechazarCobro_CTS
+);
+
+router.patch(
+  '/cobros/:id/editar',
+  ...seguridadSede,
+  requirePermission('cobros.anular'),
+  requireCobroDelDiaActual,
+  UR_EditarCobro_CTS
+);
+
+router.patch(
+  '/cobros/:id/corregir-medio-pago',
+  ...seguridadSede,
+  requirePermission('cobros.anular'),
+  requireCobroDelDiaActual,
+  UR_CorregirMedioPagoCobro_CTS
 );
 
 router.patch(

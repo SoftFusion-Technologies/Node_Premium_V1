@@ -1015,12 +1015,6 @@ router.post(
 router.patch(
   "/alumnos/:alumno_id/membresia-migracion/:membresia_id",
   authenticateToken,
-  requireRolGlobal(["SUPER_ADMIN"]),
-  requirePermission("pagos.gestionar"),
-  requireFinancialScope({
-    sources: [sourceParam("alumno", "alumno_id"), sourceBody("sede")],
-    permission: "pagos.gestionar",
-  }),
   UR_MembresiaMigracionAlumnoPlanesPagos_CTS,
 );
 

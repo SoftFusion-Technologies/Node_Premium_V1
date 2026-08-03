@@ -500,6 +500,48 @@ const obtenerUsuarioIdRequest = (req) =>
 const obtenerIpRequest = (req) =>
   req.headers['x-forwarded-for'] || req.socket?.remoteAddress || req.ip || null;
 
+const obtenerRolCodigoRequest = (req) =>
+  String(req.user?.rol_codigo || '').trim().toUpperCase();
+
+const obtenerAsignacionSedeUsuario = (user, sedeId) => {
+  if (!Number(sedeId) || !Array.isArray(user?.sedes)) return null;
+
+  return (
+    user.sedes.find(
+      (sede) => Number(sede?.id ?? sede?.sede_id) === Number(sedeId)
+    ) || null
+  );
+};
+
+const usuarioPuedeOperarSedeMembresia = (user, sedeId) => {
+  const rolCodigo = String(user?.rol_codigo || '').trim().toUpperCase();
+
+  if (['SUPER_ADMIN', 'DIRECCION'].includes(rolCodigo)) return true;
+
+  const sedeUsuario = obtenerAsignacionSedeUsuario(user, sedeId);
+  const asignacion = sedeUsuario?.asignacion || {};
+
+  return Boolean(
+    sedeUsuario &&
+      asignacion.activo !== false &&
+      asignacion.puede_operar !== false
+  );
+};
+
+const usuarioEsCoordinadorSede = (user, sedeId) => {
+  const rolGlobal = String(user?.rol_codigo || '').trim().toUpperCase();
+  if (rolGlobal === 'COORD_SEDE') return true;
+
+  const sedeUsuario = obtenerAsignacionSedeUsuario(user, sedeId);
+  const rolEfectivo = String(
+    sedeUsuario?.asignacion?.rol_codigo || sedeUsuario?.rol_codigo || ''
+  )
+    .trim()
+    .toUpperCase();
+
+  return rolEfectivo === 'COORD_SEDE';
+};
+
 const registrarAuditoriaMembresiaMigracion = async ({
   req,
   alumno,
@@ -1394,6 +1436,63 @@ export const UR_MembresiaMigracionAlumnoPlanesPagos_CTS = async (req, res) => {
       );
     }
 
+    const rolCodigo = obtenerRolCodigoRequest(req);
+    const esSuperAdmin = rolCodigo === 'SUPER_ADMIN';
+    const esCoordinador = usuarioEsCoordinadorSede(
+      req.user,
+      membresia.sede_id
+    );
+    const fechaInicioActual = String(membresia.fecha_inicio).slice(0, 10);
+    const fechaVencimientoActual = String(membresia.fecha_vencimiento).slice(
+      0,
+      10
+    );
+
+    if (!esSuperAdmin && !esCoordinador) {
+      await transaction.rollback();
+      return responderError(
+        res,
+        403,
+        'No tiene permisos para ajustar esta membresía.'
+      );
+    }
+
+    if (
+      esCoordinador &&
+      !usuarioPuedeOperarSedeMembresia(req.user, membresia.sede_id)
+    ) {
+      await transaction.rollback();
+      return responderError(
+        res,
+        403,
+        'No tiene acceso operativo a la sede de esta membresía.'
+      );
+    }
+
+    if (esCoordinador) {
+      const camposProtegidos = [];
+
+      if (Number(req.body.plan_id) !== Number(membresia.plan_id)) {
+        camposProtegidos.push('plan_id');
+      }
+      if (Number(req.body.sede_id) !== Number(membresia.sede_id)) {
+        camposProtegidos.push('sede_id');
+      }
+      if (fechaInicio !== fechaInicioActual) {
+        camposProtegidos.push('fecha_inicio');
+      }
+
+      if (camposProtegidos.length > 0) {
+        await transaction.rollback();
+        return responderError(
+          res,
+          403,
+          'El coordinador solo puede modificar el vencimiento, los créditos disponibles y la observación.',
+          { campos_bloqueados: camposProtegidos }
+        );
+      }
+    }
+
     const [plan, sede] = await Promise.all([
       PlanesModel.findOne({
         where: { id: Number(req.body.plan_id), activo: 1 },
@@ -1417,8 +1516,6 @@ export const UR_MembresiaMigracionAlumnoPlanesPagos_CTS = async (req, res) => {
 
     const cambiaPlan = Number(membresia.plan_id) !== Number(plan.id);
     const cambiaSede = Number(membresia.sede_id) !== Number(sede.id);
-    const fechaInicioActual = String(membresia.fecha_inicio);
-    const fechaVencimientoActual = String(membresia.fecha_vencimiento);
     const cambiaFechaInicio = fechaInicioActual !== fechaInicio;
     const cambiaFechaVencimiento =
       fechaVencimientoActual !== fechaVencimiento;
@@ -1620,7 +1717,9 @@ export const UR_MembresiaMigracionAlumnoPlanesPagos_CTS = async (req, res) => {
       req,
       alumno,
       membresia,
-      accion: 'ACTUALIZAR_MEMBRESIA_MIGRACION',
+      accion: esCoordinador
+        ? 'AJUSTAR_MEMBRESIA_COORD_SEDE'
+        : 'ACTUALIZAR_MEMBRESIA_MIGRACION',
       valoresAnteriores,
       valoresNuevos: {
         ...payload,

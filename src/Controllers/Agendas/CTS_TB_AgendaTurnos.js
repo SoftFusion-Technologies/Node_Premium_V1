@@ -473,41 +473,152 @@ export const OBRS_AsistenciasRango_CTS = async (req, res) => {
  */
 export const OBRS_HistorialCancelaciones_CTS = async (req, res) => {
   try {
-    const { sede_id, fecha } = req.query;
+    const { sede_id, fecha, vista = 'diaria', mes } = req.query;
 
     if (!sede_id) {
       return res.status(400).json({ message: 'Falta el parámetro sede_id.' });
     }
 
+    if (!['diaria', 'mensual'].includes(String(vista))) {
+      return res.status(400).json({
+        message: 'La vista debe ser diaria o mensual.'
+      });
+    }
+
+    const atributosReserva = [
+      'id',
+      'turno_id',
+      'alumno_id',
+      'origen_reserva',
+      'fecha_reserva',
+      'fecha_cancelacion',
+      'motivo_cancelacion',
+      'observaciones',
+      'cancelacion_tardia'
+    ];
+    const includeBase = [
+      {
+        model: AgendaTurnosModel,
+        as: 'turno',
+        required: true,
+        where: { sede_id },
+        attributes: [
+          'id',
+          'sede_id',
+          'fecha',
+          'hora_inicio',
+          'hora_fin',
+          'nombre_clase'
+        ]
+      },
+      {
+        model: AlumnosModel,
+        as: 'alumno',
+        required: true,
+        attributes: ['id', 'nombre', 'apellido', 'dni']
+      }
+    ];
+
+    if (String(vista) === 'mensual') {
+      const mesConsulta = mes || dayjs().format('YYYY-MM');
+
+      if (!/^\d{4}-\d{2}$/.test(mesConsulta)) {
+        return res.status(400).json({
+          message: 'El mes debe tener formato YYYY-MM.'
+        });
+      }
+
+      const inicioMes = dayjs(`${mesConsulta}-01`);
+
+      if (!inicioMes.isValid()) {
+        return res.status(400).json({ message: 'Mes inválido.' });
+      }
+
+      const fechaDesde = inicioMes.format('YYYY-MM-DD 00:00:00');
+      const fechaHasta = inicioMes
+        .add(1, 'month')
+        .format('YYYY-MM-DD 00:00:00');
+
+      const reservas = await AgendaTurnosReservasModel.findAll({
+        where: {
+          estado: 'cancelada',
+          fecha_cancelacion: {
+            [Op.gte]: fechaDesde,
+            [Op.lt]: fechaHasta
+          }
+        },
+        attributes: atributosReserva,
+        include: includeBase,
+        order: [
+          ['fecha_cancelacion', 'DESC'],
+          ['id', 'DESC']
+        ]
+      });
+
+      const agrupadas = new Map();
+
+      reservas.forEach((reservaModelo) => {
+        const reserva = reservaModelo.toJSON();
+        const alumnoId = Number(reserva.alumno_id);
+        const existente = agrupadas.get(alumnoId) || {
+          alumno: reserva.alumno,
+          total_cancelaciones: 0,
+          cancelaciones_tardias: 0,
+          ultima_cancelacion: null,
+          cancelaciones: []
+        };
+
+        existente.total_cancelaciones += 1;
+        existente.cancelaciones_tardias += Number(
+          reserva.cancelacion_tardia || 0
+        );
+        existente.ultima_cancelacion =
+          existente.ultima_cancelacion || reserva.fecha_cancelacion;
+        existente.cancelaciones.push({
+          id: reserva.id,
+          fecha_cancelacion: reserva.fecha_cancelacion,
+          cancelacion_tardia: Number(reserva.cancelacion_tardia || 0),
+          motivo_cancelacion: reserva.motivo_cancelacion,
+          origen_reserva: reserva.origen_reserva,
+          turno: reserva.turno
+        });
+
+        agrupadas.set(alumnoId, existente);
+      });
+
+      const data = [...agrupadas.values()].sort((a, b) => {
+        if (b.total_cancelaciones !== a.total_cancelaciones) {
+          return b.total_cancelaciones - a.total_cancelaciones;
+        }
+
+        return String(b.ultima_cancelacion || '').localeCompare(
+          String(a.ultima_cancelacion || '')
+        );
+      });
+
+      return res.status(200).json({
+        status: 'success',
+        vista: 'mensual',
+        mes: mesConsulta,
+        resumen: {
+          total_cancelaciones: reservas.length,
+          alumnos_con_cancelaciones: data.length,
+          cancelaciones_tardias: data.reduce(
+            (total, alumno) => total + alumno.cancelaciones_tardias,
+            0
+          )
+        },
+        data
+      });
+    }
+
     const fechaConsulta = fecha || dayjs().format('YYYY-MM-DD');
+    includeBase[0].where.fecha = fechaConsulta;
 
     const reservas = await AgendaTurnosReservasModel.findAll({
       where: { estado: 'cancelada' },
-      attributes: [
-        'id',
-        'turno_id',
-        'alumno_id',
-        'origen_reserva',
-        'fecha_reserva',
-        'fecha_cancelacion',
-        'motivo_cancelacion',
-        'observaciones'
-      ],
-      include: [
-        {
-          model: AgendaTurnosModel,
-          as: 'turno',
-          required: true,
-          where: { sede_id, fecha: fechaConsulta },
-          attributes: ['id', 'sede_id', 'fecha', 'hora_inicio', 'hora_fin', 'nombre_clase']
-        },
-        {
-          model: AlumnosModel,
-          as: 'alumno',
-          required: true,
-          attributes: ['id', 'nombre', 'apellido', 'dni']
-        }
-      ],
+      attributes: atributosReserva,
+      include: includeBase,
       order: [
         [{ model: AgendaTurnosModel, as: 'turno' }, 'hora_inicio', 'ASC'],
         ['fecha_cancelacion', 'DESC'],
@@ -517,11 +628,15 @@ export const OBRS_HistorialCancelaciones_CTS = async (req, res) => {
 
     return res.status(200).json({
       status: 'success',
+      vista: 'diaria',
+      fecha: fechaConsulta,
       data: reservas.map((reserva) => reserva.toJSON())
     });
   } catch (error) {
     console.error('[OBRS_HistorialCancelaciones_CTS]', error);
-    return res.status(500).json({ message: 'Error al obtener el historial de cancelaciones.' });
+    return res.status(500).json({
+      message: 'Error al obtener el historial de cancelaciones.'
+    });
   }
 };
 

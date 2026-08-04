@@ -62,6 +62,13 @@ const ORIGENES_REGISTRO_VALIDOS = ['interno', 'externo', 'importado'];
 // vencida" pedidos por Coordinación / Gerencia Operativa-Comercial).
 const DIAS_INACTIVIDAD_VALIDOS = [5, 15];
 const MESES_CUOTA_VENCIDA_VALIDOS = [1, 3];
+const VENCIMIENTOS_MEMBRESIA_VALIDOS = ['vencida', 'proximos_7', 'proximos_15'];
+const ORDENES_VENCIMIENTO_VALIDOS = [
+  'vencidos_primero',
+  'proximos_primero',
+  'fecha_asc',
+  'fecha_desc'
+];
 
 // Sergio Manrique - 2026/08/01 - "Cliente perdido" definido por el PM como
 // alumno con cuota vencida de al menos 1 mes (mismo criterio que el filtro
@@ -186,6 +193,133 @@ export const construirFiltroAlumnoCuotaVencida = (mesesMinimos = 0) => {
   `);
 };
 
+
+/*
+ * Benjamin Orellana - 2026/08/04 - Fecha de vencimiento comercial del alumno.
+ * Se toma la membresía más reciente que ya fue activada o cerrada por
+ * vencimiento. Las membresías pendientes de pago no regularizan al alumno
+ * hasta que el cobro las convierta en activas.
+ */
+const construirSubconsultaFechaVencimientoMembresia = () => {
+  const queryGenerator = db.getQueryInterface().queryGenerator;
+  const tablaMembresias = queryGenerator.quoteTable(
+    AlumnosMembresiasModel.getTableName()
+  );
+  const aliasPrincipal = queryGenerator.quoteIdentifier(AlumnosModel.name);
+  const aliasMembresia = queryGenerator.quoteIdentifier(
+    'membresia_vencimiento_comercial'
+  );
+  const columnaIdAlumno = queryGenerator.quoteIdentifier('id');
+
+  return `(
+    SELECT ${aliasMembresia}.fecha_vencimiento
+    FROM ${tablaMembresias} AS ${aliasMembresia}
+    WHERE ${aliasMembresia}.alumno_id = ${aliasPrincipal}.${columnaIdAlumno}
+      AND ${aliasMembresia}.estado IN ('activa', 'vencida', 'congelada')
+    ORDER BY ${aliasMembresia}.fecha_inicio DESC, ${aliasMembresia}.id DESC
+    LIMIT 1
+  )`;
+};
+
+const construirFiltroVencimientoMembresia = (tipo) => {
+  const fechaVencimiento = construirSubconsultaFechaVencimientoMembresia();
+
+  switch (tipo) {
+    case 'vencida':
+      return db.literal(`${fechaVencimiento} < CURDATE()`);
+    case 'proximos_7':
+      return db.literal(
+        `${fechaVencimiento} BETWEEN CURDATE() AND DATE_ADD(CURDATE(), INTERVAL 7 DAY)`
+      );
+    case 'proximos_15':
+      return db.literal(
+        `${fechaVencimiento} BETWEEN CURDATE() AND DATE_ADD(CURDATE(), INTERVAL 15 DAY)`
+      );
+    default:
+      return null;
+  }
+};
+
+const construirOrdenVencimientoMembresia = (tipo) => {
+  const fechaVencimiento = construirSubconsultaFechaVencimientoMembresia();
+  const distancia = `ABS(DATEDIFF(${fechaVencimiento}, CURDATE()))`;
+
+  switch (tipo) {
+    case 'vencidos_primero':
+      return [
+        [
+          db.literal(`CASE
+            WHEN ${fechaVencimiento} < CURDATE() THEN 0
+            WHEN ${fechaVencimiento} IS NULL THEN 2
+            ELSE 1
+          END`),
+          'ASC'
+        ],
+        [db.literal(distancia), 'ASC'],
+        ['id', 'DESC']
+      ];
+    case 'proximos_primero':
+      return [
+        [
+          db.literal(`CASE
+            WHEN ${fechaVencimiento} >= CURDATE() THEN 0
+            WHEN ${fechaVencimiento} IS NULL THEN 2
+            ELSE 1
+          END`),
+          'ASC'
+        ],
+        [db.literal(distancia), 'ASC'],
+        ['id', 'DESC']
+      ];
+    case 'fecha_asc':
+      return [
+        [db.literal(`CASE WHEN ${fechaVencimiento} IS NULL THEN 1 ELSE 0 END`), 'ASC'],
+        [db.literal(fechaVencimiento), 'ASC'],
+        ['id', 'DESC']
+      ];
+    case 'fecha_desc':
+      return [
+        [db.literal(`CASE WHEN ${fechaVencimiento} IS NULL THEN 1 ELSE 0 END`), 'ASC'],
+        [db.literal(fechaVencimiento), 'DESC'],
+        ['id', 'DESC']
+      ];
+    default:
+      return null;
+  }
+};
+
+const calcularEstadoVencimientoMembresia = (fechaVencimiento) => {
+  const fecha = String(fechaVencimiento || '').slice(0, 10);
+
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(fecha)) {
+    return {
+      fecha_vencimiento_referencia: null,
+      dias_para_vencer: null,
+      estado_vencimiento: 'sin_vencimiento'
+    };
+  }
+
+  const hoy = obtenerFechaActualDateOnly();
+  const milisegundos =
+    Date.parse(`${fecha}T00:00:00Z`) - Date.parse(`${hoy}T00:00:00Z`);
+  const dias = Math.round(milisegundos / 86400000);
+
+  return {
+    fecha_vencimiento_referencia: fecha,
+    dias_para_vencer: dias,
+    estado_vencimiento:
+      dias < 0
+        ? 'vencida'
+        : dias === 0
+          ? 'vence_hoy'
+          : dias <= 7
+            ? 'proxima_7'
+            : dias <= 15
+              ? 'proxima_15'
+              : 'vigente'
+  };
+};
+
 /*
  * Sergio Manrique - 2026/08/01 - Identifica alumnos con más de `diasMinimos`
  * sin registrar una asistencia real ('asistio'). Reutiliza el mismo criterio
@@ -303,6 +437,44 @@ export const obtenerDiasSeguimientoPorAlumnos = async (alumnoIds) => {
   );
 
   return { asistencias, cuotasVencidas };
+};
+
+
+const obtenerVencimientosComercialesPorAlumnos = async (alumnoIds) => {
+  if (!alumnoIds.length) return new Map();
+
+  const filas = await db.query(
+    `
+      SELECT m.alumno_id, m.fecha_vencimiento
+      FROM alumnos_membresias m
+      WHERE m.alumno_id IN (:alumnoIds)
+        AND m.estado IN ('activa', 'vencida', 'congelada')
+        AND NOT EXISTS (
+          SELECT 1
+          FROM alumnos_membresias posterior
+          WHERE posterior.alumno_id = m.alumno_id
+            AND posterior.estado IN ('activa', 'vencida', 'congelada')
+            AND (
+              posterior.fecha_inicio > m.fecha_inicio
+              OR (
+                posterior.fecha_inicio = m.fecha_inicio
+                AND posterior.id > m.id
+              )
+            )
+        )
+    `,
+    {
+      replacements: { alumnoIds },
+      type: QueryTypes.SELECT
+    }
+  );
+
+  return new Map(
+    filas.map((fila) => [
+      Number(fila.alumno_id),
+      fila.fecha_vencimiento ? String(fila.fecha_vencimiento).slice(0, 10) : null
+    ])
+  );
 };
 
 const normalizarTexto = (value) => {
@@ -1360,6 +1532,8 @@ export const OBR_Alumnos_CTS = async (req, res) => {
       dias_inactividad,
       meses_cuota_vencida,
       cliente_perdido,
+      vencimiento,
+      orden_vencimiento,
       page = 1,
       limit = 20,
       orderBy = 'created_at',
@@ -1395,17 +1569,26 @@ export const OBR_Alumnos_CTS = async (req, res) => {
         construirFiltroAlumnoMoroso()
       ]
     };
+    const whereCuotasVencidas = {
+      ...whereEstadisticas,
+      [Op.and]: [
+        ...(whereEstadisticas[Op.and] || []),
+        construirFiltroVencimientoMembresia('vencida')
+      ]
+    };
 
     const [
       totalSede,
       activosSede,
       anamnesisPendientesSede,
-      morososSede
+      morososSede,
+      cuotasVencidasSede
     ] = await Promise.all([
       AlumnosModel.count({ where: whereEstadisticas }),
       AlumnosModel.count({ where: { ...whereEstadisticas, estado: 'activo' } }),
       AlumnosModel.count({ where: whereAnamnesisPendiente }),
-      AlumnosModel.count({ where: whereMorosos })
+      AlumnosModel.count({ where: whereMorosos }),
+      AlumnosModel.count({ where: whereCuotasVencidas })
     ]);
 
     if (estado) {
@@ -1518,6 +1701,32 @@ export const OBR_Alumnos_CTS = async (req, res) => {
       ];
     }
 
+    if (vencimiento) {
+      if (!VENCIMIENTOS_MEMBRESIA_VALIDOS.includes(vencimiento)) {
+        return res.status(400).json({
+          ok: false,
+          message: 'Filtro de vencimiento inválido.',
+          valores_validos: VENCIMIENTOS_MEMBRESIA_VALIDOS
+        });
+      }
+
+      where[Op.and] = [
+        ...(where[Op.and] || []),
+        construirFiltroVencimientoMembresia(vencimiento)
+      ];
+    }
+
+    if (
+      orden_vencimiento &&
+      !ORDENES_VENCIMIENTO_VALIDOS.includes(orden_vencimiento)
+    ) {
+      return res.status(400).json({
+        ok: false,
+        message: 'Orden de vencimiento inválido.',
+        valores_validos: ORDENES_VENCIMIENTO_VALIDOS
+      });
+    }
+
     const pageNumber = Math.max(Number(page) || 1, 1);
     const limitNumber = Math.min(Math.max(Number(limit) || 20, 1), 200);
     const offset = (pageNumber - 1) * limitNumber;
@@ -1540,11 +1749,15 @@ export const OBR_Alumnos_CTS = async (req, res) => {
     const safeOrderDirection =
       String(orderDirection).toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
 
+    const ordenVencimiento = construirOrdenVencimientoMembresia(
+      orden_vencimiento
+    );
+
     const { rows, count } = await AlumnosModel.findAndCountAll({
       where,
       limit: limitNumber,
       offset,
-      order: [[safeOrderBy, safeOrderDirection]]
+      order: ordenVencimiento || [[safeOrderBy, safeOrderDirection]]
     });
 
     // Sergio Manrique - 2026/08/02 - Sub-etiqueta de seguimiento comercial
@@ -1552,7 +1765,11 @@ export const OBR_Alumnos_CTS = async (req, res) => {
     // para que el equipo detecte a simple vista quién necesita seguimiento
     // sin tener que entrar a Recaptaciones. Misma función que usa ese módulo.
     const alumnoIds = rows.map((alumno) => alumno.id);
-    const { asistencias, cuotasVencidas } = await obtenerDiasSeguimientoPorAlumnos(alumnoIds);
+    const [seguimiento, vencimientosComerciales] = await Promise.all([
+      obtenerDiasSeguimientoPorAlumnos(alumnoIds),
+      obtenerVencimientosComercialesPorAlumnos(alumnoIds)
+    ]);
+    const { asistencias, cuotasVencidas } = seguimiento;
 
     const data = await Promise.all(
       rows.map(async (alumno) => {
@@ -1568,8 +1785,13 @@ export const OBR_Alumnos_CTS = async (req, res) => {
         const diasInactividadRelevante =
           diasInactividad !== null && diasInactividad >= 5 ? diasInactividad : null;
 
+        const vencimientoMembresia = calcularEstadoVencimientoMembresia(
+          vencimientosComerciales.get(Number(alumno.id))
+        );
+
         return {
           ...base,
+          ...vencimientoMembresia,
           dias_inactividad: diasInactividad,
           dias_cuota_vencida: diasCuotaVencida,
           etiqueta_seguimiento: calcularEtiquetaSeguimiento(
@@ -1588,7 +1810,8 @@ export const OBR_Alumnos_CTS = async (req, res) => {
         total: totalSede,
         activos: activosSede,
         cant_anamnesis_permanente: anamnesisPendientesSede,
-        cant_morosos: morososSede
+        cant_morosos: morososSede,
+        cant_cuotas_vencidas: cuotasVencidasSede
       },
       total: count,
       page: pageNumber,

@@ -314,6 +314,51 @@ const calcularResumen = ({ sesion, movimientos }) => {
       ? null
       : redondear(sesion.monto_contado);
 
+  const mediosBase = Array.from(porMedio.values());
+  let medioEfectivo =
+    mediosBase.find((item) => item.codigo === 'EFECTIVO') ||
+    mediosBase.find((item) => item.tipo === 'efectivo');
+
+  // El monto de apertura representa dinero físico, aunque todavía no existan
+  // movimientos en efectivo durante la sesión. Se agrega el medio para que el
+  // desglose y el total disponible no pierdan ese saldo inicial.
+  if (!medioEfectivo) {
+    medioEfectivo = {
+      codigo: 'EFECTIVO',
+      nombre: 'Efectivo',
+      tipo: 'efectivo',
+      ingresos: 0,
+      egresos: 0,
+      neto: 0
+    };
+    mediosBase.push(medioEfectivo);
+  }
+
+  const codigoEfectivo = medioEfectivo.codigo;
+  const medios = mediosBase
+    .map((item) => {
+      const ingresosMedio = redondear(item.ingresos);
+      const egresosMedio = redondear(item.egresos);
+      const netoMovimientos = redondear(item.neto);
+      const saldoInicial = item.codigo === codigoEfectivo ? montoInicial : 0;
+
+      return {
+        ...item,
+        ingresos: ingresosMedio,
+        egresos: egresosMedio,
+        // Se conserva `neto` para no romper consumidores existentes.
+        neto: netoMovimientos,
+        neto_movimientos: netoMovimientos,
+        saldo_inicial: saldoInicial,
+        disponible: redondear(saldoInicial + netoMovimientos)
+      };
+    })
+    .sort((a, b) => b.disponible - a.disponible);
+
+  const totalDisponible = redondear(
+    medios.reduce((total, item) => total + item.disponible, 0)
+  );
+
   return {
     monto_inicial: montoInicial,
     ingresos: redondear(ingresos),
@@ -326,14 +371,8 @@ const calcularResumen = ({ sesion, movimientos }) => {
     diferencia:
       montoContado === null ? null : redondear(montoContado - efectivoEsperado),
     total_operativo: redondear(ingresos - egresos),
-    medios: Array.from(porMedio.values())
-      .map((item) => ({
-        ...item,
-        ingresos: redondear(item.ingresos),
-        egresos: redondear(item.egresos),
-        neto: redondear(item.neto)
-      }))
-      .sort((a, b) => b.neto - a.neto)
+    total_disponible: totalDisponible,
+    medios
   };
 };
 

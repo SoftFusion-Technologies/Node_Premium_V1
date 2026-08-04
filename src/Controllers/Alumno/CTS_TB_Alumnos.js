@@ -3578,61 +3578,83 @@ export const UR_RestablecerPasswordAccesoAlumno_CTS = async (req, res) => {
     }
 
     const alumno = result.alumno;
-    const loginRecord = await AlumnosLoginModel.findOne({
-      where: { alumno_id: Number(alumno.id) },
+    const alumnoId = Number(alumno.id);
+    const nuevoHash = await bcrypt.hash(String(passwordNueva), 10);
+
+    let loginRecord = await AlumnosLoginModel.findOne({
+      where: { alumno_id: alumnoId },
       transaction,
       lock: transaction.LOCK.UPDATE
     });
 
-    if (!loginRecord) {
-      await transaction.rollback();
+    const accesoCreado = !loginRecord;
+    const valoresAnteriores = loginRecord
+      ? {
+          estado: loginRecord.estado,
+          requiere_cambio_password:
+            Number(loginRecord.requiere_cambio_password || 0) === 1,
+          password_cambiado_at: loginRecord.password_cambiado_at || null,
+          intentos_fallidos: Number(loginRecord.intentos_fallidos || 0),
+          bloqueado_hasta: loginRecord.bloqueado_hasta || null
+        }
+      : null;
 
-      return res.status(404).json({
-        ok: false,
-        message: 'El alumno no tiene acceso al portal configurado.'
-      });
+    if (accesoCreado) {
+      loginRecord = await AlumnosLoginModel.create(
+        {
+          alumno_id: alumnoId,
+          password_hash: nuevoHash,
+          requiere_cambio_password: 1,
+          password_cambiado_at: null,
+          estado: 'activo',
+          motivo_bloqueo: null,
+          intentos_fallidos: 0,
+          bloqueado_hasta: null,
+          reset_token_hash: null,
+          reset_token_expira: null,
+          updated_at: new Date()
+        },
+        { transaction }
+      );
+    } else {
+      const estadoNuevo =
+        loginRecord.estado === 'suspendido' ? 'suspendido' : 'activo';
+
+      await loginRecord.update(
+        {
+          password_hash: nuevoHash,
+          requiere_cambio_password: 1,
+          password_cambiado_at: null,
+          estado: estadoNuevo,
+          motivo_bloqueo:
+            loginRecord.estado === 'suspendido'
+              ? loginRecord.motivo_bloqueo
+              : null,
+          intentos_fallidos: 0,
+          bloqueado_hasta: null,
+          reset_token_hash: null,
+          reset_token_expira: null,
+          updated_at: new Date()
+        },
+        { transaction }
+      );
     }
 
-    const valoresAnteriores = {
-      estado: loginRecord.estado,
-      requiere_cambio_password:
-        Number(loginRecord.requiere_cambio_password || 0) === 1,
-      password_cambiado_at: loginRecord.password_cambiado_at || null,
-      intentos_fallidos: Number(loginRecord.intentos_fallidos || 0),
-      bloqueado_hasta: loginRecord.bloqueado_hasta || null
-    };
-
-    const nuevoHash = await bcrypt.hash(String(passwordNueva), 10);
-    const estadoNuevo =
-      loginRecord.estado === 'suspendido' ? 'suspendido' : 'activo';
-
-    await loginRecord.update(
-      {
-        password_hash: nuevoHash,
-        requiere_cambio_password: 1,
-        password_cambiado_at: null,
-        estado: estadoNuevo,
-        motivo_bloqueo:
-          loginRecord.estado === 'suspendido'
-            ? loginRecord.motivo_bloqueo
-            : null,
-        intentos_fallidos: 0,
-        bloqueado_hasta: null,
-        reset_token_hash: null,
-        reset_token_expira: null,
-        updated_at: new Date()
-      },
-      { transaction }
-    );
+    const estadoNuevo = loginRecord.estado;
 
     await registrarAuditoriaAccesoAlumno({
       req,
       alumno,
       entidadId: loginRecord.id,
-      accion: 'RESTABLECER_PASSWORD',
-      descripcion: `Se estableció una contraseña temporal para ${alumno.nombre} ${alumno.apellido}.`,
+      accion: accesoCreado
+        ? 'HABILITAR_ACCESO_PORTAL'
+        : 'RESTABLECER_PASSWORD',
+      descripcion: accesoCreado
+        ? `Se habilitó el acceso al portal para ${alumno.nombre} ${alumno.apellido}.`
+        : `Se estableció una contraseña temporal para ${alumno.nombre} ${alumno.apellido}.`,
       valoresAnteriores,
       valoresNuevos: {
+        acceso_creado: accesoCreado,
         estado: estadoNuevo,
         requiere_cambio_password: true,
         password_temporal_configurada: true,
@@ -3646,8 +3668,9 @@ export const UR_RestablecerPasswordAccesoAlumno_CTS = async (req, res) => {
 
     return res.status(200).json({
       ok: true,
-      message:
-        estadoNuevo === 'suspendido'
+      message: accesoCreado
+        ? 'Acceso al portal habilitado. El alumno deberá cambiar la contraseña temporal al ingresar.'
+        : estadoNuevo === 'suspendido'
           ? 'Contraseña actualizada. El acceso continúa suspendido.'
           : 'Contraseña temporal actualizada. El alumno deberá cambiarla al ingresar.',
       data: construirEstadoAccesoAlumno(loginRecord)

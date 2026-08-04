@@ -14,6 +14,8 @@ import PlanesPreciosModel from '../../Models/Plan/MD_TB_PlanesPrecios.js';
 import SedesModel from '../../Models/Sede/MD_TB_Sedes.js';
 import PagosMetodosRecurrentesModel from '../../Models/Pago/MD_TB_PagosMetodosRecurrentes.js';
 import SistemaAuditoriaLogsModel from '../../Models/Sistema/MD_TB_SistemaAuditoriaLogs.js';
+import { copiarRestriccionesPlan } from '../../Services/Agenda/agendaRestricciones.service.js';
+import { imputarReservasPendientesMembresia } from '../../Services/Agenda/reservasPendientes.service.js';
 
 const responderError = (res, status, message, data = null) => {
   return res.status(status).json({
@@ -1116,6 +1118,7 @@ export const CR_GenerarMembresiaAlumnoPlanesPagos_CTS = async (req, res) => {
         clases_usadas: 0,
         clases_disponibles: clasesIncluidas,
         origen_alta: 'administracion',
+        agenda_restricciones: await copiarRestriccionesPlan({ planId: plan.id, transaction }),
         observaciones: observacionMembresia
       },
       { transaction }
@@ -1312,10 +1315,15 @@ export const CR_MembresiaMigracionAlumnoPlanesPagos_CTS = async (req, res) => {
       {
         alumno_id: alumnoId,
         ...payload,
+        agenda_restricciones: await copiarRestriccionesPlan({ planId: plan.id, transaction }),
         observaciones
       },
       { transaction }
     );
+
+    if (payload.estado === 'activa') {
+      await imputarReservasPendientesMembresia({ membresia, transaction });
+    }
 
     const hoy = obtenerFechaArgentinaDateOnly();
     const cubreHoy = fechaInicio <= hoy && fechaVencimiento >= hoy;
@@ -2564,6 +2572,10 @@ export const UR_ReactivarMembresiaAlumnoPlanesPagos_CTS = async (req, res) => {
       { transaction }
     );
 
+    if (nuevoEstadoMembresia === 'activa') {
+      await imputarReservasPendientesMembresia({ membresia, transaction });
+    }
+
     let periodosFuturosDesplazados = 0;
 
     if (diasCongelados > 0) {
@@ -3037,6 +3049,7 @@ export const CR_ReingresarAlumnoPlanesPagos_CTS = async (req, res) => {
         clases_incluidas: clasesIncluidas,
         clases_usadas: 0,
         clases_disponibles: clasesIncluidas,
+        agenda_restricciones: await copiarRestriccionesPlan({ planId: plan.id, transaction }),
         observaciones: observacionReingreso
       },
       { transaction }

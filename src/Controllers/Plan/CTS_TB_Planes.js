@@ -7,6 +7,10 @@ import db from '../../DataBase/db.js';
 import PlanesModel from '../../Models/Plan/MD_TB_Planes.js';
 // Benjamin Orellana - 2026/05/30 - Importa precios de planes para eliminarlos junto al plan.
 import PlanesPreciosModel from '../../Models/Plan/MD_TB_PlanesPrecios.js';
+import {
+  normalizarRestriccionesAgenda,
+  validarPayloadRestriccionesAgenda
+} from '../../Services/Agenda/agendaRestricciones.service.js';
 const PERIODOS_VALIDOS = ['mensual', 'trimestral', 'semestral', 'anual'];
 
 const CAMPOS_ORDEN_VALIDOS = [
@@ -147,6 +151,8 @@ const validarPayloadPlan = (body, esCreacion = true) => {
   if (body.activo !== undefined && !esTinyintValido(body.activo)) {
     errores.push('El campo activo debe ser 0 o 1.');
   }
+
+  errores.push(...validarPayloadRestriccionesAgenda(body.agenda_restricciones));
 
   return errores;
 };
@@ -733,6 +739,7 @@ export const CR_Planes_CTS = async (req, res) => {
       descripcion,
       permite_reserva,
       permite_acumulacion,
+      agenda_restricciones,
       activo
     } = req.body;
 
@@ -770,6 +777,7 @@ export const CR_Planes_CTS = async (req, res) => {
           permite_reserva !== undefined ? Number(permite_reserva) : 1,
         permite_acumulacion:
           permite_acumulacion !== undefined ? Number(permite_acumulacion) : 0,
+        agenda_restricciones: normalizarRestriccionesAgenda(agenda_restricciones),
         activo: activo !== undefined ? Number(activo) : 1
       },
       { transaction }
@@ -883,6 +891,12 @@ export const UR_Planes_CTS = async (req, res) => {
     if (req.body.permite_acumulacion !== undefined) {
       datosActualizar.permite_acumulacion = Number(
         req.body.permite_acumulacion
+      );
+    }
+
+    if (req.body.agenda_restricciones !== undefined) {
+      datosActualizar.agenda_restricciones = normalizarRestriccionesAgenda(
+        req.body.agenda_restricciones
       );
     }
 

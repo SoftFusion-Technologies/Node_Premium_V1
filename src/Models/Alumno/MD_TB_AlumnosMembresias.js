@@ -129,6 +129,12 @@ const AlumnosMembresiasModel = db.define(
       defaultValue: 'administracion'
     },
 
+    agenda_restricciones: {
+      type: DataTypes.JSON,
+      allowNull: true,
+      defaultValue: null
+    },
+
     observaciones: {
       type: DataTypes.TEXT,
       allowNull: true

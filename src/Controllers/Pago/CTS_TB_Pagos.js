@@ -13,6 +13,7 @@ import AlumnosModel from '../../Models/Alumno/MD_TB_Alumnos.js';
 import AlumnosMembresiasModel from '../../Models/Alumno/MD_TB_AlumnosMembresias.js';
 import SedesModel from '../../Models/Sede/MD_TB_Sedes.js';
 import UsuariosModel from '../../Models/Usuario/MD_TB_Usuarios.js';
+import { imputarReservasPendientesMembresia } from '../../Services/Agenda/reservasPendientes.service.js';
 
 // Benjamin Orellana - 2026/05/30 - Modelo de movimientos financieros para registrar ingresos por pagos confirmados.
 import FinanzasMovimientosModel from '../../Models/Finanzas/MD_TB_FinanzasMovimientos.js';
@@ -694,6 +695,8 @@ const sincronizarAlumnoMembresiaPorPagoConfirmado = async (
       },
       { transaction }
     );
+
+    await imputarReservasPendientesMembresia({ membresia, transaction });
 
     await alumno.update(
       {
@@ -1600,6 +1603,8 @@ const sincronizarMembresiaPorPagoConfirmado = async ({
       },
       { transaction }
     );
+
+    await imputarReservasPendientesMembresia({ membresia, transaction });
   }
 
   const alumno = await AlumnosModel.findByPk(mensualidad.alumno_id, {

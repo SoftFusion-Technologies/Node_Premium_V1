@@ -18,6 +18,8 @@ import PagosMediosPagoModel from '../../Models/Pago/MD_TB_PagosMediosPago.js';
 
 import SedesModel from '../../Models/Sede/MD_TB_Sedes.js';
 import FinanzasMovimientosModel from '../../Models/Finanzas/MD_TB_FinanzasMovimientos.js';
+import { copiarRestriccionesPlan } from '../../Services/Agenda/agendaRestricciones.service.js';
+import { imputarReservasPendientesMembresia } from '../../Services/Agenda/reservasPendientes.service.js';
 
 const ESTADOS_MEMBRESIA_OPERATIVOS = ['pendiente_pago', 'activa', 'vencida'];
 const ESTADOS_MENSUALIDAD_COBRABLES = ['pendiente', 'parcial', 'vencida'];
@@ -273,6 +275,7 @@ const crearMembresiaDesdePlan = async ({
       clases_usadas: 0,
       clases_disponibles: clasesIncluidas,
       origen_alta: 'administracion',
+      agenda_restricciones: await copiarRestriccionesPlan({ planId: plan.id, transaction }),
       observaciones: observaciones || null
     },
     { transaction }
@@ -492,6 +495,8 @@ const sincronizarEstadosPostCobro = async ({
       },
       { transaction }
     );
+
+    await imputarReservasPendientesMembresia({ membresia, transaction });
 
     await alumno.update(
       {

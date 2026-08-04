@@ -78,6 +78,12 @@ const PlanesModel = db.define(
       defaultValue: 0
     },
 
+    agenda_restricciones: {
+      type: DataTypes.JSON,
+      allowNull: true,
+      defaultValue: null
+    },
+
     activo: {
       type: DataTypes.TINYINT,
       allowNull: false,

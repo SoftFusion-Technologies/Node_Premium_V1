@@ -25,6 +25,8 @@ import ProductosStockMovimientosModel from "../../Models/Catalogo/MD_TB_Producto
 import ProductosModel from "../../Models/Catalogo/MD_TB_Productos.js";
 import SistemaAuditoriaLogsModel from "../../Models/Sistema/MD_TB_SistemaAuditoriaLogs.js";
 import { normalizarCicloMembresiasAlumno } from "../Alumno/membresiaCiclo.service.js";
+import { copiarRestriccionesPlan } from "../Agenda/agendaRestricciones.service.js";
+import { imputarReservasPendientesMembresia } from "../Agenda/reservasPendientes.service.js";
 
 const TIPOS_CONCEPTO = ["producto", "servicio", "plan"];
 const TIPOS_CLIENTE = ["alumno", "empleado", "sin_cliente"];
@@ -681,10 +683,18 @@ const crearMembresiaPlanMigracionCobrada = async ({
       clases_usadas: configuracion.clases_usadas,
       clases_disponibles: configuracion.clases_disponibles,
       origen_alta: "migracion",
+      agenda_restricciones: await copiarRestriccionesPlan({
+        planId: linea.referencia_id,
+        transaction,
+      }),
       observaciones: observacionesMembresia,
     },
     { transaction },
   );
+
+  if (confirmado) {
+    await imputarReservasPendientesMembresia({ membresia, transaction });
+  }
 
   const fechaBase = new Date(`${configuracion.fecha_inicio}T00:00:00Z`);
   const mensualidad = await PagosMensualidadesModel.create(
@@ -930,6 +940,10 @@ const crearMembresiaPlan = async ({
       clases_usadas: 0,
       clases_disponibles: clases,
       origen_alta: "administracion",
+      agenda_restricciones: await copiarRestriccionesPlan({
+        planId: linea.referencia_id,
+        transaction,
+      }),
       observaciones: cambiarPlanAhora
         ? `Generada por cobro #${cobroId} | NUEVO_CICLO_CAMBIO_PLAN desde membresía #${membresiaVigente.id}`
         : renovarAhoraPorCuposAgotados
@@ -938,6 +952,10 @@ const crearMembresiaPlan = async ({
     },
     { transaction },
   );
+
+  if (confirmado) {
+    await imputarReservasPendientesMembresia({ membresia, transaction });
+  }
 
   const fechaBase = new Date(`${fechaInicio}T00:00:00Z`);
   const mensualidad = await PagosMensualidadesModel.create(
@@ -1572,6 +1590,8 @@ const aplicarPlanPendiente = async ({ detalle, usuarioId, transaction }) => {
     { estado: "activa", updated_at: new Date() },
     { transaction },
   );
+  await imputarReservasPendientesMembresia({ membresia, transaction });
+
   const montoTotal = Number(mensualidad.monto_total || 0);
   const montoPagado = redondear(
     Math.min(Number(pago.monto || 0), montoTotal),

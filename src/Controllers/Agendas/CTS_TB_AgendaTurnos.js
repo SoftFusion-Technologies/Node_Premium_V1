@@ -26,6 +26,7 @@ import SedesHorariosModel           from '../../Models/Sede/MD_TB_SedesHorarios.
 import UsuariosModel                from '../../Models/Usuario/MD_TB_Usuarios.js';
 import AlumnosModel                 from '../../Models/Alumno/MD_TB_Alumnos.js';
 import db                           from '../../DataBase/db.js';
+import { validarTurnoParaMembresia } from '../../Services/Agenda/agendaRestricciones.service.js';
 import {
   ESTADOS_RESERVA_QUE_OCUPAN_CUPO,
   obtenerMinutosCancelacion,
@@ -1306,91 +1307,108 @@ export const ER_Turno_CTS = async (req, res) => {
  */
 export const OBRS_TurnosAlumno_CTS = async (req, res) => {
   try {
-    const alumno_id = req.alumno.id;
-    const sede_id = req.alumno.sede_id;
+    const alumnoId = Number(req.alumno.id);
+    const alumno = await AlumnosModel.findByPk(alumnoId, {
+      attributes: ['id', 'sede_id', 'estado']
+    });
+    const sedeId = Number(alumno?.sede_id || req.alumno.sede_id || 0);
 
-    if (!sede_id) {
-      return res
-        .status(400)
-        .json({
-          message: 'No tenés una sede asignada. Consultá con administración.'
-        });
+    if (!sedeId) {
+      return res.status(400).json({
+        message: 'No tenés una sede asignada. Consultá con administración.'
+      });
     }
 
     const { fecha_desde, fecha_hasta } = req.query;
-
-    // La fecha y hora de "ahora" se calculan con el reloj del servidor (nunca
-    // con el del dispositivo del alumno). El piso de fecha nunca puede ser
-    // anterior a hoy, sin importar qué fecha_desde mande el cliente.
     const hoyServidor = dayjs().format('YYYY-MM-DD');
     const horaServidor = dayjs().format('HH:mm:ss');
     const piso =
       fecha_desde && dayjs(fecha_desde).isAfter(hoyServidor)
         ? fecha_desde
         : hoyServidor;
+    const esPruebaInicial = String(alumno?.estado || '').toLowerCase() === 'prueba_clase_inicial';
 
-    // Obtener el vencimiento de la membresía activa del alumno para limitar el
-    // rango. Si tiene varias membresías activas vigentes (ej. renovó antes de
-    // vencer), se usa la de vencimiento más lejano para no ocultarle turnos
-    // que sí podrá tomar con la membresía siguiente.
-    const membresia = await AlumnosMembresiasModel.findOne({
-      where: {
-        alumno_id,
-        plan_id: { [Op.ne]: null },
-        estado: 'activa',
-        fecha_inicio: { [Op.lte]: hoyServidor },
-        fecha_vencimiento: { [Op.gt]: hoyServidor },
-        clases_disponibles: { [Op.gt]: 0 }
-      },
-      attributes: ['fecha_vencimiento'],
-      order: [['fecha_vencimiento', 'DESC']]
-    });
+    if (esPruebaInicial) {
+      const pruebaYaUtilizada = await AgendaTurnosReservasModel.findOne({
+        where: {
+          alumno_id: alumnoId,
+          tipo_reserva: 'prueba_inicial',
+          [Op.or]: [
+            { estado: { [Op.in]: ESTADOS_RESERVA_QUE_OCUPAN_CUPO } },
+            { estado: 'cancelada', cancelacion_tardia: 1 }
+          ]
+        },
+        attributes: ['id']
+      });
 
-    const fechaVencimiento = membresia?.fecha_vencimiento ?? null;
+      if (pruebaYaUtilizada) {
+        return res.status(200).json({
+          turnos: [],
+          fecha_vencimiento: null,
+          elegible: false,
+          tipo_reserva: 'prueba_inicial',
+          motivo_no_elegible: 'La clase de prueba inicial ya fue reservada o utilizada.'
+        });
+      }
+    }
 
-    // Sin una membresía actual, activa, asociada a un plan y con créditos,
-    // no se ofrecen turnos inscribibles. La validación transaccional de la
-    // reserva sigue siendo la autoridad final, pero este corte evita una UX
-    // engañosa en el portal del alumno.
-    if (!membresia) {
+    const membresias = esPruebaInicial
+      ? []
+      : await AlumnosMembresiasModel.findAll({
+          where: {
+            alumno_id: alumnoId,
+            plan_id: { [Op.ne]: null },
+            estado: 'activa',
+            fecha_vencimiento: { [Op.gte]: hoyServidor },
+            clases_disponibles: { [Op.gt]: 0 }
+          },
+          order: [['fecha_inicio', 'ASC'], ['id', 'ASC']]
+        });
+
+    if (!esPruebaInicial && !membresias.length) {
       return res.status(200).json({
         turnos: [],
         fecha_vencimiento: null,
         elegible: false,
+        tipo_reserva: 'normal',
         motivo_no_elegible: 'No tenés una membresía vigente con plan y créditos disponibles.'
       });
     }
 
-    // El techo es el mínimo entre fecha_hasta pedida y fecha_vencimiento
-    let techo = fecha_hasta ?? null;
-    if (fechaVencimiento) {
-      techo =
-        techo && dayjs(techo).isBefore(fechaVencimiento)
-          ? techo
-          : fechaVencimiento;
+    const fechaVencimiento = membresias.length
+      ? membresias.reduce(
+          (maximo, item) =>
+            !maximo || dayjs(item.fecha_vencimiento).isAfter(maximo)
+              ? item.fecha_vencimiento
+              : maximo,
+          null
+        )
+      : null;
+
+    let techo = fecha_hasta || null;
+    if (!esPruebaInicial && fechaVencimiento) {
+      techo = techo && dayjs(techo).isBefore(fechaVencimiento)
+        ? techo
+        : fechaVencimiento;
     }
 
     const condicionesFecha = [{ fecha: { [Op.gte]: piso } }];
     if (techo) condicionesFecha.push({ fecha: { [Op.lte]: techo } });
 
-    const where = {
-      sede_id,
-      estado: { [Op.in]: ['disponible', 'completo'] },
-      [Op.and]: [
-        ...condicionesFecha,
-        {
-          // Excluye las clases de hoy cuyo horario ya pasó. Las de fechas
-          // futuras no se ven afectadas por esta condición.
-          [Op.or]: [
-            { fecha: { [Op.gt]: hoyServidor } },
-            { fecha: hoyServidor, hora_inicio: { [Op.gte]: horaServidor } }
-          ]
-        }
-      ]
-    };
-
-    const turnos = await AgendaTurnosModel.findAll({
-      where,
+    const turnosEncontrados = await AgendaTurnosModel.findAll({
+      where: {
+        sede_id: sedeId,
+        estado: { [Op.in]: ['disponible', 'completo'] },
+        [Op.and]: [
+          ...condicionesFecha,
+          {
+            [Op.or]: [
+              { fecha: { [Op.gt]: hoyServidor } },
+              { fecha: hoyServidor, hora_inicio: { [Op.gte]: horaServidor } }
+            ]
+          }
+        ]
+      },
       include: [
         { model: SedesModel, as: 'sede', attributes: ['id', 'nombre'] },
         {
@@ -1399,21 +1417,41 @@ export const OBRS_TurnosAlumno_CTS = async (req, res) => {
           attributes: ['id', 'nombre', 'apellido']
         }
       ],
-      order: [
-        ['fecha', 'ASC'],
-        ['hora_inicio', 'ASC']
-      ]
+      order: [['fecha', 'ASC'], ['hora_inicio', 'ASC']]
     });
 
-    // Incluir fecha_vencimiento para que el frontend pueda limitar la navegación
-    return res
-      .status(200)
-      .json({
-        turnos,
-        fecha_vencimiento: fechaVencimiento,
-        elegible: true,
-        motivo_no_elegible: null
-      });
+    const turnos = [];
+    for (const turno of turnosEncontrados) {
+      if (esPruebaInicial) {
+        turnos.push(turno);
+        continue;
+      }
+
+      const candidatas = membresias.filter(
+        (membresia) =>
+          String(membresia.fecha_inicio) <= String(turno.fecha) &&
+          String(membresia.fecha_vencimiento) >= String(turno.fecha)
+      );
+
+      let permitido = false;
+      for (const membresia of candidatas) {
+        const validacion = await validarTurnoParaMembresia({ membresia, turno });
+        if (validacion.permitido) {
+          permitido = true;
+          break;
+        }
+      }
+
+      if (permitido) turnos.push(turno);
+    }
+
+    return res.status(200).json({
+      turnos,
+      fecha_vencimiento: fechaVencimiento,
+      elegible: true,
+      tipo_reserva: esPruebaInicial ? 'prueba_inicial' : 'normal',
+      motivo_no_elegible: null
+    });
   } catch (error) {
     console.error('[OBRS_TurnosAlumno_CTS]', error);
     return res.status(500).json({ message: 'Error al obtener turnos.' });

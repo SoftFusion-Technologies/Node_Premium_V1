@@ -9,6 +9,8 @@ import AlumnosMembresiasModel from '../../Models/Alumno/MD_TB_AlumnosMembresias.
 import AlumnosModel from '../../Models/Alumno/MD_TB_Alumnos.js';
 import PlanesModel from '../../Models/Plan/MD_TB_Planes.js';
 import SedesModel from '../../Models/Sede/MD_TB_Sedes.js';
+import { copiarRestriccionesPlan } from '../../Services/Agenda/agendaRestricciones.service.js';
+import { imputarReservasPendientesMembresia } from '../../Services/Agenda/reservasPendientes.service.js';
 
 const ESTADOS_MEMBRESIA_VALIDOS = [
   'pendiente_pago',
@@ -749,6 +751,7 @@ export const CR_AlumnosMembresias_CTS = async (req, res) => {
         clases_usadas: clasesUsadasNormalizadas,
         clases_disponibles: clasesDisponiblesNormalizadas,
         origen_alta: origen_alta || 'administracion',
+        agenda_restricciones: await copiarRestriccionesPlan({ planId: plan_id, transaction }),
         observaciones:
           observaciones !== undefined && observaciones !== null
             ? String(observaciones).trim()
@@ -756,6 +759,10 @@ export const CR_AlumnosMembresias_CTS = async (req, res) => {
       },
       { transaction }
     );
+
+    if (nuevaMembresia.estado === 'activa') {
+      await imputarReservasPendientesMembresia({ membresia: nuevaMembresia, transaction });
+    }
 
     await transaction.commit();
 
@@ -841,6 +848,10 @@ export const UR_AlumnosMembresias_CTS = async (req, res) => {
       }
 
       datosActualizar.plan_id = Number(req.body.plan_id);
+      datosActualizar.agenda_restricciones = await copiarRestriccionesPlan({
+        planId: req.body.plan_id,
+        transaction
+      });
     }
 
     if (req.body.sede_id !== undefined) {
@@ -966,6 +977,10 @@ export const UR_AlumnosMembresias_CTS = async (req, res) => {
 
     await membresia.update(datosActualizar, { transaction });
 
+    if (membresia.estado === 'activa') {
+      await imputarReservasPendientesMembresia({ membresia, transaction });
+    }
+
     await transaction.commit();
 
     const membresiaActualizada = await AlumnosMembresiasModel.findByPk(id, {
@@ -1027,6 +1042,10 @@ export const UR_EstadoMembresia_CTS = async (req, res) => {
       },
       { transaction }
     );
+
+    if (estado === 'activa') {
+      await imputarReservasPendientesMembresia({ membresia, transaction });
+    }
 
     await transaction.commit();
 
@@ -1148,6 +1167,10 @@ export const UR_ReactivarMembresia_CTS = async (req, res) => {
       },
       { transaction }
     );
+
+    if (estadoDestino === 'activa') {
+      await imputarReservasPendientesMembresia({ membresia, transaction });
+    }
 
     await transaction.commit();
 

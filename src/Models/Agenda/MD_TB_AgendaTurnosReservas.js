@@ -59,6 +59,47 @@ const AgendaTurnosReservasModel = db.define(
       }
     },
 
+    tipo_reserva: {
+      type: DataTypes.ENUM('normal', 'pendiente_credito', 'prueba_inicial'),
+      allowNull: false,
+      defaultValue: 'normal'
+    },
+
+    estado_credito: {
+      type: DataTypes.ENUM('consumido', 'pendiente', 'no_aplica', 'devuelto'),
+      allowNull: false,
+      defaultValue: 'consumido'
+    },
+
+    cancelacion_tardia: {
+      type: DataTypes.TINYINT,
+      allowNull: false,
+      defaultValue: 0
+    },
+
+    fecha_imputacion: {
+      type: DataTypes.DATE,
+      allowNull: true
+    },
+
+    creado_por_usuario_id: {
+      type: DataTypes.BIGINT.UNSIGNED,
+      allowNull: true,
+      references: {
+        model: 'usuarios_usuarios',
+        key: 'id'
+      }
+    },
+
+    cancelado_por_usuario_id: {
+      type: DataTypes.BIGINT.UNSIGNED,
+      allowNull: true,
+      references: {
+        model: 'usuarios_usuarios',
+        key: 'id'
+      }
+    },
+
     origen_reserva: {
       type: DataTypes.ENUM('alumno', 'administracion', 'profesor', 'sistema'),
       allowNull: false,
@@ -126,6 +167,10 @@ const AgendaTurnosReservasModel = db.define(
       {
         name: 'idx_reservas_membresia',
         fields: ['membresia_id']
+      },
+      {
+        name: 'idx_reservas_tipo_credito',
+        fields: ['tipo_reserva', 'estado_credito']
       },
       {
         name: 'idx_reservas_estado',

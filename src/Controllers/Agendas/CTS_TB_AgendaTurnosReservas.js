@@ -157,6 +157,7 @@ const buscarMembresiaElegibleReserva = async ({ alumnoId, turno, transaction = n
   if (candidatas.length) {
     return {
       membresia: null,
+      membresiaBloqueada: candidatas[0],
       validacion: {
         permitido: false,
         motivo: 'El día u horario de esta clase no está incluido en la modalidad contratada.'
@@ -164,7 +165,7 @@ const buscarMembresiaElegibleReserva = async ({ alumnoId, turno, transaction = n
     };
   }
 
-  return { membresia: null, validacion: null };
+  return { membresia: null, membresiaBloqueada: null, validacion: null };
 };
 
 const existePruebaConsumidaOActiva = async ({ alumnoId, transaction = null, excluirReservaId = null }) => {
@@ -638,7 +639,7 @@ export const OBRS_ClientesDisponiblesTurno_CTS = async (req, res) => {
         };
       }
 
-      const { membresia, validacion } = await buscarMembresiaElegibleReserva({
+      const { membresia, membresiaBloqueada, validacion } = await buscarMembresiaElegibleReserva({
         alumnoId: alumno.id,
         turno
       });
@@ -653,6 +654,22 @@ export const OBRS_ClientesDisponiblesTurno_CTS = async (req, res) => {
           estado_membresia: membresia.estado,
           fecha_vencimiento: membresia.fecha_vencimiento,
           inscribible: true
+        };
+      }
+
+      if (validacion && validacion.permitido === false && membresiaBloqueada) {
+        return {
+          ...base,
+          creditos: Number(membresiaBloqueada.clases_disponibles || 0),
+          creditos_habilitados: 0,
+          membresia_id: membresiaBloqueada.id,
+          plan_id: membresiaBloqueada.plan_id,
+          estado_membresia: membresiaBloqueada.estado,
+          fecha_vencimiento: membresiaBloqueada.fecha_vencimiento,
+          tipo_reserva_sugerido: 'normal',
+          permite_reserva_pendiente: false,
+          inscribible: false,
+          motivo_no_inscribible: validacion.motivo
         };
       }
 

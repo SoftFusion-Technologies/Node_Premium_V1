@@ -67,6 +67,21 @@ const GastosGastosModel = db.define(
       }
     },
 
+    medio_pago_id: {
+      type: DataTypes.BIGINT.UNSIGNED,
+      allowNull: true,
+      references: {
+        model: 'pagos_medios_pago',
+        key: 'id'
+      }
+    },
+
+    origen_fondos: {
+      type: DataTypes.ENUM('caja_sede', 'fuera_caja'),
+      allowNull: false,
+      defaultValue: 'caja_sede'
+    },
+
     nombre: {
       type: DataTypes.STRING(160),
       allowNull: false
@@ -159,6 +174,14 @@ const GastosGastosModel = db.define(
       {
         name: 'idx_gastos_periodico',
         fields: ['gasto_periodico_id']
+      },
+      {
+        name: 'idx_gastos_medio_pago',
+        fields: ['medio_pago_id']
+      },
+      {
+        name: 'idx_gastos_origen_fondos',
+        fields: ['origen_fondos']
       },
       {
         name: 'idx_gastos_estado',

@@ -24,6 +24,7 @@ export const ROLES_GASTOS_OPERACION = [
 
 export const ESTADOS_GASTO_VALIDOS = ['pendiente', 'pagado', 'anulado'];
 export const ORIGENES_GASTO_VALIDOS = ['manual', 'periodico'];
+export const ORIGENES_FONDOS_GASTO_VALIDOS = ['caja_sede', 'fuera_caja'];
 export const FRECUENCIAS_GASTO_PERIODICO_VALIDAS = [
   'semanal',
   'quincenal',

@@ -16,6 +16,7 @@ import GastosTiposModel from './MD_TB_GastosTipos.js';
 import GastosProveedoresModel from './MD_TB_GastosProveedores.js';
 import GastosPeriodicosModel from './MD_TB_GastosPeriodicos.js';
 import GastosGastosModel from './MD_TB_GastosGastos.js';
+import PagosMediosPagoModel from '../Pago/MD_TB_PagosMediosPago.js';
 
 let relacionesInicializadas = false;
 
@@ -77,6 +78,17 @@ export const initGastosRelaciones = () => {
   GastosGastosModel.belongsTo(GastosPeriodicosModel, {
     foreignKey: 'gasto_periodico_id',
     as: 'gasto_periodico'
+  });
+
+  // Benjamin Orellana - 2026/08/04 - El medio queda en el gasto aunque el pago no impacte en Caja.
+  PagosMediosPagoModel.hasMany(GastosGastosModel, {
+    foreignKey: 'medio_pago_id',
+    as: 'gastos_operativos'
+  });
+
+  GastosGastosModel.belongsTo(PagosMediosPagoModel, {
+    foreignKey: 'medio_pago_id',
+    as: 'medio_pago'
   });
 
   relacionesInicializadas = true;

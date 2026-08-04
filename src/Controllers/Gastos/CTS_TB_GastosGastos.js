@@ -35,6 +35,7 @@ import {
   normalizarTinyint,
   obtenerFechaActualDateOnly,
   ORIGENES_GASTO_VALIDOS,
+  ORIGENES_FONDOS_GASTO_VALIDOS,
   toNumberOrNull,
   validarRolLecturaGastos,
   validarRolOperacionGastos,
@@ -52,7 +53,11 @@ const crearErrorOperacion = (message, status = 409) => {
   return error;
 };
 
-const obtenerMedioPagoCaja = async (medioPagoId, transaction) => {
+const obtenerMedioPagoGasto = async ({
+  medioPagoId,
+  origenFondos = 'caja_sede',
+  transaction
+}) => {
   const id = toNumberOrNull(medioPagoId);
 
   if (!id) {
@@ -62,19 +67,27 @@ const obtenerMedioPagoCaja = async (medioPagoId, transaction) => {
     );
   }
 
+  const requiereImpactoCaja = origenFondos === 'caja_sede';
+  const where = {
+    id,
+    activo: 1
+  };
+
+  if (requiereImpactoCaja) {
+    where.impacta_caja = 1;
+  }
+
   const medioPago = await PagosMediosPagoModel.findOne({
-    where: {
-      id,
-      activo: 1,
-      impacta_caja: 1
-    },
+    where,
     transaction,
     lock: transaction.LOCK.UPDATE
   });
 
   if (!medioPago || String(medioPago.codigo || '').toUpperCase() === 'SALDO_FAVOR') {
     throw crearErrorOperacion(
-      'El medio de pago seleccionado no está activo o no impacta en Caja.',
+      requiereImpactoCaja
+        ? 'El medio de pago seleccionado no está activo o no puede impactar en Caja.'
+        : 'El medio de pago seleccionado no está activo o no es válido para el gasto.',
       400
     );
   }
@@ -125,7 +138,6 @@ const obtenerMovimientoGastoVigente = async (gastoId, transaction) => {
 
 const registrarMovimientoCajaGasto = async ({
   gasto,
-  medioPagoId,
   req,
   transaction
 }) => {
@@ -133,7 +145,11 @@ const registrarMovimientoCajaGasto = async ({
 
   if (existente) return existente;
 
-  const medioPago = await obtenerMedioPagoCaja(medioPagoId, transaction);
+  const medioPago = await obtenerMedioPagoGasto({
+    medioPagoId: gasto.medio_pago_id,
+    origenFondos: 'caja_sede',
+    transaction
+  });
   const sesion = await obtenerSesionAbierta(gasto.sede_id, transaction);
   const importe = Number(gasto.importe_total || 0);
 
@@ -167,7 +183,8 @@ const anularMovimientoCajaGasto = async ({
   movimiento,
   gasto,
   req,
-  transaction
+  transaction,
+  motivo = null
 }) => {
   if (!movimiento) return;
 
@@ -182,7 +199,9 @@ const anularMovimientoCajaGasto = async ({
     );
   }
 
-  const detalleReversion = `Movimiento anulado al cambiar el gasto #${gasto.id} a ${gasto.estado}. Usuario: ${usuarioId(req)}.`;
+  const detalleReversion = motivo
+    ? `Movimiento anulado para el gasto #${gasto.id}. ${motivo} Usuario: ${usuarioId(req)}.`
+    : `Movimiento anulado al cambiar el gasto #${gasto.id} a ${gasto.estado}. Usuario: ${usuarioId(req)}.`;
   const observaciones = [movimiento.observaciones, detalleReversion]
     .filter(Boolean)
     .join(' ')
@@ -271,12 +290,17 @@ const buildPayloadGastoCreate = (body = {}) => {
     body.importe_iva !== undefined && body.importe_iva !== null && body.importe_iva !== ''
       ? normalizarDecimal(body.importe_iva, 0)
       : calcularImporteIva({ importeTotal, incluyeIva, ivaPorcentaje });
+  const estado = normalizarTexto(body.estado) || 'pendiente';
+  const origenFondos = normalizarTexto(body.origen_fondos) || 'caja_sede';
 
   return {
     sede_id: toNumberOrNull(body.sede_id),
     tipo_gasto_id: toNumberOrNull(body.tipo_gasto_id),
     proveedor_id: toNumberOrNull(body.proveedor_id),
     gasto_periodico_id: toNumberOrNull(body.gasto_periodico_id),
+    medio_pago_id:
+      estado === 'pagado' ? toNumberOrNull(body.medio_pago_id) : null,
+    origen_fondos: origenFondos,
     nombre: normalizarTexto(body.nombre),
     descripcion: normalizarTexto(body.descripcion),
     fecha_gasto: normalizarFecha(body.fecha_gasto),
@@ -288,7 +312,7 @@ const buildPayloadGastoCreate = (body = {}) => {
     incluye_iva: incluyeIva,
     iva_porcentaje: ivaPorcentaje,
     importe_iva: importeIva,
-    estado: normalizarTexto(body.estado) || 'pendiente',
+    estado,
     origen: normalizarTexto(body.origen) || 'manual',
     observacion: normalizarTexto(body.observacion)
   };
@@ -301,6 +325,8 @@ const buildPayloadGastoUpdate = (body = {}) => {
   if (Object.prototype.hasOwnProperty.call(body, 'tipo_gasto_id')) payload.tipo_gasto_id = toNumberOrNull(body.tipo_gasto_id);
   if (Object.prototype.hasOwnProperty.call(body, 'proveedor_id')) payload.proveedor_id = toNumberOrNull(body.proveedor_id);
   if (Object.prototype.hasOwnProperty.call(body, 'gasto_periodico_id')) payload.gasto_periodico_id = toNumberOrNull(body.gasto_periodico_id);
+  if (Object.prototype.hasOwnProperty.call(body, 'medio_pago_id')) payload.medio_pago_id = toNumberOrNull(body.medio_pago_id);
+  if (Object.prototype.hasOwnProperty.call(body, 'origen_fondos')) payload.origen_fondos = normalizarTexto(body.origen_fondos);
   if (Object.prototype.hasOwnProperty.call(body, 'nombre')) payload.nombre = normalizarTexto(body.nombre);
   if (Object.prototype.hasOwnProperty.call(body, 'descripcion')) payload.descripcion = normalizarTexto(body.descripcion);
   if (Object.prototype.hasOwnProperty.call(body, 'fecha_gasto')) payload.fecha_gasto = normalizarFecha(body.fecha_gasto);
@@ -395,6 +421,17 @@ const validarPayloadGasto = (payload = {}, modo = 'create') => {
     errores.push('El origen del gasto indicado no es válido.');
   }
 
+  if (
+    payload.origen_fondos &&
+    !ORIGENES_FONDOS_GASTO_VALIDOS.includes(payload.origen_fondos)
+  ) {
+    errores.push('El origen de los fondos indicado no es válido.');
+  }
+
+  if (modo === 'create' && payload.estado === 'pagado' && !payload.medio_pago_id) {
+    errores.push('El medio de pago es obligatorio para un gasto pagado.');
+  }
+
   if (Number(payload.incluye_iva || 0) === 1 && Number(payload.iva_porcentaje || 0) <= 0) {
     errores.push('Si el gasto incluye IVA, el porcentaje de IVA debe ser mayor a cero.');
   }
@@ -420,6 +457,8 @@ const construirWhereGastos = (query = {}) => {
   if (query.gasto_periodico_id) where.gasto_periodico_id = Number(query.gasto_periodico_id);
   if (query.estado) where.estado = query.estado;
   if (query.origen) where.origen = query.origen;
+  if (query.origen_fondos) where.origen_fondos = query.origen_fondos;
+  if (query.medio_pago_id) where.medio_pago_id = Number(query.medio_pago_id);
 
   if (query.fecha_desde || query.fecha_hasta) {
     where.fecha_gasto = {};
@@ -454,6 +493,12 @@ const buildIncludeGastos = (user = null) => [
     model: GastosPeriodicosModel,
     as: 'gasto_periodico',
     attributes: ['id', 'nombre', 'frecuencia', 'activo'],
+    required: false
+  },
+  {
+    model: PagosMediosPagoModel,
+    as: 'medio_pago',
+    attributes: ['id', 'nombre', 'codigo', 'tipo', 'impacta_caja', 'activo'],
     required: false
   }
 ];
@@ -542,6 +587,17 @@ export const OBR_Gastos_CTS = async (req, res) => {
       });
     }
 
+    if (
+      where.origen_fondos &&
+      !ORIGENES_FONDOS_GASTO_VALIDOS.includes(where.origen_fondos)
+    ) {
+      return res.status(400).json({
+        ok: false,
+        message: 'Origen de fondos inválido.',
+        origenes_fondos_validos: ORIGENES_FONDOS_GASTO_VALIDOS
+      });
+    }
+
     const { pageNumber, limitNumber, offset } = buildPagination({ page, limit });
     const order = buildOrder({
       orderBy,
@@ -554,6 +610,8 @@ export const OBR_Gastos_CTS = async (req, res) => {
         'importe_total',
         'estado',
         'origen',
+        'origen_fondos',
+        'medio_pago_id',
         'created_at',
         'updated_at'
       ]
@@ -704,12 +762,23 @@ export const CR_Gastos_CTS = async (req, res) => {
       });
     }
 
+    if (payload.estado === 'pagado') {
+      const medioPago = await obtenerMedioPagoGasto({
+        medioPagoId: payload.medio_pago_id,
+        origenFondos: payload.origen_fondos,
+        transaction
+      });
+      payload.medio_pago_id = Number(medioPago.id);
+    }
+
     const nuevoGasto = await GastosGastosModel.create(payload, { transaction });
 
-    if (payload.estado === 'pagado') {
+    if (
+      payload.estado === 'pagado' &&
+      payload.origen_fondos === 'caja_sede'
+    ) {
       await registrarMovimientoCajaGasto({
         gasto: nuevoGasto,
-        medioPagoId: req.body.medio_pago_id,
         req,
         transaction
       });
@@ -838,6 +907,38 @@ export const UR_Gastos_CTS = async (req, res) => {
       }
     }
 
+    const estadoSiguiente = String(
+      Object.prototype.hasOwnProperty.call(payload, 'estado')
+        ? payload.estado
+        : gasto.estado
+    ).toLowerCase();
+    const movimientoVigente = await obtenerMovimientoGastoVigente(
+      gasto.id,
+      transaction
+    );
+    const origenFondosActual =
+      normalizarTexto(gasto.origen_fondos) ||
+      (movimientoVigente ? 'caja_sede' : 'caja_sede');
+    const origenFondosSiguiente =
+      normalizarTexto(
+        Object.prototype.hasOwnProperty.call(payload, 'origen_fondos')
+          ? payload.origen_fondos
+          : origenFondosActual
+      ) || 'caja_sede';
+    const medioPagoActual =
+      toNumberOrNull(gasto.medio_pago_id) ||
+      toNumberOrNull(movimientoVigente?.medio_pago_id);
+    const medioPagoIdSiguiente = Object.prototype.hasOwnProperty.call(
+      payload,
+      'medio_pago_id'
+    )
+      ? toNumberOrNull(payload.medio_pago_id)
+      : medioPagoActual;
+
+    if (estadoSiguiente === 'pagado' && !medioPagoIdSiguiente) {
+      errores.push('El medio de pago es obligatorio para un gasto pagado.');
+    }
+
     if (errores.length > 0) {
       await transaction.rollback();
 
@@ -848,15 +949,16 @@ export const UR_Gastos_CTS = async (req, res) => {
       });
     }
 
-    const estadoSiguiente = String(
-      Object.prototype.hasOwnProperty.call(payload, 'estado')
-        ? payload.estado
-        : gasto.estado
-    ).toLowerCase();
-    const movimientoVigente = await obtenerMovimientoGastoVigente(
-      gasto.id,
-      transaction
-    );
+    let medioPagoSiguiente = null;
+
+    if (estadoSiguiente === 'pagado') {
+      medioPagoSiguiente = await obtenerMedioPagoGasto({
+        medioPagoId: medioPagoIdSiguiente,
+        origenFondos: origenFondosSiguiente,
+        transaction
+      });
+    }
+
     const cambiaSede =
       Object.prototype.hasOwnProperty.call(payload, 'sede_id') &&
       Number(payload.sede_id || 0) !== Number(gasto.sede_id || 0);
@@ -867,13 +969,14 @@ export const UR_Gastos_CTS = async (req, res) => {
       ) > 0.009;
     const cambiaMedio =
       movimientoVigente &&
-      req.body.medio_pago_id !== undefined &&
-      Number(req.body.medio_pago_id || 0) !==
+      Number(medioPagoIdSiguiente || 0) !==
         Number(movimientoVigente.medio_pago_id || 0);
+    const debeImpactarCaja =
+      estadoSiguiente === 'pagado' && origenFondosSiguiente === 'caja_sede';
 
     if (
       movimientoVigente &&
-      estadoSiguiente === 'pagado' &&
+      debeImpactarCaja &&
       (cambiaSede || cambiaImporte || cambiaMedio)
     ) {
       await transaction.rollback();
@@ -888,27 +991,33 @@ export const UR_Gastos_CTS = async (req, res) => {
     if (estadoSiguiente === 'pagado') {
       payload.fecha_pago =
         payload.fecha_pago || gasto.fecha_pago || obtenerFechaActualDateOnly();
-    } else if (Object.prototype.hasOwnProperty.call(payload, 'estado')) {
-      payload.fecha_pago = null;
+      payload.medio_pago_id = Number(medioPagoSiguiente.id);
+      payload.origen_fondos = origenFondosSiguiente;
+    } else {
+      if (Object.prototype.hasOwnProperty.call(payload, 'estado')) {
+        payload.fecha_pago = null;
+      }
+      payload.medio_pago_id = null;
+      payload.origen_fondos = origenFondosSiguiente;
+    }
+
+    if (movimientoVigente && !debeImpactarCaja) {
+      await anularMovimientoCajaGasto({
+        movimiento: movimientoVigente,
+        gasto,
+        req,
+        transaction,
+        motivo:
+          estadoSiguiente === 'pagado'
+            ? 'El pago pasó a registrarse fuera de la caja de la sede.'
+            : `El gasto pasó al estado ${estadoSiguiente}.`
+      });
     }
 
     await gasto.update(payload, { transaction });
 
-    if (estadoSiguiente === 'pagado' && !movimientoVigente) {
+    if (debeImpactarCaja && !movimientoVigente) {
       await registrarMovimientoCajaGasto({
-        gasto,
-        medioPagoId: req.body.medio_pago_id,
-        req,
-        transaction
-      });
-    }
-
-    if (
-      movimientoVigente &&
-      estadoSiguiente !== 'pagado'
-    ) {
-      await anularMovimientoCajaGasto({
-        movimiento: movimientoVigente,
         gasto,
         req,
         transaction
@@ -1004,9 +1113,13 @@ export const DR_Gastos_CTS = async (req, res) => {
       return res.status(409).json({
         ok: false,
         message:
-          'No se puede eliminar físicamente un gasto que ya impactó en Caja.',
+          movimientosCaja > 0
+            ? 'No se puede eliminar físicamente un gasto que ya impactó en Caja.'
+            : 'No se puede eliminar físicamente un gasto que ya fue pagado.',
         detalle:
-          'Conservá el registro para mantener la trazabilidad financiera. Si la caja sigue abierta, primero podés revertirlo a pendiente.',
+          movimientosCaja > 0
+            ? 'Conservá el registro para mantener la trazabilidad financiera. Si la caja sigue abierta, primero podés revertirlo a pendiente.'
+            : 'Revertí el gasto a pendiente antes de eliminarlo para conservar la trazabilidad financiera.',
         asociaciones_detectadas: {
           cajas_movimientos: Number(movimientosCaja)
         },

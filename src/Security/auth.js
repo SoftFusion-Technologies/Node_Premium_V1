@@ -52,8 +52,27 @@ const PREFIJOS_FINANCIEROS_BLOQUEADOS_COORDINADOR = [
   'saldos.'
 ];
 
+// Benjamin Orellana - 2026/08/07 - Coordinador y Profesor trabajan la operatoria
+// financiera del día (ventas, cobros, gastos y caja), pero no la analítica/histórico.
+// El alcance temporal se refuerza en operationalDayScope.js. Esta allowlist evita
+// que permisos históricos de COORD_SEDE abran deudas, saldos o reportes sensibles.
+const PERMISOS_FINANCIEROS_OPERATIVOS_COORDINADOR = new Set([
+  'cobros.ver',
+  'cobros.registrar',
+  'caja.ver',
+  'caja.abrir',
+  'caja.contar',
+  'caja.cerrar',
+  'gastos.ver'
+]);
+
 const esPermisoFinancieroBloqueadoCoordinador = (codigo) => {
   const permiso = String(codigo || '').trim().toLowerCase();
+
+  if (PERMISOS_FINANCIEROS_OPERATIVOS_COORDINADOR.has(permiso)) {
+    return false;
+  }
+
   return PREFIJOS_FINANCIEROS_BLOQUEADOS_COORDINADOR.some((prefijo) =>
     permiso.startsWith(prefijo)
   );
@@ -659,10 +678,14 @@ export const requirePermission = (permisosRequeridos = []) => {
       .trim()
       .toUpperCase();
 
-    if (
-      rolEfectivo === 'COORD_SEDE' &&
-      requeridos.some(esPermisoFinancieroBloqueadoCoordinador)
-    ) {
+    const requeridosEvaluables =
+      rolEfectivo === 'COORD_SEDE'
+        ? requeridos.filter(
+            (codigo) => !esPermisoFinancieroBloqueadoCoordinador(codigo)
+          )
+        : requeridos;
+
+    if (rolEfectivo === 'COORD_SEDE' && !requeridosEvaluables.length) {
       return res.status(403).json({
         ok: false,
         code: 'COORDINATOR_FINANCE_DENIED',
@@ -677,7 +700,7 @@ export const requirePermission = (permisosRequeridos = []) => {
     const permisosEfectivos = sedeAsignada
       ? sedeAsignada.asignacion?.permisos || []
       : req.user.permisos || [];
-    const autorizado = requeridos.some((codigo) =>
+    const autorizado = requeridosEvaluables.some((codigo) =>
       permisosEfectivos.includes(codigo)
     );
 
@@ -790,6 +813,19 @@ export const requireFinanzasSede = (req, res, next) => {
   const sedeAsignada = Array.isArray(req.user.sedes)
     ? req.user.sedes.find((sede) => Number(sede.id) === sedeId)
     : null;
+
+  const rolEfectivo = String(
+    sedeAsignada?.asignacion?.rol_codigo || req.user?.rol_codigo || ''
+  )
+    .trim()
+    .toUpperCase();
+
+  // Benjamin Orellana - 2026/08/07 - PROFESOR y COORD_SEDE pueden entrar a la
+  // caja operativa de su sede aunque `puede_ver_finanzas` sea 0. El permiso
+  // específico de cada ruta y operationalDayScope limitan la consulta a hoy.
+  if (['PROFESOR', 'COORD_SEDE'].includes(rolEfectivo)) {
+    return next();
+  }
 
   if (!sedeAsignada?.asignacion?.puede_ver_finanzas) {
     return res.status(403).json({

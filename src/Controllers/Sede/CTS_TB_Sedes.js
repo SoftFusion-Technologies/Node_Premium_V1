@@ -4,8 +4,33 @@
 
 import { Op, literal } from 'sequelize';
 import SedesModel from '../../Models/Sede/MD_TB_Sedes.js';
+import { usuarioTieneAccesoTodasSedes } from '../../utils/usuariosAcceso.utils.js';
 
 const ESTADOS_ACTIVO_VALIDOS = [0, 1];
+
+
+// Benjamin Orellana - 2026/08/07 - Los endpoints internos de sedes deben
+// respetar el alcance del usuario. /sedes-publicas continúa siendo el listado
+// público deliberado para formularios externos.
+const obtenerIdsSedesOperablesUsuario = (user) => {
+  if (usuarioTieneAccesoTodasSedes(user)) return null;
+
+  return (Array.isArray(user?.sedes) ? user.sedes : [])
+    .filter((sede) => {
+      const asignacion = sede?.asignacion || {};
+      return asignacion.activo !== false && asignacion.puede_operar !== false;
+    })
+    .map((sede) => Number(sede?.id ?? sede?.sede_id))
+    .filter((id) => Number.isInteger(id) && id > 0);
+};
+
+const aplicarScopeSedesUsuario = (where, user) => {
+  const ids = obtenerIdsSedesOperablesUsuario(user);
+  if (ids === null) return where;
+
+  where.id = { [Op.in]: ids.length ? ids : [0] };
+  return where;
+};
 
 const getHorariosSedeAttributes = () => [
   [
@@ -146,6 +171,7 @@ export const OBRSedes_CTS = async (req, res) => {
     } = req.query;
 
     const where = {};
+    aplicarScopeSedesUsuario(where, req.user);
 
     const activoNormalizado = normalizarActivo(activo);
 
@@ -239,9 +265,12 @@ export const OBRSedesActivas_CTS = async (req, res) => {
       attributes: {
         include: getHorariosSedeAttributes()
       },
-      where: {
-        activo: 1
-      },
+      where: aplicarScopeSedesUsuario(
+        {
+          activo: 1
+        },
+        req.user
+      ),
       order: [['nombre', 'ASC']]
     });
 
@@ -295,7 +324,9 @@ export const OBRSedePorId_CTS = async (req, res) => {
   try {
     const { id } = req.params;
 
-    const sede = await SedesModel.findByPk(id, {
+    const where = aplicarScopeSedesUsuario({ id: Number(id) }, req.user);
+    const sede = await SedesModel.findOne({
+      where,
       attributes: {
         include: getHorariosSedeAttributes()
       }

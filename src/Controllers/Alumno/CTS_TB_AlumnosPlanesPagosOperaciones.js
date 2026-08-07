@@ -16,6 +16,7 @@ import PagosMetodosRecurrentesModel from '../../Models/Pago/MD_TB_PagosMetodosRe
 import SistemaAuditoriaLogsModel from '../../Models/Sistema/MD_TB_SistemaAuditoriaLogs.js';
 import { copiarRestriccionesPlan } from '../../Services/Agenda/agendaRestricciones.service.js';
 import { imputarReservasPendientesMembresia } from '../../Services/Agenda/reservasPendientes.service.js';
+import { usuarioTieneAccesoTodasSedes } from '../../utils/usuariosAcceso.utils.js';
 
 const responderError = (res, status, message, data = null) => {
   return res.status(status).json({
@@ -516,9 +517,7 @@ const obtenerAsignacionSedeUsuario = (user, sedeId) => {
 };
 
 const usuarioPuedeOperarSedeMembresia = (user, sedeId) => {
-  const rolCodigo = String(user?.rol_codigo || '').trim().toUpperCase();
-
-  if (['SUPER_ADMIN', 'DIRECCION'].includes(rolCodigo)) return true;
+  if (usuarioTieneAccesoTodasSedes(user)) return true;
 
   const sedeUsuario = obtenerAsignacionSedeUsuario(user, sedeId);
   const asignacion = sedeUsuario?.asignacion || {};
@@ -1465,10 +1464,7 @@ export const UR_MembresiaMigracionAlumnoPlanesPagos_CTS = async (req, res) => {
       );
     }
 
-    if (
-      esCoordinador &&
-      !usuarioPuedeOperarSedeMembresia(req.user, membresia.sede_id)
-    ) {
+    if (!usuarioPuedeOperarSedeMembresia(req.user, membresia.sede_id)) {
       await transaction.rollback();
       return responderError(
         res,
@@ -1486,16 +1482,12 @@ export const UR_MembresiaMigracionAlumnoPlanesPagos_CTS = async (req, res) => {
       if (Number(req.body.sede_id) !== Number(membresia.sede_id)) {
         camposProtegidos.push('sede_id');
       }
-      if (fechaInicio !== fechaInicioActual) {
-        camposProtegidos.push('fecha_inicio');
-      }
-
       if (camposProtegidos.length > 0) {
         await transaction.rollback();
         return responderError(
           res,
           403,
-          'El coordinador solo puede modificar el vencimiento, los créditos disponibles y la observación.',
+          'El coordinador puede modificar las fechas, los créditos disponibles y la observación, pero no el plan ni la sede.',
           { campos_bloqueados: camposProtegidos }
         );
       }
@@ -1520,6 +1512,15 @@ export const UR_MembresiaMigracionAlumnoPlanesPagos_CTS = async (req, res) => {
     if (!sede) {
       await transaction.rollback();
       return responderError(res, 404, 'La sede indicada no existe o está inactiva.');
+    }
+
+    if (!usuarioPuedeOperarSedeMembresia(req.user, sede.id)) {
+      await transaction.rollback();
+      return responderError(
+        res,
+        403,
+        'No tiene acceso operativo a la sede destino de esta membresía.'
+      );
     }
 
     const cambiaPlan = Number(membresia.plan_id) !== Number(plan.id);

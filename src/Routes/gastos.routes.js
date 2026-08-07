@@ -66,7 +66,6 @@ const router = express.Router();
 const ROLES_GASTOS_OPERATIVOS = [
   'SUPER_ADMIN',
   'DIRECCION',
-  'COORD_SEDE',
   'PROFESOR'
 ];
 const ROLES_GASTOS_ADMIN = ['SUPER_ADMIN', 'DIRECCION'];

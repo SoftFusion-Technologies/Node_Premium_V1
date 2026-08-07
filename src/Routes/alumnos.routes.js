@@ -150,6 +150,23 @@ const alcanceAlumno = (permission) =>
     permission,
   });
 
+// Benjamin Orellana - 2026/08/07 - Alcance operativo sin habilitar finanzas.
+// Se usa para consultar membresías desde la ficha del alumno respetando sede.
+const alcanceAlumnoOperativo = requireFinancialScope({
+  sources: [sourceParam("alumno", "alumno_id")],
+  requireFinanzas: false,
+});
+
+const alcanceMembresiaOperativo = requireFinancialScope({
+  sources: [sourceParam("membresia", "id")],
+  requireFinanzas: false,
+});
+
+const alcanceSedeOperativo = requireFinancialScope({
+  sources: [sourceBody("sede")],
+  requireFinanzas: false,
+});
+
 // Benjamin Orellana - 2026/07/17 - Consolidados financieros de deuda y saldo.
 router.get(
   "/finanzas/deudas",
@@ -401,26 +418,27 @@ router.patch(
 
 /*
  * Benjamin Orellana - 2026/08/02 - Consulta y administra el acceso al portal
- * del alumno. Estas acciones quedan reservadas a SUPER_ADMIN.
+ * del alumno. SUPER_ADMIN y COORD_SEDE pueden operar; el controlador
+ * valida que el alumno pertenezca a una sede autorizada para el usuario.
  */
 router.get(
   "/alumnos/:id/acceso",
   authenticateToken,
-  requireRolGlobal(["SUPER_ADMIN"]),
+  requireRolGlobal(["SUPER_ADMIN", "COORD_SEDE"]),
   OBR_AccesoAlumno_CTS,
 );
 
 router.patch(
   "/alumnos/:id/acceso/desbloquear",
   authenticateToken,
-  requireRolGlobal(["SUPER_ADMIN"]),
+  requireRolGlobal(["SUPER_ADMIN", "COORD_SEDE"]),
   UR_DesbloquearAccesoAlumno_CTS,
 );
 
 router.patch(
   "/alumnos/:id/acceso/restablecer-password",
   authenticateToken,
-  requireRolGlobal(["SUPER_ADMIN"]),
+  requireRolGlobal(["SUPER_ADMIN", "COORD_SEDE"]),
   UR_RestablecerPasswordAccesoAlumno_CTS,
 );
 
@@ -911,49 +929,71 @@ router.get(
  * =========================================================
  */
 
-router.get("/alumnos-membresias", authenticateToken, OBR_AlumnosMembresias_CTS);
+router.get(
+  "/alumnos-membresias",
+  authenticateToken,
+  requirePermission("pagos.ver"),
+  OBR_AlumnosMembresias_CTS,
+);
 
 router.get(
   "/alumnos-membresias/:id",
   authenticateToken,
+  alcanceMembresiaOperativo,
   OBR_MembresiaPorId_CTS,
 );
 
 router.get(
   "/alumnos/:alumno_id/membresias",
   authenticateToken,
+  alcanceAlumnoOperativo,
   OBR_MembresiasPorAlumno_CTS,
 );
 
 router.get(
   "/alumnos/:alumno_id/membresia-activa",
   authenticateToken,
+  alcanceAlumnoOperativo,
   OBR_MembresiaActivaAlumno_CTS,
 );
 
-router.post("/alumnos-membresias", authenticateToken, CR_AlumnosMembresias_CTS);
+router.post(
+  "/alumnos-membresias",
+  authenticateToken,
+  requirePermission("pagos.gestionar"),
+  alcanceSedeOperativo,
+  CR_AlumnosMembresias_CTS,
+);
 
 router.put(
   "/alumnos-membresias/:id",
   authenticateToken,
+  requirePermission("pagos.gestionar"),
+  alcanceMembresiaOperativo,
   UR_AlumnosMembresias_CTS,
 );
 
 router.patch(
   "/alumnos-membresias/:id/estado",
   authenticateToken,
+  requirePermission("pagos.gestionar"),
+  alcanceMembresiaOperativo,
   UR_EstadoMembresia_CTS,
 );
 
 router.put(
   "/alumnos-membresias/:id/congelar",
   authenticateToken,
+  requirePermission("pagos.gestionar"),
+  alcanceMembresiaOperativo,
   UR_CongelarMembresia_CTS,
 );
 
 router.put(
   "/alumnos-membresias/:id/reactivar",
   authenticateToken,
+  requirePermission("pagos.gestionar"),
+  alcanceMembresiaOperativo,
   UR_ReactivarMembresia_CTS,
 );
 
@@ -961,6 +1001,8 @@ router.put(
 router.put(
   "/alumnos-membresias/:id/desactivar",
   authenticateToken,
+  requirePermission("pagos.gestionar"),
+  alcanceMembresiaOperativo,
   DR_AlumnosMembresias_CTS,
 );
 
@@ -968,6 +1010,8 @@ router.put(
 router.delete(
   "/alumnos-membresias/:id",
   authenticateToken,
+  requirePermission("pagos.gestionar"),
+  alcanceMembresiaOperativo,
   ER_AlumnosMembresias_CTS,
 );
 

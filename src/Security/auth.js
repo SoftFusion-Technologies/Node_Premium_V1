@@ -39,6 +39,26 @@ const ROLES_INTERNOS = [
   'PROFESOR'
 ];
 
+// Benjamin Orellana - 2026/08/07 - COORD_SEDE administra alumnos de su sede,
+// pero no participa de la operatoria financiera. Este bloqueo central evita
+// que permisos históricos en BD vuelvan a exponer Caja/Cobros/Gastos/Pagos.
+const PREFIJOS_FINANCIEROS_BLOQUEADOS_COORDINADOR = [
+  'caja.',
+  'cobros.',
+  'deudas.',
+  'gastos.',
+  'medios_pago.',
+  'pagos.',
+  'saldos.'
+];
+
+const esPermisoFinancieroBloqueadoCoordinador = (codigo) => {
+  const permiso = String(codigo || '').trim().toLowerCase();
+  return PREFIJOS_FINANCIEROS_BLOQUEADOS_COORDINADOR.some((prefijo) =>
+    permiso.startsWith(prefijo)
+  );
+};
+
 const normalizarTexto = (valor) => {
   if (valor === undefined || valor === null) return null;
 
@@ -625,7 +645,7 @@ export const requirePermission = (permisosRequeridos = []) => {
       });
     }
 
-    if (!requeridos.length || usuarioTieneAccesoTodasSedes(req.user)) {
+    if (!requeridos.length) {
       return next();
     }
 
@@ -633,6 +653,27 @@ export const requirePermission = (permisosRequeridos = []) => {
     const sedeAsignada = sedeId
       ? req.user.sedes?.find((sede) => Number(sede.id) === sedeId)
       : null;
+    const rolEfectivo = String(
+      sedeAsignada?.asignacion?.rol_codigo || req.user.rol_codigo || ''
+    )
+      .trim()
+      .toUpperCase();
+
+    if (
+      rolEfectivo === 'COORD_SEDE' &&
+      requeridos.some(esPermisoFinancieroBloqueadoCoordinador)
+    ) {
+      return res.status(403).json({
+        ok: false,
+        code: 'COORDINATOR_FINANCE_DENIED',
+        message: 'El rol coordinador no tiene acceso a módulos financieros.'
+      });
+    }
+
+    if (usuarioTieneAccesoTodasSedes(req.user)) {
+      return next();
+    }
+
     const permisosEfectivos = sedeAsignada
       ? sedeAsignada.asignacion?.permisos || []
       : req.user.permisos || [];

@@ -220,7 +220,13 @@ export const OBR_DashboardCortesActividad_CTS = async (req, res) => {
                 AND DATE(p.fecha_pago) BETWEEN :primerDiaMes AND :corte) AS facturacion_acumulada,
             (SELECT COALESCE(SUM(p.monto), 0) FROM pagos_pagos p
               WHERE p.sede_id = s.id AND p.estado = 'confirmado'
-                AND DATE(p.fecha_pago) BETWEEN :primerDiaMesAnterior AND :corteAnterior) AS facturacion_acumulada_mes_anterior
+                AND DATE(p.fecha_pago) BETWEEN :primerDiaMesAnterior AND :corteAnterior) AS facturacion_acumulada_mes_anterior,
+            (SELECT COUNT(*) FROM pagos_mensualidades pm
+              WHERE pm.sede_id = s.id
+                AND pm.fecha_emision BETWEEN :primerDiaMes AND :corte) AS cuotas_vendidas,
+            (SELECT COUNT(*) FROM pagos_mensualidades pm
+              WHERE pm.sede_id = s.id
+                AND pm.fecha_emision BETWEEN :primerDiaMesAnterior AND :corteAnterior) AS cuotas_vendidas_mes_anterior
           FROM sedes_sedes s
           WHERE s.activo = 1
             ${scope.sql}
@@ -256,8 +262,11 @@ export const OBR_DashboardCortesActividad_CTS = async (req, res) => {
         const activosMesAnterior = Number(fila.activos_mes_anterior) || 0;
         const facturacionAcumulada = Number(fila.facturacion_acumulada) || 0;
         const facturacionAcumuladaMesAnterior = Number(fila.facturacion_acumulada_mes_anterior) || 0;
+        const cuotasVendidas = Number(fila.cuotas_vendidas) || 0;
+        const cuotasVendidasMesAnterior = Number(fila.cuotas_vendidas_mes_anterior) || 0;
 
         const variacion = activos - activosMesAnterior;
+        const variacionCuotasVendidas = cuotasVendidas - cuotasVendidasMesAnterior;
 
         // Si el mes anterior facturó $0 en este corte, no se puede sacar un
         // % de variación (división por cero) — pero si este mes ya hay
@@ -280,8 +289,18 @@ export const OBR_DashboardCortesActividad_CTS = async (req, res) => {
           activos_mes_anterior: activosMesAnterior,
           variacion,
           facturacion_acumulada: facturacionAcumulada,
+          cuotas_vendidas: cuotasVendidas,
+          cuotas_vendidas_mes_anterior: cuotasVendidasMesAnterior,
+          variacion_cuotas_vendidas: variacionCuotasVendidas,
           porcentaje_ocupacion: cupoMaximo > 0 ? Math.round((activos / cupoMaximo) * 10000) / 100 : null,
-          estado_activos: estadoPorVariacion(variacion),
+          // Sergio Manrique - 2026/08/05 - El semáforo de actividad de la
+          // sede se calcula con la variación de CUOTAS VENDIDAS, no con la
+          // variación de alumnos activos: el cliente pidió que el análisis
+          // de crecimiento/estabilidad se base en ventas de plan (que se
+          // mueven mes a mes) y no en el conteo de socios activos (que
+          // cambia muy poco de un corte a otro y no refleja el ritmo real
+          // de ventas).
+          estado_activos: estadoPorVariacion(variacionCuotasVendidas),
           estado_facturacion: estadoPorVariacionFacturacion(variacionFacturacionPct)
         });
       }
@@ -451,6 +470,9 @@ export const OBR_DashboardCierreMensual_CTS = async (req, res) => {
           WHERE p.sede_id = s.id AND p.estado = 'confirmado'
             AND p.mensualidad_id IS NOT NULL
             AND DATE(p.fecha_pago) BETWEEN :desde AND :hasta) AS cuotas_mensuales,
+        (SELECT COUNT(*) FROM pagos_mensualidades pm
+          WHERE pm.sede_id = s.id
+            AND pm.fecha_emision BETWEEN :desde AND :hasta) AS cuotas_vendidas,
         (SELECT COALESCE(SUM(p.monto), 0) FROM pagos_pagos p
           WHERE p.sede_id = s.id AND p.estado = 'confirmado'
             AND DATE(p.fecha_pago) BETWEEN :desde AND :hasta) AS facturacion_bruta,
@@ -495,6 +517,7 @@ export const OBR_DashboardCierreMensual_CTS = async (req, res) => {
       const gastoFrontComercial = Number(fila.gasto_front_comercial) || 0;
       const altasMensuales = Number(fila.altas_mensuales) || 0;
       const cuotasMensuales = Number(fila.cuotas_mensuales) || 0;
+      const cuotasVendidas = Number(fila.cuotas_vendidas) || 0;
       const facturacionNeta = facturacionBruta - gastos;
 
       const churnMensual = alumnosInicioMes > 0
@@ -542,6 +565,7 @@ export const OBR_DashboardCierreMensual_CTS = async (req, res) => {
         bajas_mensuales: bajasMensuales,
         churn_mensual: churnMensual,
         cuotas_mensuales: cuotasMensuales,
+        cuotas_vendidas: cuotasVendidas,
         ltv,
         facturacion_bruta: facturacionBruta,
         gastos,

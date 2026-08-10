@@ -27,6 +27,7 @@ import {
   normalizarDni
 } from '../../utils/texto.utils.js';
 import bcrypt from 'bcryptjs';
+import { calcularFechaVencimientoPlan } from '../../Services/Alumno/membresiaCiclo.service.js';
 
 export const ESTADOS_ALUMNO_VALIDOS = [
   'pendiente_validacion',
@@ -505,18 +506,6 @@ const esFechaDateOnlyValida = (value) => {
 
 const obtenerFechaActualDateOnly = () => {
   return new Date().toISOString().slice(0, 10);
-};
-
-const sumarDiasDateOnly = (fechaDateOnly, dias) => {
-  const fechaBase = new Date(`${fechaDateOnly}T00:00:00Z`);
-
-  if (Number.isNaN(fechaBase.getTime())) {
-    return null;
-  }
-
-  fechaBase.setUTCDate(fechaBase.getUTCDate() + Number(dias));
-
-  return fechaBase.toISOString().slice(0, 10);
 };
 
 export const normalizarTinyint = (value, defaultValue = 0) => {
@@ -1115,14 +1104,6 @@ const buscarPrecioVigentePlan = async ({
   });
 };
 
-const construirFechaVencimientoMembresia = (fechaInicio, duracionDias) => {
-  if (!fechaInicio || !duracionDias || Number(duracionDias) <= 0) {
-    return null;
-  }
-
-  return sumarDiasDateOnly(fechaInicio, Number(duracionDias) - 1);
-};
-
 // Benjamin Orellana - 2026/07/30 - Normaliza una lista de IDs para operaciones
 // masivas y evita procesar duplicados o valores inválidos.
 const normalizarIdsAlumnos = (valores = []) => {
@@ -1465,10 +1446,11 @@ const construirPayloadMembresiaPublica = ({
   const clasesIncluidas = Number(
     plan.cantidad_clases_periodo ?? plan.clases_por_mes ?? 0
   );
-  const fechaVencimiento = construirFechaVencimientoMembresia(
+  const fechaVencimiento = calcularFechaVencimientoPlan({
     fechaInicio,
-    plan.duracion_dias
-  );
+    periodo: plan.periodo,
+    duracionDias: plan.duracion_dias
+  });
 
   return {
     alumno_id: alumnoId,

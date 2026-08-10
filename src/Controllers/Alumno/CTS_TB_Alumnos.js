@@ -584,7 +584,9 @@ const usuarioPuedeOperarSede = (user, sedeId) => {
 };
 
 const validarRolOperacionAlumnos = (user) => {
-  return ROLES_OPERATIVOS_ALUMNOS.includes(user?.rol_codigo);
+  if (String(user?.rol_codigo || '').toUpperCase() === 'SUPER_ADMIN') return true;
+
+  return Array.isArray(user?.permisos) && user.permisos.includes('alumnos.editar');
 };
 
 export const validarRolLecturaAlumnos = (user) => {

@@ -2,8 +2,7 @@
 import express from 'express';
 import {
   authenticateToken,
-  requirePermission,
-  requireRolGlobal
+  requirePermission
 } from '../Security/auth.js';
 import {
   OBR_CategoriasServiciosCobro_CTS,
@@ -36,37 +35,55 @@ import {
 } from '../Controllers/Catalogo/CTS_TB_ServiciosGestion.js';
 
 const router = express.Router();
-const ROLES_GESTION = ['SUPER_ADMIN', 'DIRECCION', 'FRONT_COMERCIAL'];
 const seguridadCobros = [
   authenticateToken,
   requirePermission('cobros.registrar')
 ];
-const seguridadGestion = [authenticateToken, requireRolGlobal(ROLES_GESTION)];
+const seguridadProductosCobro = [
+  authenticateToken,
+  requirePermission(['cobros.registrar', 'catalogo.productos.ver'])
+];
+const seguridadProductosVer = [
+  authenticateToken,
+  requirePermission(['catalogo.productos.ver', 'catalogo.productos.configurar'])
+];
+const seguridadProductosConfigurar = [
+  authenticateToken,
+  requirePermission('catalogo.productos.configurar')
+];
+const seguridadServiciosVer = [
+  authenticateToken,
+  requirePermission(['catalogo.servicios.ver', 'catalogo.servicios.configurar'])
+];
+const seguridadServiciosConfigurar = [
+  authenticateToken,
+  requirePermission('catalogo.servicios.configurar')
+];
 
 router.get('/catalogo-cobros/servicios/categorias', ...seguridadCobros, OBR_CategoriasServiciosCobro_CTS);
 router.get('/catalogo-cobros/servicios', ...seguridadCobros, OBR_ServiciosCobro_CTS);
-router.get('/catalogo-cobros/productos/categorias', ...seguridadCobros, OBR_CategoriasProductosCobro_CTS);
-router.get('/catalogo-cobros/productos/filtros', ...seguridadCobros, OBR_FiltrosProductosCobro_CTS);
-router.get('/catalogo-cobros/productos', ...seguridadCobros, OBR_ProductosCobro_CTS);
+router.get('/catalogo-cobros/productos/categorias', ...seguridadProductosCobro, OBR_CategoriasProductosCobro_CTS);
+router.get('/catalogo-cobros/productos/filtros', ...seguridadProductosCobro, OBR_FiltrosProductosCobro_CTS);
+router.get('/catalogo-cobros/productos', ...seguridadProductosCobro, OBR_ProductosCobro_CTS);
 router.get('/catalogo-cobros/planes', ...seguridadCobros, OBR_PlanesCobro_CTS);
 
-router.get('/productos-gestion/catalogos', ...seguridadGestion, OBR_CatalogosProductosGestion_CTS);
-router.post('/productos-gestion/catalogos/:entidad', ...seguridadGestion, CR_ClasificacionProductoGestion_CTS);
-router.get('/productos-gestion', ...seguridadGestion, OBR_ProductosGestion_CTS);
-router.post('/productos-gestion', ...seguridadGestion, CR_ProductoGestion_CTS);
-router.get('/productos-gestion/:id', ...seguridadGestion, OBR_ProductoGestionDetalle_CTS);
-router.patch('/productos-gestion/:id', ...seguridadGestion, UR_ProductoGestion_CTS);
-router.patch('/productos-gestion/:id/estado', ...seguridadGestion, UR_EstadoProductoGestion_CTS);
-router.post('/productos-gestion/:id/ajustes-stock', ...seguridadGestion, CR_AjusteStockProductoGestion_CTS);
-router.get('/productos-gestion/:id/movimientos-stock', ...seguridadGestion, OBR_MovimientosStockProductoGestion_CTS);
+router.get('/productos-gestion/catalogos', ...seguridadProductosVer, OBR_CatalogosProductosGestion_CTS);
+router.post('/productos-gestion/catalogos/:entidad', ...seguridadProductosConfigurar, CR_ClasificacionProductoGestion_CTS);
+router.get('/productos-gestion', ...seguridadProductosVer, OBR_ProductosGestion_CTS);
+router.post('/productos-gestion', ...seguridadProductosConfigurar, CR_ProductoGestion_CTS);
+router.get('/productos-gestion/:id', ...seguridadProductosVer, OBR_ProductoGestionDetalle_CTS);
+router.patch('/productos-gestion/:id', ...seguridadProductosConfigurar, UR_ProductoGestion_CTS);
+router.patch('/productos-gestion/:id/estado', ...seguridadProductosConfigurar, UR_EstadoProductoGestion_CTS);
+router.post('/productos-gestion/:id/ajustes-stock', ...seguridadProductosConfigurar, CR_AjusteStockProductoGestion_CTS);
+router.get('/productos-gestion/:id/movimientos-stock', ...seguridadProductosVer, OBR_MovimientosStockProductoGestion_CTS);
 
-router.get('/servicios-gestion/catalogos', ...seguridadGestion, OBR_CatalogosServiciosGestion_CTS);
-router.post('/servicios-gestion/catalogos/categorias', ...seguridadGestion, CR_CategoriaServicioGestion_CTS);
-router.get('/servicios-gestion', ...seguridadGestion, OBR_ServiciosGestion_CTS);
-router.post('/servicios-gestion', ...seguridadGestion, CR_ServicioGestion_CTS);
-router.get('/servicios-gestion/:id', ...seguridadGestion, OBR_ServicioGestionDetalle_CTS);
-router.get('/servicios-gestion/:id/precios', ...seguridadGestion, OBR_HistorialPreciosServicioGestion_CTS);
-router.patch('/servicios-gestion/:id', ...seguridadGestion, UR_ServicioGestion_CTS);
-router.patch('/servicios-gestion/:id/estado', ...seguridadGestion, UR_EstadoServicioGestion_CTS);
+router.get('/servicios-gestion/catalogos', ...seguridadServiciosVer, OBR_CatalogosServiciosGestion_CTS);
+router.post('/servicios-gestion/catalogos/categorias', ...seguridadServiciosConfigurar, CR_CategoriaServicioGestion_CTS);
+router.get('/servicios-gestion', ...seguridadServiciosVer, OBR_ServiciosGestion_CTS);
+router.post('/servicios-gestion', ...seguridadServiciosConfigurar, CR_ServicioGestion_CTS);
+router.get('/servicios-gestion/:id', ...seguridadServiciosVer, OBR_ServicioGestionDetalle_CTS);
+router.get('/servicios-gestion/:id/precios', ...seguridadServiciosVer, OBR_HistorialPreciosServicioGestion_CTS);
+router.patch('/servicios-gestion/:id', ...seguridadServiciosConfigurar, UR_ServicioGestion_CTS);
+router.patch('/servicios-gestion/:id/estado', ...seguridadServiciosConfigurar, UR_EstadoServicioGestion_CTS);
 
 export default router;

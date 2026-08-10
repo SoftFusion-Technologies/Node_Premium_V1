@@ -15,7 +15,7 @@
 import express from 'express';
 
 // Benjamin Orellana - 2026/05/10 - Importa middlewares de seguridad para proteger rutas PREMIUM.
-import { authenticateToken } from '../Security/auth.js';
+import { authenticateToken, requirePermission } from '../Security/auth.js';
 
 import {
   OBR_Planes_CTS,
@@ -45,37 +45,46 @@ import {
 
 const router = express.Router();
 
+const seguridadPlanesVer = [
+  authenticateToken,
+  requirePermission(['catalogo.planes.ver', 'catalogo.planes.configurar'])
+];
+const seguridadPlanesConfigurar = [
+  authenticateToken,
+  requirePermission('catalogo.planes.configurar')
+];
+
 /*
  * =========================================================
  * PLANES
  * =========================================================
  */
 
-router.get('/planes', authenticateToken, OBR_Planes_CTS);
+router.get('/planes', ...seguridadPlanesVer, OBR_Planes_CTS);
 
 // Benjamin Orellana - 2026/07/01 - Lista alumnos asignados a un plan desde el módulo Planes.
 router.get(
   '/planes/:plan_id/alumnos-asignados',
-  authenticateToken,
+  ...seguridadPlanesVer,
   OBR_AlumnosAsignadosPlan_CTS
 );
 
-router.get('/planes/:id', authenticateToken, OBR_PlanPorId_CTS);
+router.get('/planes/:id', ...seguridadPlanesVer, OBR_PlanPorId_CTS);
 
 // Benjamin Orellana - 2026/06/01 - Endpoint público para obtener ID y nombre de planes activos.
 router.get('/planes-publicos', OBR_PlanesPublicos_CTS);
 
 router.get('/planes-con-precios', OBR_PlanesConPrecios_CTS);
 
-router.post('/planes', authenticateToken, CR_Planes_CTS);
+router.post('/planes', ...seguridadPlanesConfigurar, CR_Planes_CTS);
 
-router.put('/planes/:id', authenticateToken, UR_Planes_CTS);
+router.put('/planes/:id', ...seguridadPlanesConfigurar, UR_Planes_CTS);
 
-router.patch('/planes/:id/estado', authenticateToken, UR_EstadoPlanes_CTS);
+router.patch('/planes/:id/estado', ...seguridadPlanesConfigurar, UR_EstadoPlanes_CTS);
 
-router.put('/planes/:id/desactivar', authenticateToken, DR_Planes_CTS);
+router.put('/planes/:id/desactivar', ...seguridadPlanesConfigurar, DR_Planes_CTS);
 
-router.delete('/planes/:id', authenticateToken, ER_Planes_CTS);
+router.delete('/planes/:id', ...seguridadPlanesConfigurar, ER_Planes_CTS);
 
 /*
  * =========================================================
@@ -83,45 +92,45 @@ router.delete('/planes/:id', authenticateToken, ER_Planes_CTS);
  * =========================================================
  */
 
-router.get('/planes-precios', authenticateToken, OBR_PlanesPrecios_CTS);
+router.get('/planes-precios', ...seguridadPlanesVer, OBR_PlanesPrecios_CTS);
 
-router.get('/planes-precios/:id', authenticateToken, OBR_PlanPrecioPorId_CTS);
+router.get('/planes-precios/:id', ...seguridadPlanesVer, OBR_PlanPrecioPorId_CTS);
 
 router.get(
   '/planes/:plan_id/precios',
-  authenticateToken,
+  ...seguridadPlanesVer,
   OBR_PreciosPorPlan_CTS
 );
 
 router.get(
   '/planes/:plan_id/precio-vigente',
-  authenticateToken,
+  ...seguridadPlanesVer,
   OBR_PrecioVigentePlan_CTS
 );
 
-router.post('/planes-precios', authenticateToken, CR_PlanesPrecios_CTS);
+router.post('/planes-precios', ...seguridadPlanesConfigurar, CR_PlanesPrecios_CTS);
 
 // Benjamin Orellana - 2026/05/30 - Crea precios masivos de un plan por sede.
 router.post(
   '/planes/:plan_id/precios/sedes',
-  authenticateToken,
+  ...seguridadPlanesConfigurar,
   CR_PlanesPreciosMasivoPorSedes_CTS
 );
 
-router.put('/planes-precios/:id', authenticateToken, UR_PlanesPrecios_CTS);
+router.put('/planes-precios/:id', ...seguridadPlanesConfigurar, UR_PlanesPrecios_CTS);
 
 router.patch(
   '/planes-precios/:id/estado',
-  authenticateToken,
+  ...seguridadPlanesConfigurar,
   UR_EstadoPlanesPrecios_CTS
 );
 
 router.put(
   '/planes-precios/:id/desactivar',
-  authenticateToken,
+  ...seguridadPlanesConfigurar,
   DR_PlanesPrecios_CTS
 );
 
-router.delete('/planes-precios/:id', authenticateToken, ER_PlanesPrecios_CTS);
+router.delete('/planes-precios/:id', ...seguridadPlanesConfigurar, ER_PlanesPrecios_CTS);
 
 export default router;

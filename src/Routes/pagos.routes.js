@@ -103,7 +103,7 @@ const seguridadDeudasGestionar = [
 ];
 const seguridadMediosVer = [
   authenticateToken,
-  requirePermission(['medios_pago.ver', 'cobros.registrar'])
+  requirePermission(['medios_pago.ver', 'medios_pago.configurar', 'cobros.registrar'])
 ];
 const seguridadMediosConfigurar = [
   authenticateToken,

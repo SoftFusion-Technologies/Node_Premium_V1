@@ -280,12 +280,7 @@ router.get(
 router.post(
   "/alumnos",
   authenticateToken,
-  requireRolGlobal([
-    "SUPER_ADMIN",
-    "DIRECCION",
-    "FRONT_COMERCIAL",
-    "COORD_SEDE",
-  ]),
+  requirePermission("alumnos.editar"),
   CR_Alumnos_CTS,
 );
 
@@ -300,12 +295,7 @@ router.post("/alumnos/registro-publico", CR_Alumnos_Publico_CTS);
 router.put(
   "/alumnos/:id",
   authenticateToken,
-  requireRolGlobal([
-    "SUPER_ADMIN",
-    "DIRECCION",
-    "FRONT_COMERCIAL",
-    "COORD_SEDE",
-  ]),
+  requirePermission("alumnos.editar"),
   UR_Alumnos_CTS,
 );
 
@@ -317,12 +307,7 @@ router.put(
 router.patch(
   "/alumnos/:id/actualizacion-rapida",
   authenticateToken,
-  requireRolGlobal([
-    "SUPER_ADMIN",
-    "DIRECCION",
-    "FRONT_COMERCIAL",
-    "COORD_SEDE",
-  ]),
+  requirePermission("alumnos.editar"),
   UR_ActualizacionRapidaAlumno_CTS,
 );
 
@@ -332,12 +317,7 @@ router.patch(
 router.patch(
   "/alumnos/actualizacion-masiva",
   authenticateToken,
-  requireRolGlobal([
-    "SUPER_ADMIN",
-    "DIRECCION",
-    "FRONT_COMERCIAL",
-    "COORD_SEDE",
-  ]),
+  requirePermission("alumnos.editar"),
   UR_ActualizacionMasivaAlumnos_CTS,
 );
 
@@ -347,12 +327,7 @@ router.patch(
 router.patch(
   "/alumnos/:id/estado",
   authenticateToken,
-  requireRolGlobal([
-    "SUPER_ADMIN",
-    "DIRECCION",
-    "FRONT_COMERCIAL",
-    "COORD_SEDE",
-  ]),
+  requirePermission("alumnos.editar"),
   UR_EstadoAlumnos_CTS,
 );
 
@@ -362,12 +337,7 @@ router.patch(
 router.patch(
   "/alumnos/:id/baja",
   authenticateToken,
-  requireRolGlobal([
-    "SUPER_ADMIN",
-    "DIRECCION",
-    "FRONT_COMERCIAL",
-    "COORD_SEDE",
-  ]),
+  requirePermission("alumnos.editar"),
   UR_BajaAlumnos_CTS,
 );
 
@@ -377,12 +347,7 @@ router.patch(
 router.patch(
   "/alumnos/:id/congelar",
   authenticateToken,
-  requireRolGlobal([
-    "SUPER_ADMIN",
-    "DIRECCION",
-    "FRONT_COMERCIAL",
-    "COORD_SEDE",
-  ]),
+  requirePermission("alumnos.editar"),
   UR_CongelarAlumnos_CTS,
 );
 
@@ -392,12 +357,7 @@ router.patch(
 router.patch(
   "/alumnos/:id/reactivar",
   authenticateToken,
-  requireRolGlobal([
-    "SUPER_ADMIN",
-    "DIRECCION",
-    "FRONT_COMERCIAL",
-    "COORD_SEDE",
-  ]),
+  requirePermission("alumnos.editar"),
   UR_ReactivarAlumnos_CTS,
 );
 

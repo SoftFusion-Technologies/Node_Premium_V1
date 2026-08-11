@@ -20,6 +20,7 @@ import SedesModel from '../../Models/Sede/MD_TB_Sedes.js';
 import FinanzasMovimientosModel from '../../Models/Finanzas/MD_TB_FinanzasMovimientos.js';
 import { copiarRestriccionesPlan } from '../../Services/Agenda/agendaRestricciones.service.js';
 import { imputarReservasPendientesMembresia } from '../../Services/Agenda/reservasPendientes.service.js';
+import { calcularFechaVencimientoPlan } from '../../Services/Alumno/membresiaCiclo.service.js';
 
 const ESTADOS_MEMBRESIA_OPERATIVOS = ['pendiente_pago', 'activa', 'vencida'];
 const ESTADOS_MENSUALIDAD_COBRABLES = ['pendiente', 'parcial', 'vencida'];
@@ -246,10 +247,11 @@ const crearMembresiaDesdePlan = async ({
     plan.cantidad_clases_periodo ?? plan.clases_por_mes ?? 0
   );
 
-  const fechaVencimiento = sumarDiasDateOnly(
+  const fechaVencimiento = calcularFechaVencimientoPlan({
     fechaInicio,
-    Number(plan.duracion_dias || 0) - 1
-  );
+    periodo: plan.periodo,
+    duracionDias: plan.duracion_dias
+  });
 
   if (!fechaVencimiento) {
     return {

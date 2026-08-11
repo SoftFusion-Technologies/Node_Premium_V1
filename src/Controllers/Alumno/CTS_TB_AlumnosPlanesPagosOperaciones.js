@@ -17,6 +17,7 @@ import SistemaAuditoriaLogsModel from '../../Models/Sistema/MD_TB_SistemaAuditor
 import { copiarRestriccionesPlan } from '../../Services/Agenda/agendaRestricciones.service.js';
 import { imputarReservasPendientesMembresia } from '../../Services/Agenda/reservasPendientes.service.js';
 import { usuarioTieneAccesoTodasSedes } from '../../utils/usuariosAcceso.utils.js';
+import { calcularFechaVencimientoPlan } from '../../Services/Alumno/membresiaCiclo.service.js';
 
 const responderError = (res, status, message, data = null) => {
   return res.status(status).json({
@@ -354,6 +355,7 @@ const mapMembresiaResumen = (membresia, hoy) => {
           codigo: membresia.plan.codigo,
           clases_por_mes: membresia.plan.clases_por_mes,
           cantidad_clases_periodo: membresia.plan.cantidad_clases_periodo,
+          periodo: membresia.plan.periodo,
           duracion_dias: membresia.plan.duracion_dias
         }
       : null,
@@ -739,6 +741,7 @@ export const OBR_VencimientosAlumnoPlanesPagos_CTS = async (req, res) => {
             'codigo',
             'clases_por_mes',
             'cantidad_clases_periodo',
+            'periodo',
             'duracion_dias',
             'activo'
           ]
@@ -998,9 +1001,15 @@ export const CR_GenerarMembresiaAlumnoPlanesPagos_CTS = async (req, res) => {
       );
     }
 
+    const fechaVencimientoCalculada = calcularFechaVencimientoPlan({
+      fechaInicio: fechaInicioFinal,
+      periodo: plan.periodo,
+      duracionDias
+    });
+
     const fechaVencimientoFinal = normalizarFechaDateOnlyOperativa(
       fecha_vencimiento,
-      sumarDiasDateOnly(fechaInicioFinal, Math.max(duracionDias - 1, 0))
+      fechaVencimientoCalculada
     );
 
     if (!esFechaDateOnlyValida(fechaVencimientoFinal)) {
@@ -3020,7 +3029,11 @@ export const CR_ReingresarAlumnoPlanesPagos_CTS = async (req, res) => {
     const fechaVencimientoFinal =
       fecha_vencimiento && String(fecha_vencimiento).trim()
         ? String(fecha_vencimiento).slice(0, 10)
-        : sumarDiasDateOnly(fechaInicioFinal, Math.max(duracionDias - 1, 0));
+        : calcularFechaVencimientoPlan({
+            fechaInicio: fechaInicioFinal,
+            periodo: plan.periodo,
+            duracionDias
+          });
 
     const clasesIncluidas = Number(
       plan.cantidad_clases_periodo || plan.clases_por_mes || 0

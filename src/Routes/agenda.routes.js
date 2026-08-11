@@ -28,6 +28,7 @@ import {
 
 import {
   OBRS_Turnos_CTS,
+  OBRS_OcupacionAgenda_CTS,
   OBRS_TurnosAsistenciaDia_CTS,
   OBRS_AsistenciasRango_CTS,
   OBRS_HistorialCancelaciones_CTS,
@@ -143,6 +144,17 @@ router.get(
   authenticateToken,
   requireRolGlobal(ROLES_ADMIN),
   OBRS_Turnos_CTS
+);
+
+/*
+ * Benjamin Orellana - 2026/08/11 - Reporte agregado de ocupación.
+ * Exclusivo SUPER_ADMIN. Query params: sede_id, fecha_desde, fecha_hasta.
+ */
+router.get(
+  '/agenda-admin/ocupacion',
+  authenticateToken,
+  requireRolGlobal(['SUPER_ADMIN']),
+  OBRS_OcupacionAgenda_CTS
 );
 
 /*

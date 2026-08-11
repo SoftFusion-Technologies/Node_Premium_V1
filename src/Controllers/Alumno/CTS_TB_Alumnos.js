@@ -27,6 +27,7 @@ import {
   normalizarDni
 } from '../../utils/texto.utils.js';
 import bcrypt from 'bcryptjs';
+import { calcularFechaVencimientoPlan } from '../../Services/Alumno/membresiaCiclo.service.js';
 
 export const ESTADOS_ALUMNO_VALIDOS = [
   'pendiente_validacion',
@@ -70,10 +71,9 @@ const ORDENES_VENCIMIENTO_VALIDOS = [
   'fecha_desc'
 ];
 
-// Sergio Manrique - 2026/08/01 - "Cliente perdido" definido por el PM como
-// alumno con cuota vencida de al menos 1 mes (mismo criterio que el filtro
-// "1 mes de cuota vencida").
-const MESES_CUOTA_VENCIDA_CLIENTE_PERDIDO = 1;
+// Benjamin Orellana - 2026/08/11 - Cliente perdido deja de inferirse por deuda.
+// A partir de ahora depende de que el último contacto comercial del alumno
+// haya sido catalogado explícitamente con resultado_gestion = 'perdido'.
 
 export const ROLES_OPERATIVOS_ALUMNOS = [
   'SUPER_ADMIN',
@@ -354,6 +354,28 @@ export const construirFiltroAlumnoInactivo = (diasMinimos) => {
 };
 
 /*
+ * Benjamin Orellana - 2026/08/11 - Un cliente perdido es una decisión
+ * comercial explícita, no una inferencia por antigüedad de deuda. Se toma
+ * el resultado del último contacto registrado para el alumno.
+ */
+export const construirFiltroClientePerdido = () => {
+  const queryGenerator = db.getQueryInterface().queryGenerator;
+  const aliasPrincipal = queryGenerator.quoteIdentifier(AlumnosModel.name);
+  const columnaId = queryGenerator.quoteIdentifier('id');
+
+  return db.literal(`
+    COALESCE((
+      SELECT c.resultado_gestion
+      FROM alumnos_recaptaciones_contactos c
+      WHERE c.alumno_id = ${aliasPrincipal}.${columnaId}
+        AND c.resultado_gestion <> 'pendiente'
+      ORDER BY c.fecha_contacto DESC, c.id DESC
+      LIMIT 1
+    ), '') = 'perdido'
+  `);
+};
+
+/*
  * Sergio Manrique - 2026/08/02 - Etiqueta legible de seguimiento comercial
  * ("Inactivo hace 5 días", "Cuota vencida hace 1 mes", "Pendiente de
  * validación") a partir de los días reales calculados. Compartida entre el
@@ -507,18 +529,6 @@ const obtenerFechaActualDateOnly = () => {
   return new Date().toISOString().slice(0, 10);
 };
 
-const sumarDiasDateOnly = (fechaDateOnly, dias) => {
-  const fechaBase = new Date(`${fechaDateOnly}T00:00:00Z`);
-
-  if (Number.isNaN(fechaBase.getTime())) {
-    return null;
-  }
-
-  fechaBase.setUTCDate(fechaBase.getUTCDate() + Number(dias));
-
-  return fechaBase.toISOString().slice(0, 10);
-};
-
 export const normalizarTinyint = (value, defaultValue = 0) => {
   if (value === undefined || value === null || value === '')
     return defaultValue;
@@ -584,7 +594,9 @@ const usuarioPuedeOperarSede = (user, sedeId) => {
 };
 
 const validarRolOperacionAlumnos = (user) => {
-  return ROLES_OPERATIVOS_ALUMNOS.includes(user?.rol_codigo);
+  if (String(user?.rol_codigo || '').toUpperCase() === 'SUPER_ADMIN') return true;
+
+  return Array.isArray(user?.permisos) && user.permisos.includes('alumnos.editar');
 };
 
 export const validarRolLecturaAlumnos = (user) => {
@@ -1113,14 +1125,6 @@ const buscarPrecioVigentePlan = async ({
   });
 };
 
-const construirFechaVencimientoMembresia = (fechaInicio, duracionDias) => {
-  if (!fechaInicio || !duracionDias || Number(duracionDias) <= 0) {
-    return null;
-  }
-
-  return sumarDiasDateOnly(fechaInicio, Number(duracionDias) - 1);
-};
-
 // Benjamin Orellana - 2026/07/30 - Normaliza una lista de IDs para operaciones
 // masivas y evita procesar duplicados o valores inválidos.
 const normalizarIdsAlumnos = (valores = []) => {
@@ -1463,10 +1467,11 @@ const construirPayloadMembresiaPublica = ({
   const clasesIncluidas = Number(
     plan.cantidad_clases_periodo ?? plan.clases_por_mes ?? 0
   );
-  const fechaVencimiento = construirFechaVencimientoMembresia(
+  const fechaVencimiento = calcularFechaVencimientoPlan({
     fechaInicio,
-    plan.duracion_dias
-  );
+    periodo: plan.periodo,
+    duracionDias: plan.duracion_dias
+  });
 
   return {
     alumno_id: alumnoId,
@@ -1697,7 +1702,7 @@ export const OBR_Alumnos_CTS = async (req, res) => {
     if (normalizarTinyint(cliente_perdido, 0) === 1) {
       where[Op.and] = [
         ...(where[Op.and] || []),
-        construirFiltroAlumnoCuotaVencida(MESES_CUOTA_VENCIDA_CLIENTE_PERDIDO)
+        construirFiltroClientePerdido()
       ];
     }
 

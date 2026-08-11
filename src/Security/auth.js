@@ -39,10 +39,10 @@ const ROLES_INTERNOS = [
   'PROFESOR'
 ];
 
-// Benjamin Orellana - 2026/08/07 - COORD_SEDE administra alumnos de su sede,
-// pero no participa de la operatoria financiera. Este bloqueo central evita
-// que permisos históricos en BD vuelvan a exponer Caja/Cobros/Gastos/Pagos.
-const PREFIJOS_FINANCIEROS_BLOQUEADOS_COORDINADOR = [
+// Benjamin Orellana - 2026/08/10 - Los perfiles operativos pueden trabajar el día,
+// pero no deben abrir módulos financieros históricos o de configuración aunque
+// hayan quedado permisos legacy asociados al rol.
+const PREFIJOS_FINANCIEROS_BLOQUEADOS_OPERATIVOS = [
   'caja.',
   'cobros.',
   'deudas.',
@@ -52,28 +52,29 @@ const PREFIJOS_FINANCIEROS_BLOQUEADOS_COORDINADOR = [
   'saldos.'
 ];
 
-// Benjamin Orellana - 2026/08/07 - Coordinador y Profesor trabajan la operatoria
+// Benjamin Orellana - 2026/08/10 - Coordinador y Profesor trabajan la operatoria
 // financiera del día (ventas, cobros, gastos y caja), pero no la analítica/histórico.
 // El alcance temporal se refuerza en operationalDayScope.js. Esta allowlist evita
 // que permisos históricos de COORD_SEDE abran deudas, saldos o reportes sensibles.
-const PERMISOS_FINANCIEROS_OPERATIVOS_COORDINADOR = new Set([
+const PERMISOS_FINANCIEROS_OPERATIVOS = new Set([
   'cobros.ver',
   'cobros.registrar',
   'caja.ver',
   'caja.abrir',
   'caja.contar',
   'caja.cerrar',
-  'gastos.ver'
+  'gastos.ver',
+  'medios_pago.ver'
 ]);
 
-const esPermisoFinancieroBloqueadoCoordinador = (codigo) => {
+const esPermisoFinancieroBloqueadoOperativo = (codigo) => {
   const permiso = String(codigo || '').trim().toLowerCase();
 
-  if (PERMISOS_FINANCIEROS_OPERATIVOS_COORDINADOR.has(permiso)) {
+  if (PERMISOS_FINANCIEROS_OPERATIVOS.has(permiso)) {
     return false;
   }
 
-  return PREFIJOS_FINANCIEROS_BLOQUEADOS_COORDINADOR.some((prefijo) =>
+  return PREFIJOS_FINANCIEROS_BLOQUEADOS_OPERATIVOS.some((prefijo) =>
     permiso.startsWith(prefijo)
   );
 };
@@ -678,18 +679,19 @@ export const requirePermission = (permisosRequeridos = []) => {
       .trim()
       .toUpperCase();
 
-    const requeridosEvaluables =
-      rolEfectivo === 'COORD_SEDE'
-        ? requeridos.filter(
-            (codigo) => !esPermisoFinancieroBloqueadoCoordinador(codigo)
-          )
-        : requeridos;
+    const rolOperacionDiaria = ['COORD_SEDE', 'PROFESOR'].includes(rolEfectivo);
+    const requeridosEvaluables = rolOperacionDiaria
+      ? requeridos.filter(
+          (codigo) => !esPermisoFinancieroBloqueadoOperativo(codigo)
+        )
+      : requeridos;
 
-    if (rolEfectivo === 'COORD_SEDE' && !requeridosEvaluables.length) {
+    if (rolOperacionDiaria && !requeridosEvaluables.length) {
       return res.status(403).json({
         ok: false,
-        code: 'COORDINATOR_FINANCE_DENIED',
-        message: 'El rol coordinador no tiene acceso a módulos financieros.'
+        code: 'OPERATIONAL_FINANCE_DENIED',
+        message:
+          'El perfil operativo no tiene acceso a módulos financieros históricos o de configuración.'
       });
     }
 

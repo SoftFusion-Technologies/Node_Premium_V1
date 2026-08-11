@@ -24,7 +24,10 @@ import ProductosStockSedesModel from "../../Models/Catalogo/MD_TB_ProductosStock
 import ProductosStockMovimientosModel from "../../Models/Catalogo/MD_TB_ProductosStockMovimientos.js";
 import ProductosModel from "../../Models/Catalogo/MD_TB_Productos.js";
 import SistemaAuditoriaLogsModel from "../../Models/Sistema/MD_TB_SistemaAuditoriaLogs.js";
-import { normalizarCicloMembresiasAlumno } from "../Alumno/membresiaCiclo.service.js";
+import {
+  calcularFechaVencimientoPlan,
+  normalizarCicloMembresiasAlumno
+} from "../Alumno/membresiaCiclo.service.js";
 import { copiarRestriccionesPlan } from "../Agenda/agendaRestricciones.service.js";
 import { imputarReservasPendientesMembresia } from "../Agenda/reservasPendientes.service.js";
 
@@ -124,30 +127,6 @@ const validarSinReservasFuturasParaCambioPlan = async ({
       "RESERVAS_FUTURAS_PENDIENTES",
     );
   }
-};
-
-const MESES_POR_PERIODO = {
-  mensual: 1,
-  trimestral: 3,
-  semestral: 6,
-  anual: 12,
-};
-
-// Conserva el día del vencimiento al avanzar por períodos calendario.
-// Ejemplo: 2026-08-06 + un período mensual = 2026-09-06.
-const sumarMesesCalendario = (fechaDateOnly, meses) => {
-  const fecha = new Date(`${fechaDateOnly}T00:00:00Z`);
-  const diaOriginal = fecha.getUTCDate();
-
-  fecha.setUTCDate(1);
-  fecha.setUTCMonth(fecha.getUTCMonth() + Number(meses));
-
-  const ultimoDiaMesDestino = new Date(
-    Date.UTC(fecha.getUTCFullYear(), fecha.getUTCMonth() + 1, 0),
-  ).getUTCDate();
-  fecha.setUTCDate(Math.min(diaOriginal, ultimoDiaMesDestino));
-
-  return fecha.toISOString().slice(0, 10);
 };
 
 const consultaCatalogo = async ({
@@ -880,12 +859,6 @@ const crearMembresiaPlan = async ({
     lock: transaction.LOCK.UPDATE,
   });
 
-  const esContinuidadMismoPlan = Boolean(
-    !linea.fecha_inicio &&
-      ultima?.fecha_vencimiento &&
-      ultima.fecha_vencimiento >= hoy &&
-      Number(ultima.plan_id) === Number(linea.referencia_id),
-  );
   const fechaInicio = iniciarCicloAhora
     ? hoy
     : linea.fecha_inicio ||
@@ -893,17 +866,21 @@ const crearMembresiaPlan = async ({
       ? sumarDias(ultima.fecha_vencimiento, 1)
       : hoy);
   const duracion = Math.max(Number(linea.duracion_dias || 1), 1);
-  const mesesPeriodo =
-    MESES_POR_PERIODO[String(linea.periodo || "")] || null;
-  const fechaVencimiento = iniciarCicloAhora
-    ? mesesPeriodo
-      ? sumarDias(sumarMesesCalendario(fechaInicio, mesesPeriodo), -1)
-      : sumarDias(fechaInicio, duracion - 1)
-    : esContinuidadMismoPlan
-      ? mesesPeriodo
-        ? sumarMesesCalendario(ultima.fecha_vencimiento, mesesPeriodo)
-        : sumarDias(fechaInicio, duracion - 1)
-      : sumarDias(fechaInicio, duracion - 1);
+  // Benjamin Orellana - 2026/08/10 - Unifica altas, cambios y renovaciones:
+  // el periodo comercial del plan manda sobre la cantidad fija de días.
+  const fechaVencimiento = calcularFechaVencimientoPlan({
+    fechaInicio,
+    periodo: linea.periodo,
+    duracionDias: duracion
+  });
+
+  if (!fechaVencimiento) {
+    throw new CobroOperacionError(
+      "No se pudo calcular el vencimiento del plan seleccionado.",
+      400,
+      "VENCIMIENTO_PLAN_INVALIDO",
+    );
+  }
   const clases = Number(
     linea.cantidad_clases_periodo ?? linea.clases_por_mes ?? 0,
   );

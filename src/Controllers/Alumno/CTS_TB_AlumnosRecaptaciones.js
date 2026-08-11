@@ -1,12 +1,12 @@
 /*
  * Sergio Manrique - 2026/08/01
- * Controlador del módulo Recaptaciones: listado de alumnos que requieren
- * seguimiento comercial (inactividad / cuota vencida / cliente perdido) e
- * historial de contactos registrados para cada uno.
+ * Benjamin Orellana - 2026/08/11
+ * Seguimiento comercial de alumnos: inactivos, vencidos y clientes perdidos.
  *
- * Reutiliza el mismo alcance de sede, búsqueda y armado de respuesta que ya
- * usa el listado de Alumnos (Controllers/Alumno/CTS_TB_Alumnos.js), para no
- * duplicar reglas de negocio.
+ * La bandeja es una cola operativa. Un alumno permanece mientras la etapa
+ * actual no tenga un contacto resuelto; el historial nunca se elimina y se
+ * utiliza para estadísticas. Las etapas no se solapan: 5-14 / 15+ días y
+ * 1-<3 / 3+ meses.
  */
 
 import { Op, QueryTypes } from 'sequelize';
@@ -22,8 +22,7 @@ import {
   aplicarScopeSedesAlumnos,
   calcularEtiquetaSeguimiento,
   construirAlumnoRespuesta,
-  construirFiltroAlumnoCuotaVencida,
-  construirFiltroAlumnoInactivo,
+  construirFiltroClientePerdido,
   construirFiltroSinRelacionAlumno,
   construirWhereBusquedaAlumno,
   normalizarTinyint,
@@ -43,66 +42,244 @@ const MOTIVOS_SEGUIMIENTO_VALIDOS = [
   'pendiente_validacion'
 ];
 
+const MOTIVOS_ESTADISTICAS = ['inactividad_5', 'inactividad_15', 'cuota_1', 'cuota_3'];
 const MEDIOS_CONTACTO_VALIDOS = ['whatsapp', 'llamada', 'email', 'presencial', 'otro'];
-
-// Motivo que da el propio cliente para no asistir/pagar (personal, no
-// contesta, disconformidad con el servicio, precio, etc.), tal como lo
-// venía registrando el coordinador en su planilla manual.
 const MOTIVOS_CLIENTE_VALIDOS = ['personal', 'no_contesta', 'servicio', 'precio', 'otro'];
-
-const RESULTADOS_GESTION_VALIDOS = ['positivo', 'negativo', 'pendiente'];
+const RESULTADOS_GESTION_VALIDOS = ['positivo', 'negativo', 'pendiente', 'perdido'];
+const RESULTADOS_FILTRO_VALIDOS = ['gestionados', 'positivo', 'negativo', 'perdido'];
 
 const normalizarTexto = (value) => {
   if (value === undefined || value === null) return null;
-
   const texto = String(value).trim();
-
   return texto.length > 0 ? texto : null;
 };
 
-// Arma el filtro Sequelize de un motivo puntual, o la unión de todos si no se indica.
+const queryGenerator = db.getQueryInterface().queryGenerator;
+const ALIAS_ALUMNO = queryGenerator.quoteIdentifier(AlumnosModel.name);
+const COLUMNA_ALUMNO_ID = queryGenerator.quoteIdentifier('id');
+
+const expresionUltimaAsistencia = (aliasAlumno = ALIAS_ALUMNO) => `
+  COALESCE(
+    (
+      SELECT MAX(aa.fecha)
+      FROM alumnos_asistencias aa
+      WHERE aa.alumno_id = ${aliasAlumno}.${COLUMNA_ALUMNO_ID}
+        AND aa.estado = 'asistio'
+    ),
+    ${aliasAlumno}.fecha_inicio
+  )
+`;
+
+const expresionCuotaVencidaMasAntigua = (aliasAlumno = ALIAS_ALUMNO) => `
+  (
+    SELECT MIN(pm.fecha_vencimiento)
+    FROM pagos_mensualidades pm
+    WHERE pm.alumno_id = ${aliasAlumno}.${COLUMNA_ALUMNO_ID}
+      AND pm.saldo > 0
+      AND pm.estado <> 'anulada'
+      AND pm.estado IN ('vencida', 'pendiente', 'parcial')
+      AND pm.fecha_vencimiento < CURDATE()
+  )
+`;
+
+const construirFiltroInactividadRango = (diasDesde, diasHasta = null) => {
+  const referencia = expresionUltimaAsistencia();
+  const condiciones = [`DATEDIFF(CURDATE(), ${referencia}) >= ${Number(diasDesde)}`];
+
+  if (diasHasta !== null) {
+    condiciones.push(`DATEDIFF(CURDATE(), ${referencia}) < ${Number(diasHasta)}`);
+  }
+
+  return db.literal(condiciones.join(' AND '));
+};
+
+const construirFiltroCuotaRango = (mesesDesde, mesesHasta = null) => {
+  const referencia = expresionCuotaVencidaMasAntigua();
+  const condiciones = [
+    `${referencia} IS NOT NULL`,
+    `${referencia} <= DATE_SUB(CURDATE(), INTERVAL ${Number(mesesDesde)} MONTH)`
+  ];
+
+  if (mesesHasta !== null) {
+    condiciones.push(
+      `${referencia} > DATE_SUB(CURDATE(), INTERVAL ${Number(mesesHasta)} MONTH)`
+    );
+  }
+
+  return db.literal(condiciones.join(' AND '));
+};
+
+const construirFiltroEtapaPendiente = (motivo, fechaDisparoSql) =>
+  db.literal(`
+    COALESCE((
+      SELECT rc.resultado_gestion
+      FROM alumnos_recaptaciones_contactos rc
+      WHERE rc.alumno_id = ${ALIAS_ALUMNO}.${COLUMNA_ALUMNO_ID}
+        AND rc.motivo_seguimiento = '${motivo}'
+        AND rc.fecha_contacto >= ${fechaDisparoSql}
+      ORDER BY rc.fecha_contacto DESC, rc.id DESC
+      LIMIT 1
+    ), 'pendiente') = 'pendiente'
+  `);
+
+const construirFiltroNoClientePerdido = () =>
+  db.literal(`
+    COALESCE((
+      SELECT rc_perdido.resultado_gestion
+      FROM alumnos_recaptaciones_contactos rc_perdido
+      WHERE rc_perdido.alumno_id = ${ALIAS_ALUMNO}.${COLUMNA_ALUMNO_ID}
+        AND rc_perdido.resultado_gestion <> 'pendiente'
+      ORDER BY rc_perdido.fecha_contacto DESC, rc_perdido.id DESC
+      LIMIT 1
+    ), '') <> 'perdido'
+  `);
+
+const resultadosSqlPorFiltro = (resultadoFiltro) =>
+  resultadoFiltro === 'gestionados'
+    ? ['positivo', 'negativo', 'perdido']
+    : [resultadoFiltro];
+
+/*
+ * Filtro histórico opcional. Se usa únicamente cuando el usuario pulsa una
+ * métrica (Gestionados/Positivos/Negativos/Perdidos). La ausencia del filtro
+ * conserva exactamente la bandeja operativa de pendientes.
+ */
+const construirFiltroResultadoHistorico = (motivo, resultadoFiltro) => {
+  const resultados = resultadosSqlPorFiltro(resultadoFiltro)
+    .map((resultado) => `'${resultado}'`)
+    .join(', ');
+
+  return db.literal(`
+    EXISTS (
+      SELECT 1
+      FROM alumnos_recaptaciones_contactos rc_hist
+      WHERE rc_hist.alumno_id = ${ALIAS_ALUMNO}.${COLUMNA_ALUMNO_ID}
+        AND rc_hist.motivo_seguimiento = '${motivo}'
+        AND rc_hist.resultado_gestion IN (${resultados})
+    )
+  `);
+};
+
 const construirFiltroMotivoSeguimiento = (motivo) => {
+  const ultimaAsistencia = expresionUltimaAsistencia();
+  const cuotaMasAntigua = expresionCuotaVencidaMasAntigua();
+
   switch (motivo) {
     case 'inactividad_5':
-      return construirFiltroAlumnoInactivo(5);
+      return {
+        [Op.and]: [
+          construirFiltroInactividadRango(5, 15),
+          construirFiltroNoClientePerdido(),
+          construirFiltroEtapaPendiente(
+            'inactividad_5',
+            `DATE_ADD(${ultimaAsistencia}, INTERVAL 5 DAY)`
+          )
+        ]
+      };
     case 'inactividad_15':
-      return construirFiltroAlumnoInactivo(15);
+      return {
+        [Op.and]: [
+          construirFiltroInactividadRango(15),
+          construirFiltroNoClientePerdido(),
+          construirFiltroEtapaPendiente(
+            'inactividad_15',
+            `DATE_ADD(${ultimaAsistencia}, INTERVAL 15 DAY)`
+          )
+        ]
+      };
     case 'cuota_1':
-      return construirFiltroAlumnoCuotaVencida(1);
+      return {
+        [Op.and]: [
+          construirFiltroCuotaRango(1, 3),
+          construirFiltroNoClientePerdido(),
+          construirFiltroEtapaPendiente(
+            'cuota_1',
+            `DATE_ADD(${cuotaMasAntigua}, INTERVAL 1 MONTH)`
+          )
+        ]
+      };
     case 'cuota_3':
-      return construirFiltroAlumnoCuotaVencida(3);
+      return {
+        [Op.and]: [
+          construirFiltroCuotaRango(3),
+          construirFiltroNoClientePerdido(),
+          construirFiltroEtapaPendiente(
+            'cuota_3',
+            `DATE_ADD(${cuotaMasAntigua}, INTERVAL 3 MONTH)`
+          )
+        ]
+      };
     case 'cliente_perdido':
-      // Definición acordada con el PM: cliente perdido = cuota vencida hace 1 mes o más.
-      return construirFiltroAlumnoCuotaVencida(1);
+      return construirFiltroClientePerdido();
     case 'pendiente_validacion':
-      // Autoregistros (registro público) todavía sin validar: no tienen
-      // asistencias ni cuotas generadas, así que nunca matchean inactividad
-      // ni cuota vencida aunque necesiten seguimiento comercial igual.
       return { estado: 'pendiente_validacion' };
     default:
-      // Sin motivo: bandeja completa. 15 días y 3 meses son subconjuntos de
-      // 5 días y 1 mes respectivamente, así que la unión de estos dos ya
-      // cubre esas 4 condiciones; se suma aparte pendiente_validacion, que
-      // no se calcula por días sino por estado.
       return {
         [Op.or]: [
-          construirFiltroAlumnoInactivo(5),
-          construirFiltroAlumnoCuotaVencida(1),
+          construirFiltroMotivoSeguimiento('inactividad_5'),
+          construirFiltroMotivoSeguimiento('inactividad_15'),
+          construirFiltroMotivoSeguimiento('cuota_1'),
+          construirFiltroMotivoSeguimiento('cuota_3'),
+          construirFiltroClientePerdido(),
           { estado: 'pendiente_validacion' }
         ]
       };
   }
 };
 
+const obtenerConfiguracionContactoActual = (motivo, resultadoFiltro = null) => {
+  if (!motivo) {
+    return { filtroMotivo: '', filtroCiclo: '', filtroResultado: '', replacements: {} };
+  }
+
+  if (motivo === 'cliente_perdido') {
+    return { filtroMotivo: '', filtroCiclo: '', filtroResultado: '', replacements: {} };
+  }
+
+  const filtroMotivo = 'AND c.motivo_seguimiento = :motivoContacto';
+  const replacements = { motivoContacto: motivo };
+
+  if (resultadoFiltro) {
+    const resultados = resultadosSqlPorFiltro(resultadoFiltro)
+      .map((resultado) => `'${resultado}'`)
+      .join(', ');
+
+    return {
+      filtroMotivo,
+      filtroCiclo: '',
+      filtroResultado: `AND c.resultado_gestion IN (${resultados})`,
+      replacements
+    };
+  }
+
+  let disparo = null;
+
+  if (motivo === 'inactividad_5' || motivo === 'inactividad_15') {
+    const dias = motivo === 'inactividad_5' ? 5 : 15;
+    disparo = `DATE_ADD(${expresionUltimaAsistencia('a')}, INTERVAL ${dias} DAY)`;
+  } else if (motivo === 'cuota_1' || motivo === 'cuota_3') {
+    const meses = motivo === 'cuota_1' ? 1 : 3;
+    disparo = `DATE_ADD(${expresionCuotaVencidaMasAntigua('a')}, INTERVAL ${meses} MONTH)`;
+  }
+
+  return {
+    filtroMotivo,
+    filtroCiclo: disparo ? `AND c.fecha_contacto >= ${disparo}` : '',
+    filtroResultado: '',
+    replacements
+  };
+};
+
 /*
- * Trae, para un lote de alumno_id, los días de inactividad/cuota vencida
- * (función compartida con Alumnos) y el último contacto de recaptación
- * registrado (propio de este módulo).
+ * Devuelve el último contacto de la etapa actual. Los contactos de ciclos
+ * anteriores no se muestran como si fueran el estado de la cola presente.
  */
-const obtenerResumenComercialPorAlumnos = async (alumnoIds) => {
+const obtenerResumenComercialPorAlumnos = async (alumnoIds, motivo = null, resultadoFiltro = null) => {
   if (!alumnoIds.length) {
     return { asistencias: new Map(), cuotasVencidas: new Map(), contactos: new Map() };
   }
+
+  const config = obtenerConfiguracionContactoActual(motivo, resultadoFiltro);
 
   const [{ asistencias, cuotasVencidas }, filasContactos] = await Promise.all([
     obtenerDiasSeguimientoPorAlumnos(alumnoIds),
@@ -111,16 +288,27 @@ const obtenerResumenComercialPorAlumnos = async (alumnoIds) => {
       SELECT c.alumno_id, c.fecha_contacto, c.medio_contacto, c.motivo_seguimiento,
         c.motivo_cliente, c.respuesta_cliente, c.resultado_gestion, u.nombre AS usuario_nombre
       FROM alumnos_recaptaciones_contactos c
+      INNER JOIN alumnos_alumnos a ON a.id = c.alumno_id
       LEFT JOIN usuarios_usuarios u ON u.id = c.usuario_id
-      INNER JOIN (
-        SELECT alumno_id, MAX(fecha_contacto) AS ultima_fecha
-        FROM alumnos_recaptaciones_contactos
-        WHERE alumno_id IN (:alumnoIds)
-        GROUP BY alumno_id
-      ) ultimo ON ultimo.alumno_id = c.alumno_id AND ultimo.ultima_fecha = c.fecha_contacto
       WHERE c.alumno_id IN (:alumnoIds)
+        ${config.filtroMotivo}
+        ${config.filtroCiclo}
+        ${config.filtroResultado}
+        AND c.id = (
+          SELECT c2.id
+          FROM alumnos_recaptaciones_contactos c2
+          WHERE c2.alumno_id = c.alumno_id
+            ${config.filtroMotivo.replaceAll('c.', 'c2.')}
+            ${config.filtroCiclo.replaceAll('c.', 'c2.')}
+            ${config.filtroResultado.replaceAll('c.', 'c2.')}
+          ORDER BY c2.fecha_contacto DESC, c2.id DESC
+          LIMIT 1
+        )
       `,
-      { replacements: { alumnoIds }, type: QueryTypes.SELECT }
+      {
+        replacements: { alumnoIds, ...config.replacements },
+        type: QueryTypes.SELECT
+      }
     )
   ]);
 
@@ -142,17 +330,19 @@ const obtenerResumenComercialPorAlumnos = async (alumnoIds) => {
   return { asistencias, cuotasVencidas, contactos };
 };
 
-/*
- * Sergio Manrique - 2026/08/01 - Lista alumnos con seguimiento comercial
- * pendiente (bandeja de recaptaciones). Sin `motivo`, muestra la unión de
- * las 5 condiciones; con `motivo`, acota a esa condición puntual.
- */
+const ETIQUETAS_MOTIVO_HISTORICO = {
+  inactividad_5: '5 días de inactividad',
+  inactividad_15: '15 días de inactividad',
+  cuota_1: '1 mes vencido',
+  cuota_3: '3 meses vencidos'
+};
+
 export const OBR_AlumnosRecaptaciones_CTS = async (req, res) => {
   try {
     if (!validarRolLecturaAlumnos(req.user)) {
       return res.status(403).json({
         ok: false,
-        message: 'No tiene permisos para consultar recaptaciones.'
+        message: 'No tiene permisos para consultar seguimiento comercial.'
       });
     }
 
@@ -160,6 +350,7 @@ export const OBR_AlumnosRecaptaciones_CTS = async (req, res) => {
       q,
       sede_id,
       motivo,
+      resultado_gestion,
       estado,
       sin_plan,
       sin_anamnesis,
@@ -177,6 +368,21 @@ export const OBR_AlumnosRecaptaciones_CTS = async (req, res) => {
       });
     }
 
+    if (resultado_gestion && !RESULTADOS_FILTRO_VALIDOS.includes(resultado_gestion)) {
+      return res.status(400).json({
+        ok: false,
+        message: 'Filtro de resultado inválido.',
+        valores_validos: RESULTADOS_FILTRO_VALIDOS
+      });
+    }
+
+    if (resultado_gestion && !MOTIVOS_ESTADISTICAS.includes(motivo)) {
+      return res.status(400).json({
+        ok: false,
+        message: 'El filtro por resultado requiere una etapa de inactivos o vencidos.'
+      });
+    }
+
     if (estado && !ESTADOS_ALUMNO_VALIDOS.includes(estado)) {
       return res.status(400).json({
         ok: false,
@@ -186,30 +392,24 @@ export const OBR_AlumnosRecaptaciones_CTS = async (req, res) => {
     }
 
     const where = {};
-
     const scope = aplicarScopeSedesAlumnos(where, req.user, sede_id);
 
     if (!scope.ok) {
       return res.status(scope.status).json({ ok: false, message: scope.message });
     }
 
-    if (estado) {
-      where.estado = estado;
-    }
-
+    if (estado) where.estado = estado;
     if (normalizarTinyint(sin_asistencias, 0) === 1) {
       where.ultima_asistencia = { [Op.is]: null };
     }
 
     const search = normalizarTexto(q);
 
-    // Sergio Manrique - 2026/08/01 - Mismos filtros combinables que Alumnos
-    // (estado, datos incompletos), sumados al motivo de seguimiento propio
-    // de Recaptaciones, para que el equipo comercial pueda acotar la
-    // bandeja (ej. "solo activos y sin plan") sin salir del módulo.
     where[Op.and] = [
       ...(where[Op.and] || []),
-      construirFiltroMotivoSeguimiento(motivo),
+      resultado_gestion
+        ? construirFiltroResultadoHistorico(motivo, resultado_gestion)
+        : construirFiltroMotivoSeguimiento(motivo),
       ...(search ? [construirWhereBusquedaAlumno(search)] : []),
       ...(normalizarTinyint(sin_plan, 0) === 1
         ? [construirFiltroSinRelacionAlumno(AlumnosMembresiasModel, 'membresias_filtro_recap')]
@@ -240,14 +440,12 @@ export const OBR_AlumnosRecaptaciones_CTS = async (req, res) => {
 
     const alumnoIds = rows.map((alumno) => alumno.id);
     const { asistencias, cuotasVencidas, contactos } =
-      await obtenerResumenComercialPorAlumnos(alumnoIds);
+      await obtenerResumenComercialPorAlumnos(alumnoIds, motivo, resultado_gestion);
 
     const data = await Promise.all(
       rows.map(async (alumno) => {
         const base = await construirAlumnoRespuesta(alumno);
-        const diasInactividad = asistencias.has(alumno.id)
-          ? asistencias.get(alumno.id)
-          : null;
+        const diasInactividad = asistencias.has(alumno.id) ? asistencias.get(alumno.id) : null;
         const diasCuotaVencida = cuotasVencidas.has(alumno.id)
           ? cuotasVencidas.get(alumno.id)
           : null;
@@ -258,8 +456,12 @@ export const OBR_AlumnosRecaptaciones_CTS = async (req, res) => {
           dias_inactividad: diasInactividad,
           dias_cuota_vencida: diasCuotaVencida,
           etiqueta_seguimiento:
-            calcularEtiquetaSeguimiento(diasInactividad, diasCuotaVencida, alumno.estado) ||
-            'Sin motivo detectado',
+            motivo === 'cliente_perdido'
+              ? 'Cliente perdido'
+              : resultado_gestion
+                ? `Histórico · ${ETIQUETAS_MOTIVO_HISTORICO[motivo] || 'Seguimiento'}`
+                : calcularEtiquetaSeguimiento(diasInactividad, diasCuotaVencida, alumno.estado) ||
+                  'Sin motivo detectado',
           ultimo_contacto: ultimoContacto,
           estado_seguimiento: ultimoContacto
             ? ultimoContacto.resultado_gestion
@@ -270,11 +472,12 @@ export const OBR_AlumnosRecaptaciones_CTS = async (req, res) => {
 
     return res.status(200).json({
       ok: true,
-      message: 'Alumnos de recaptaciones obtenidos correctamente.',
+      message: 'Seguimiento comercial obtenido correctamente.',
       total: count,
       page: pageNumber,
       limit: limitNumber,
       total_pages: Math.ceil(count / limitNumber),
+      resultado_gestion: resultado_gestion || null,
       data
     });
   } catch (error) {
@@ -282,7 +485,108 @@ export const OBR_AlumnosRecaptaciones_CTS = async (req, res) => {
 
     return res.status(500).json({
       ok: false,
-      message: 'Error al obtener el listado de recaptaciones.'
+      message: 'Error al obtener el seguimiento comercial.'
+    });
+  }
+};
+
+const estadisticaVacia = (motivo) => ({
+  motivo,
+  total_contactos: 0,
+  pendientes: 0,
+  positivos: 0,
+  negativos: 0,
+  perdidos: 0,
+  total_gestionados: 0,
+  tasa_positiva: 0
+});
+
+/*
+ * Benjamin Orellana - 2026/08/11 - Estadísticas del historial de contactos.
+ * La salida de una cola no borra el contacto: por eso esta métrica puede
+ * reconstruirse directamente desde alumnos_recaptaciones_contactos.
+ */
+export const OBR_EstadisticasRecaptaciones_CTS = async (req, res) => {
+  try {
+    if (!validarRolLecturaAlumnos(req.user)) {
+      return res.status(403).json({
+        ok: false,
+        message: 'No tiene permisos para consultar estadísticas de seguimiento.'
+      });
+    }
+
+    const { sede_id } = req.query;
+    const whereAlumnos = {};
+    const scope = aplicarScopeSedesAlumnos(whereAlumnos, req.user, sede_id);
+
+    if (!scope.ok) {
+      return res.status(scope.status).json({ ok: false, message: scope.message });
+    }
+
+    const alumnosPermitidos = await AlumnosModel.findAll({
+      attributes: ['id'],
+      where: whereAlumnos,
+      raw: true
+    });
+    const alumnoIds = alumnosPermitidos.map((fila) => Number(fila.id));
+
+    const resultado = Object.fromEntries(
+      MOTIVOS_ESTADISTICAS.map((motivo) => [motivo, estadisticaVacia(motivo)])
+    );
+
+    if (alumnoIds.length) {
+      const filas = await db.query(
+        `
+        SELECT motivo_seguimiento, resultado_gestion, COUNT(*) AS total
+        FROM alumnos_recaptaciones_contactos
+        WHERE alumno_id IN (:alumnoIds)
+          AND motivo_seguimiento IN (:motivos)
+        GROUP BY motivo_seguimiento, resultado_gestion
+        `,
+        {
+          replacements: { alumnoIds, motivos: MOTIVOS_ESTADISTICAS },
+          type: QueryTypes.SELECT
+        }
+      );
+
+      filas.forEach((fila) => {
+        const item = resultado[fila.motivo_seguimiento];
+        if (!item) return;
+        const total = Number(fila.total) || 0;
+        item.total_contactos += total;
+
+        if (fila.resultado_gestion === 'pendiente') item.pendientes += total;
+        if (fila.resultado_gestion === 'positivo') item.positivos += total;
+        if (fila.resultado_gestion === 'negativo') item.negativos += total;
+        if (fila.resultado_gestion === 'perdido') item.perdidos += total;
+      });
+    }
+
+    Object.values(resultado).forEach((item) => {
+      item.total_gestionados = item.positivos + item.negativos + item.perdidos;
+      item.tasa_positiva = item.total_gestionados
+        ? Number(((item.positivos / item.total_gestionados) * 100).toFixed(1))
+        : 0;
+    });
+
+    const wherePerdidos = { ...whereAlumnos };
+    wherePerdidos[Op.and] = [
+      ...(wherePerdidos[Op.and] || []),
+      construirFiltroClientePerdido()
+    ];
+    const clientesPerdidosActuales = await AlumnosModel.count({ where: wherePerdidos });
+
+    return res.status(200).json({
+      ok: true,
+      data: resultado,
+      clientes_perdidos_actuales: clientesPerdidosActuales
+    });
+  } catch (error) {
+    console.error('Error OBR_EstadisticasRecaptaciones_CTS:', error);
+
+    return res.status(500).json({
+      ok: false,
+      message: 'Error al obtener estadísticas de seguimiento.'
     });
   }
 };

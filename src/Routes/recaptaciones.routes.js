@@ -12,6 +12,7 @@ import express from 'express';
 import { authenticateToken, requireRolGlobal } from '../Security/auth.js';
 import {
   OBR_AlumnosRecaptaciones_CTS,
+  OBR_EstadisticasRecaptaciones_CTS,
   OBR_HistorialContactosRecaptacion_CTS,
   CR_ContactoRecaptacion_CTS,
   UR_ContactoRecaptacion_CTS,
@@ -29,6 +30,13 @@ router.get(
   authenticateToken,
   requireRolGlobal(ROLES_LECTURA_ALUMNOS),
   OBR_AlumnosRecaptaciones_CTS
+);
+
+router.get(
+  '/alumnos-recaptaciones/estadisticas',
+  authenticateToken,
+  requireRolGlobal(ROLES_LECTURA_ALUMNOS),
+  OBR_EstadisticasRecaptaciones_CTS
 );
 
 router.get(

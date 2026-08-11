@@ -62,6 +62,7 @@ const AlumnosRecaptacionesContactosModel = db.define(
         'cuota_1',
         'cuota_3',
         'cliente_perdido',
+        'pendiente_validacion',
         'otro'
       ),
       allowNull: true
@@ -97,7 +98,7 @@ const AlumnosRecaptacionesContactosModel = db.define(
     },
 
     resultado_gestion: {
-      type: DataTypes.ENUM('positivo', 'negativo', 'pendiente'),
+      type: DataTypes.ENUM('positivo', 'negativo', 'pendiente', 'perdido'),
       allowNull: false,
       defaultValue: 'pendiente'
     },

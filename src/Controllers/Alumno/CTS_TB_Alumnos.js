@@ -71,10 +71,9 @@ const ORDENES_VENCIMIENTO_VALIDOS = [
   'fecha_desc'
 ];
 
-// Sergio Manrique - 2026/08/01 - "Cliente perdido" definido por el PM como
-// alumno con cuota vencida de al menos 1 mes (mismo criterio que el filtro
-// "1 mes de cuota vencida").
-const MESES_CUOTA_VENCIDA_CLIENTE_PERDIDO = 1;
+// Benjamin Orellana - 2026/08/11 - Cliente perdido deja de inferirse por deuda.
+// A partir de ahora depende de que el último contacto comercial del alumno
+// haya sido catalogado explícitamente con resultado_gestion = 'perdido'.
 
 export const ROLES_OPERATIVOS_ALUMNOS = [
   'SUPER_ADMIN',
@@ -351,6 +350,28 @@ export const construirFiltroAlumnoInactivo = (diasMinimos) => {
       )),
       DATEDIFF(CURDATE(), ${aliasPrincipal}.${columnaFechaInicio})
     ) > ${dias}
+  `);
+};
+
+/*
+ * Benjamin Orellana - 2026/08/11 - Un cliente perdido es una decisión
+ * comercial explícita, no una inferencia por antigüedad de deuda. Se toma
+ * el resultado del último contacto registrado para el alumno.
+ */
+export const construirFiltroClientePerdido = () => {
+  const queryGenerator = db.getQueryInterface().queryGenerator;
+  const aliasPrincipal = queryGenerator.quoteIdentifier(AlumnosModel.name);
+  const columnaId = queryGenerator.quoteIdentifier('id');
+
+  return db.literal(`
+    COALESCE((
+      SELECT c.resultado_gestion
+      FROM alumnos_recaptaciones_contactos c
+      WHERE c.alumno_id = ${aliasPrincipal}.${columnaId}
+        AND c.resultado_gestion <> 'pendiente'
+      ORDER BY c.fecha_contacto DESC, c.id DESC
+      LIMIT 1
+    ), '') = 'perdido'
   `);
 };
 
@@ -1681,7 +1702,7 @@ export const OBR_Alumnos_CTS = async (req, res) => {
     if (normalizarTinyint(cliente_perdido, 0) === 1) {
       where[Op.and] = [
         ...(where[Op.and] || []),
-        construirFiltroAlumnoCuotaVencida(MESES_CUOTA_VENCIDA_CLIENTE_PERDIDO)
+        construirFiltroClientePerdido()
       ];
     }
 

@@ -12,7 +12,7 @@
  * Capa: Backend
  */
 
-import { Op } from 'sequelize';
+import { Op, QueryTypes } from 'sequelize';
 import dayjs from 'dayjs';
 import AgendaTurnosModel from '../../Models/Agenda/MD_TB_AgendaTurnos.js';
 import AgendaHorariosSedeModel from '../../Models/Agenda/MD_TB_AgendaHorariosSede.js';
@@ -261,6 +261,203 @@ export const OBRS_Turnos_CTS = async (req, res) => {
  * panel rápido de "tomar asistencia". Los turnos sin reservas también se
  * incluyen (para que se vea el horario igual, vacío).
  */
+
+
+/*
+ * Benjamin Orellana - 2026/08/11
+ * Reporte agregado de ocupación de Agenda.
+ *
+ * Fuente de verdad:
+ * - Turnos activos: disponible/completo.
+ * - Reservas que ocupan cupo: reservada/asistio/ausente.
+ *
+ * No usa alumnos_asistencias porque esa tabla representa el seguimiento de
+ * asistencia y no la ocupación efectiva del cupo. Tampoco persiste métricas:
+ * todo se calcula sobre agenda_turnos + agenda_turnos_reservas.
+ *
+ * Query params requeridos:
+ * - sede_id
+ * - fecha_desde (YYYY-MM-DD)
+ * - fecha_hasta (YYYY-MM-DD)
+ */
+export const OBRS_OcupacionAgenda_CTS = async (req, res) => {
+  try {
+    const { sede_id, fecha_desde, fecha_hasta } = req.query;
+
+    const sedeId = Number(sede_id);
+    const formatoFecha = /^\d{4}-\d{2}-\d{2}$/;
+
+    if (!Number.isInteger(sedeId) || sedeId <= 0) {
+      return res.status(400).json({
+        ok: false,
+        message: 'sede_id es requerido y debe ser un identificador válido.'
+      });
+    }
+
+    if (
+      !formatoFecha.test(String(fecha_desde || '')) ||
+      !formatoFecha.test(String(fecha_hasta || '')) ||
+      !dayjs(fecha_desde).isValid() ||
+      !dayjs(fecha_hasta).isValid()
+    ) {
+      return res.status(400).json({
+        ok: false,
+        message: 'fecha_desde y fecha_hasta son requeridas en formato YYYY-MM-DD.'
+      });
+    }
+
+    if (dayjs(fecha_desde).isAfter(dayjs(fecha_hasta), 'day')) {
+      return res.status(400).json({
+        ok: false,
+        message: 'fecha_desde no puede ser posterior a fecha_hasta.'
+      });
+    }
+
+    const sede = await SedesModel.findByPk(sedeId, {
+      attributes: ['id', 'nombre']
+    });
+
+    if (!sede) {
+      return res.status(404).json({
+        ok: false,
+        message: 'La sede indicada no existe.'
+      });
+    }
+
+    const estadosReserva = ESTADOS_RESERVA_QUE_OCUPAN_CUPO;
+
+    // La ocupación es un indicador histórico: nunca deben entrar turnos futuros.
+    // Si el período solicitado termina después de hoy (mes/año/rango en curso),
+    // se recorta automáticamente hasta la fecha actual.
+    const hoy = dayjs().format('YYYY-MM-DD');
+    const periodoSoloFuturo = dayjs(fecha_desde).isAfter(dayjs(hoy), 'day');
+    const fechaHastaEfectiva = dayjs(fecha_hasta).isAfter(dayjs(hoy), 'day')
+      ? hoy
+      : fecha_hasta;
+
+    const filas = periodoSoloFuturo
+      ? []
+      : await db.query(
+      `
+        SELECT
+          WEEKDAY(base.fecha) + 1 AS dia_semana,
+          TIME_FORMAT(base.hora_inicio, '%H:%i') AS hora_inicio,
+          COUNT(*) AS turnos,
+          SUM(base.ocupados) AS ocupados,
+          SUM(base.cupo_maximo) AS capacidad,
+          AVG(base.ocupados) AS promedio_ocupados,
+          AVG(base.cupo_maximo) AS promedio_cupo
+        FROM (
+          SELECT
+            t.id,
+            t.fecha,
+            t.hora_inicio,
+            t.cupo_maximo,
+            COUNT(r.id) AS ocupados
+          FROM agenda_turnos t
+          LEFT JOIN agenda_turnos_reservas r
+            ON r.turno_id = t.id
+           AND r.estado IN (:estadosReserva)
+          WHERE t.sede_id = :sedeId
+            AND t.fecha BETWEEN :fechaDesde AND :fechaHasta
+            AND t.estado IN ('disponible', 'completo')
+          GROUP BY
+            t.id,
+            t.fecha,
+            t.hora_inicio,
+            t.cupo_maximo
+        ) AS base
+        GROUP BY
+          WEEKDAY(base.fecha) + 1,
+          TIME_FORMAT(base.hora_inicio, '%H:%i')
+        ORDER BY
+          TIME_FORMAT(base.hora_inicio, '%H:%i') ASC,
+          WEEKDAY(base.fecha) + 1 ASC
+      `,
+      {
+        replacements: {
+          sedeId,
+          fechaDesde: fecha_desde,
+          fechaHasta: fechaHastaEfectiva,
+          estadosReserva
+        },
+        type: QueryTypes.SELECT
+      }
+    );
+
+    const matriz = filas.map((fila) => {
+      const turnos = Number(fila.turnos || 0);
+      const ocupados = Number(fila.ocupados || 0);
+      const capacidad = Number(fila.capacidad || 0);
+      const promedioOcupados = Number(fila.promedio_ocupados || 0);
+      const promedioCupo = Number(fila.promedio_cupo || 0);
+
+      return {
+        dia_semana: Number(fila.dia_semana),
+        hora_inicio: fila.hora_inicio,
+        turnos,
+        ocupados,
+        capacidad,
+        promedio_ocupados: Number(promedioOcupados.toFixed(2)),
+        promedio_cupo: Number(promedioCupo.toFixed(2)),
+        porcentaje:
+          capacidad > 0 ? Number(((ocupados / capacidad) * 100).toFixed(2)) : 0
+      };
+    });
+
+    const general = matriz.reduce(
+      (acc, fila) => {
+        acc.turnos += fila.turnos;
+        acc.ocupados += fila.ocupados;
+        acc.capacidad += fila.capacidad;
+        return acc;
+      },
+      { turnos: 0, ocupados: 0, capacidad: 0 }
+    );
+
+    general.porcentaje =
+      general.capacidad > 0
+        ? Number(((general.ocupados / general.capacidad) * 100).toFixed(2))
+        : 0;
+
+    const horas = [...new Set(matriz.map((fila) => fila.hora_inicio))].sort();
+    const dias = [...new Set(matriz.map((fila) => fila.dia_semana))].sort(
+      (a, b) => a - b
+    );
+
+    return res.json({
+      ok: true,
+      data: {
+        sede: {
+          id: Number(sede.id),
+          nombre: sede.nombre
+        },
+        periodo: {
+          // Se conservan las fechas pedidas para auditoría/UI, y además se
+          // informa el rango realmente utilizado por el cálculo.
+          fecha_desde,
+          fecha_hasta,
+          fecha_desde_efectiva: periodoSoloFuturo ? null : fecha_desde,
+          fecha_hasta_efectiva: periodoSoloFuturo ? null : fechaHastaEfectiva,
+          limitado_hasta_hoy:
+            periodoSoloFuturo || fechaHastaEfectiva !== fecha_hasta,
+          hoy
+        },
+        general,
+        horas,
+        dias,
+        matriz
+      }
+    });
+  } catch (error) {
+    console.error('[AGENDA_OCUPACION] Error al obtener ocupación:', error);
+    return res.status(500).json({
+      ok: false,
+      message: 'No se pudo calcular la ocupación de la agenda.'
+    });
+  }
+};
+
 export const OBRS_TurnosAsistenciaDia_CTS = async (req, res) => {
   try {
     const { sede_id, fecha } = req.query;

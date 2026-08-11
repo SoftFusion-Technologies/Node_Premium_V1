@@ -90,6 +90,41 @@ export const ROLES_LECTURA_ALUMNOS = [
   'PROFESOR'
 ];
 
+// Actualización acotada para operaciones rápidas desde la Agenda: evita que
+// una carga de WhatsApp tenga que reenviar y potencialmente sobrescribir la
+// ficha completa del alumno.
+export const UR_TelefonoAlumno_CTS = async (req, res) => {
+  try {
+    const alumnoId = Number(req.params.id);
+    const telefono = normalizarTelefono(req.body?.telefono);
+
+    if (!Number.isInteger(alumnoId) || alumnoId <= 0) {
+      return res.status(400).json({ message: 'El alumno indicado no es válido.' });
+    }
+    if (!/^\d{6,20}$/.test(telefono || '')) {
+      return res.status(400).json({
+        field: 'telefono',
+        message: 'Ingresá un número de WhatsApp válido, sin símbolos.'
+      });
+    }
+
+    const alumno = await AlumnosModel.findByPk(alumnoId);
+    if (!alumno) {
+      return res.status(404).json({ message: 'Alumno no encontrado.' });
+    }
+
+    await alumno.update({ telefono, updated_at: new Date() });
+    return res.status(200).json({
+      ok: true,
+      message: 'WhatsApp actualizado correctamente.',
+      data: { id: alumno.id, telefono: alumno.telefono }
+    });
+  } catch (error) {
+    console.error('[UR_TelefonoAlumno_CTS]', error);
+    return res.status(500).json({ message: 'No se pudo actualizar el WhatsApp.' });
+  }
+};
+
 // Benjamin Orellana - 2026/06/15 - Permite buscar alumnos por nombre completo, DNI, email o teléfono.
 export const construirWhereBusquedaAlumno = (search) => {
   const terminos = String(search || '')

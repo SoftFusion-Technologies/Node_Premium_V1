@@ -38,6 +38,7 @@ import {
   CR_Alumnos_CTS,
   CR_Alumnos_Publico_CTS,
   UR_Alumnos_CTS,
+  UR_TelefonoAlumno_CTS,
   UR_ActualizacionRapidaAlumno_CTS,
   UR_ActualizacionMasivaAlumnos_CTS,
   UR_EstadoAlumnos_CTS,
@@ -297,6 +298,13 @@ router.put(
   authenticateToken,
   requirePermission("alumnos.editar"),
   UR_Alumnos_CTS,
+);
+
+router.patch(
+  "/alumnos/:id/telefono",
+  authenticateToken,
+  requirePermission("alumnos.editar"),
+  UR_TelefonoAlumno_CTS,
 );
 
 

@@ -862,6 +862,12 @@ export const OBRS_DetTurno_CTS = async (req, res) => {
               model: AlumnosModel,
               as: 'alumno',
               attributes: ['id', 'nombre', 'apellido', 'telefono']
+            },
+            {
+              model: AlumnosAsistenciasModel,
+              as: 'asistencias',
+              attributes: ['id', 'estado'],
+              required: false
             }
           ]
         },

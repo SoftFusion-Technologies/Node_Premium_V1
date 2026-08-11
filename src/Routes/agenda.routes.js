@@ -68,7 +68,23 @@ export const ROLES_ADMIN = [
   'PROFESOR'
 ];
 
+import { OBRS_HoraServidorAgenda_CTS } from '../Controllers/Agendas/CTS_AgendaReloj.js';
+
 const router = express.Router();
+
+// Referencia temporal de servidor para la línea de tiempo de la Agenda.
+router.get(
+  '/agenda-admin/hora-servidor',
+  authenticateToken,
+  requireRolGlobal(ROLES_ADMIN),
+  OBRS_HoraServidorAgenda_CTS
+);
+
+router.get(
+  '/agenda-alumno/hora-servidor',
+  authenticateAlumnoToken,
+  OBRS_HoraServidorAgenda_CTS
+);
 
 // ─── ADMIN: Horarios sede (plantillas) ───────────────────────────────────────
 

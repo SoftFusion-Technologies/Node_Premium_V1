@@ -165,6 +165,93 @@ export const OBR_SaldoDisponibleCobro_CTS = async (req, res) => {
   }
 };
 
+
+// Benjamin Orellana - 2026/08/11 - Lista deudas cobrables mínimas para el drawer de Cobros.
+// Se expone con permiso cobros.registrar para no depender de permisos del módulo Pagos.
+export const OBR_DeudasAlumnoCobro_CTS = async (req, res) => {
+  try {
+    const alumnoId = Number(req.params.alumno_id);
+    const sedeId = Number(req.query.sede_id);
+
+    if (!Number.isInteger(alumnoId) || alumnoId <= 0) {
+      return res.status(400).json({ ok: false, message: 'Debe indicar un alumno válido.' });
+    }
+    if (!Number.isInteger(sedeId) || sedeId <= 0) {
+      return res.status(400).json({ ok: false, message: 'Debe indicar una sede válida.' });
+    }
+
+    const rows = await db.query(
+      `SELECT
+         pm.id AS mensualidad_id,
+         pm.alumno_id,
+         pm.membresia_id,
+         pm.sede_id,
+         pm.periodo_desde,
+         pm.periodo_hasta,
+         pm.fecha_vencimiento,
+         pm.monto_total,
+         pm.monto_pagado,
+         pm.saldo,
+         COALESCE((
+           SELECT SUM(ppv.monto)
+           FROM pagos_pagos ppv
+           WHERE ppv.mensualidad_id = pm.id
+             AND ppv.estado = 'pendiente_validacion'
+         ), 0) AS monto_en_validacion,
+         GREATEST(
+           pm.saldo - COALESCE((
+             SELECT SUM(ppv2.monto)
+             FROM pagos_pagos ppv2
+             WHERE ppv2.mensualidad_id = pm.id
+               AND ppv2.estado = 'pendiente_validacion'
+           ), 0),
+           0
+         ) AS saldo_disponible,
+         pm.estado,
+         p.id AS plan_id,
+         p.nombre AS plan_nombre
+       FROM pagos_mensualidades pm
+       LEFT JOIN alumnos_membresias am ON am.id = pm.membresia_id
+       LEFT JOIN planes_planes p ON p.id = am.plan_id
+       WHERE pm.alumno_id = :alumnoId
+         AND pm.sede_id = :sedeId
+         AND pm.estado IN ('pendiente','parcial','vencida')
+         AND pm.saldo > 0
+       ORDER BY
+         CASE WHEN pm.fecha_vencimiento < CURDATE() THEN 0 ELSE 1 END,
+         pm.fecha_vencimiento ASC,
+         pm.id ASC`,
+      {
+        replacements: { alumnoId, sedeId },
+        type: QueryTypes.SELECT
+      }
+    );
+
+    return res.status(200).json({
+      ok: true,
+      data: rows.map((item) => ({
+        ...item,
+        mensualidad_id: Number(item.mensualidad_id),
+        alumno_id: Number(item.alumno_id),
+        membresia_id: item.membresia_id ? Number(item.membresia_id) : null,
+        sede_id: Number(item.sede_id),
+        plan_id: item.plan_id ? Number(item.plan_id) : null,
+        monto_total: Number(item.monto_total || 0),
+        monto_pagado: Number(item.monto_pagado || 0),
+        saldo: Number(item.saldo || 0),
+        monto_en_validacion: Number(item.monto_en_validacion || 0),
+        saldo_disponible: Number(item.saldo_disponible || 0)
+      }))
+    });
+  } catch (error) {
+    console.error('Error OBR_DeudasAlumnoCobro_CTS:', error);
+    return res.status(500).json({
+      ok: false,
+      message: 'Error al consultar las deudas disponibles para cobrar.'
+    });
+  }
+};
+
 export const CR_Cobros_CTS = async (req, res) => {
   try {
     const resultado = await registrarCobro({

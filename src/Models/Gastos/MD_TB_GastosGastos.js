@@ -67,6 +67,13 @@ const GastosGastosModel = db.define(
       }
     },
 
+    // Benjamin Orellana - 2026/08/12 - Número de cuota/período dentro de una
+    // serie periódica finita. NULL para gastos manuales y registros históricos.
+    numero_periodo: {
+      type: DataTypes.SMALLINT.UNSIGNED,
+      allowNull: true
+    },
+
     medio_pago_id: {
       type: DataTypes.BIGINT.UNSIGNED,
       allowNull: true,
@@ -174,6 +181,11 @@ const GastosGastosModel = db.define(
       {
         name: 'idx_gastos_periodico',
         fields: ['gasto_periodico_id']
+      },
+      {
+        name: 'uq_gastos_periodico_numero',
+        unique: true,
+        fields: ['gasto_periodico_id', 'numero_periodo']
       },
       {
         name: 'idx_gastos_medio_pago',

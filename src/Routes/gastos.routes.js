@@ -49,6 +49,7 @@ import {
   OBR_GastosPeriodicos_CTS,
   OBR_GastoPeriodicoPorId_CTS,
   CR_GastosPeriodicos_CTS,
+  CR_ProgramarGastoPeriodico_CTS,
   UR_GastosPeriodicos_CTS,
   CR_GenerarGastoDesdePeriodico_CTS,
   DR_GastosPeriodicos_CTS
@@ -202,6 +203,13 @@ router.get(
   authenticateToken,
   requireRolGlobal(ROLES_GASTOS_ADMIN),
   OBR_GastosPeriodicos_CTS
+);
+
+router.post(
+  '/gastos-periodicos/programar',
+  authenticateToken,
+  requireRolGlobal(ROLES_GASTOS_ADMIN),
+  CR_ProgramarGastoPeriodico_CTS
 );
 
 router.get(

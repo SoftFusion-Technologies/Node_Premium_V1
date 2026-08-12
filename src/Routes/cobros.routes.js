@@ -21,6 +21,7 @@ import {
   OBR_CobroDetalle_CTS,
   OBR_CobrosPendientesCount_CTS,
   OBR_Cobros_CTS,
+  OBR_DeudasAlumnoCobro_CTS,
   OBR_MediosPagoCobro_CTS,
   OBR_SaldoDisponibleCobro_CTS,
   UR_AnularCobro_CTS,
@@ -47,6 +48,13 @@ router.get(
   ...seguridadSede,
   requirePermission('cobros.registrar'),
   OBR_SaldoDisponibleCobro_CTS
+);
+
+router.get(
+  '/cobros/alumnos/:alumno_id/deudas',
+  ...seguridadSede,
+  requirePermission('cobros.registrar'),
+  OBR_DeudasAlumnoCobro_CTS
 );
 
 router.get(

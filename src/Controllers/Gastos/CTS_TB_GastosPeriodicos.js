@@ -32,6 +32,83 @@ import {
   validarSedeTipoProveedor
 } from './gastos.helpers.js';
 
+
+// Benjamin Orellana - 2026/08/12 - Calcula cada fecha desde la fecha de inicio
+// original para conservar el día ancla en mensual/anual (31/01 -> 28/02 -> 31/03).
+const calcularFechaPeriodoFinito = (fechaInicio, frecuencia, indice) => {
+  if (!esFechaDateOnlyValida(fechaInicio)) return null;
+
+  const [year, month, day] = fechaInicio.split('-').map(Number);
+  const base = new Date(Date.UTC(year, month - 1, day));
+
+  if (frecuencia === 'semanal' || frecuencia === 'quincenal') {
+    const dias = frecuencia === 'semanal' ? 7 : 15;
+    base.setUTCDate(base.getUTCDate() + dias * indice);
+    return base.toISOString().slice(0, 10);
+  }
+
+  if (frecuencia === 'mensual') {
+    const totalMeses = month - 1 + indice;
+    const targetYear = year + Math.floor(totalMeses / 12);
+    const targetMonth = totalMeses % 12;
+    const ultimoDia = new Date(Date.UTC(targetYear, targetMonth + 1, 0)).getUTCDate();
+    const targetDay = Math.min(day, ultimoDia);
+    return new Date(Date.UTC(targetYear, targetMonth, targetDay))
+      .toISOString()
+      .slice(0, 10);
+  }
+
+  if (frecuencia === 'anual') {
+    const targetYear = year + indice;
+    const ultimoDia = new Date(Date.UTC(targetYear, month, 0)).getUTCDate();
+    const targetDay = Math.min(day, ultimoDia);
+    return new Date(Date.UTC(targetYear, month - 1, targetDay))
+      .toISOString()
+      .slice(0, 10);
+  }
+
+  return null;
+};
+
+const construirCuotasPeriodicas = ({ periodico, cantidadPeriodos }) => {
+  const cuotas = [];
+
+  for (let index = 0; index < cantidadPeriodos; index += 1) {
+    const fechaGasto = calcularFechaPeriodoFinito(
+      periodico.fecha_inicio,
+      periodico.frecuencia,
+      index
+    );
+
+    if (!fechaGasto) {
+      throw new Error('No se pudo calcular una de las fechas de la serie periódica.');
+    }
+
+    cuotas.push({
+      sede_id: periodico.sede_id,
+      tipo_gasto_id: periodico.tipo_gasto_id,
+      proveedor_id: periodico.proveedor_id,
+      gasto_periodico_id: periodico.id,
+      numero_periodo: index + 1,
+      medio_pago_id: null,
+      origen_fondos: 'caja_sede',
+      nombre: periodico.nombre,
+      descripcion: periodico.descripcion,
+      fecha_gasto: fechaGasto,
+      fecha_pago: null,
+      importe_total: periodico.importe_total,
+      incluye_iva: periodico.incluye_iva,
+      iva_porcentaje: periodico.iva_porcentaje,
+      importe_iva: periodico.importe_iva,
+      estado: 'pendiente',
+      origen: 'periodico',
+      observacion: periodico.observacion
+    });
+  }
+
+  return cuotas;
+};
+
 const buildPayloadPeriodicoCreate = (body = {}) => {
   const importeTotal = normalizarDecimal(body.importe_total, 0);
   const incluyeIva = normalizarTinyint(body.incluye_iva, 0);
@@ -56,6 +133,7 @@ const buildPayloadPeriodicoCreate = (body = {}) => {
     iva_porcentaje: ivaPorcentaje,
     importe_iva: importeIva,
     frecuencia: normalizarTexto(body.frecuencia) || 'mensual',
+    cantidad_periodos: toNumberOrNull(body.cantidad_periodos),
     fecha_inicio: fechaInicio,
     fecha_fin: normalizarFecha(body.fecha_fin),
     proxima_fecha_generacion:
@@ -75,6 +153,7 @@ const buildPayloadPeriodicoUpdate = (body = {}) => {
   if (Object.prototype.hasOwnProperty.call(body, 'nombre')) payload.nombre = normalizarTexto(body.nombre);
   if (Object.prototype.hasOwnProperty.call(body, 'descripcion')) payload.descripcion = normalizarTexto(body.descripcion);
   if (Object.prototype.hasOwnProperty.call(body, 'frecuencia')) payload.frecuencia = normalizarTexto(body.frecuencia);
+  if (Object.prototype.hasOwnProperty.call(body, 'cantidad_periodos')) payload.cantidad_periodos = toNumberOrNull(body.cantidad_periodos);
   if (Object.prototype.hasOwnProperty.call(body, 'fecha_inicio')) payload.fecha_inicio = normalizarFecha(body.fecha_inicio);
   if (Object.prototype.hasOwnProperty.call(body, 'fecha_fin')) payload.fecha_fin = normalizarFecha(body.fecha_fin);
   if (Object.prototype.hasOwnProperty.call(body, 'proxima_fecha_generacion')) payload.proxima_fecha_generacion = normalizarFecha(body.proxima_fecha_generacion);
@@ -131,6 +210,16 @@ const validarPayloadPeriodico = (payload = {}, modo = 'create') => {
 
   if (payload.frecuencia && !FRECUENCIAS_GASTO_PERIODICO_VALIDAS.includes(payload.frecuencia)) {
     errores.push('La frecuencia del gasto periódico no es válida.');
+  }
+
+  if (
+    Object.prototype.hasOwnProperty.call(payload, 'cantidad_periodos') &&
+    payload.cantidad_periodos !== null &&
+    (!Number.isInteger(Number(payload.cantidad_periodos)) ||
+      Number(payload.cantidad_periodos) < 1 ||
+      Number(payload.cantidad_periodos) > 120)
+  ) {
+    errores.push('La cantidad de períodos debe estar entre 1 y 120.');
   }
 
   if (payload.fecha_inicio && !esFechaDateOnlyValida(payload.fecha_inicio)) {
@@ -234,7 +323,7 @@ export const OBR_GastosPeriodicos_CTS = async (req, res) => {
     const order = buildOrder({
       orderBy,
       orderDirection,
-      allowedFields: ['id', 'nombre', 'frecuencia', 'fecha_inicio', 'fecha_fin', 'proxima_fecha_generacion', 'importe_total', 'activo', 'created_at', 'updated_at']
+      allowedFields: ['id', 'nombre', 'frecuencia', 'cantidad_periodos', 'fecha_inicio', 'fecha_fin', 'proxima_fecha_generacion', 'importe_total', 'activo', 'created_at', 'updated_at']
     });
 
     const { rows, count } = await GastosPeriodicosModel.findAndCountAll({
@@ -318,6 +407,106 @@ export const CR_GastosPeriodicos_CTS = async (req, res) => {
   } catch (error) {
     if (transaction && !transaction.finished) await transaction.rollback();
     return manejarErrorControlador({ res, error, nombre: 'CR_GastosPeriodicos_CTS' });
+  }
+};
+
+
+// Benjamin Orellana - 2026/08/12 - Crea una serie periódica finita y deja
+// todas sus cuotas futuras programadas como pendientes en una sola transacción.
+// Al estar pendientes NO generan movimientos de Caja hasta que cada cuota se pague.
+export const CR_ProgramarGastoPeriodico_CTS = async (req, res) => {
+  const transaction = await db.transaction();
+
+  try {
+    if (!validarRolOperacionGastos(req.user)) {
+      await transaction.rollback();
+      return res.status(403).json({
+        ok: false,
+        message: 'No tiene permisos para programar gastos periódicos.'
+      });
+    }
+
+    const payload = buildPayloadPeriodicoCreate(req.body);
+    const cantidadPeriodos = Number(payload.cantidad_periodos || 0);
+    const errores = validarPayloadPeriodico(payload, 'create');
+    const erroresRelaciones = await validarSedeTipoProveedor({
+      payload,
+      user: req.user,
+      transaction
+    });
+    errores.push(...erroresRelaciones);
+
+    if (!Number.isInteger(cantidadPeriodos) || cantidadPeriodos < 1 || cantidadPeriodos > 120) {
+      errores.push('Debe indicar una cantidad de períodos entre 1 y 120.');
+    }
+
+    if (errores.length > 0) {
+      await transaction.rollback();
+      return res.status(400).json({
+        ok: false,
+        message: 'Datos inválidos para programar el gasto periódico.',
+        errors: [...new Set(errores)]
+      });
+    }
+
+    const fechas = Array.from({ length: cantidadPeriodos }, (_, index) =>
+      calcularFechaPeriodoFinito(payload.fecha_inicio, payload.frecuencia, index)
+    );
+
+    if (fechas.some((fecha) => !fecha)) {
+      await transaction.rollback();
+      return res.status(400).json({
+        ok: false,
+        message: 'No se pudieron calcular las fechas de la serie periódica.'
+      });
+    }
+
+    payload.fecha_fin = fechas[fechas.length - 1];
+    payload.ultima_fecha_generada = payload.fecha_fin;
+    payload.proxima_fecha_generacion = null;
+    payload.activo = 1;
+
+    const nuevoPeriodico = await GastosPeriodicosModel.create(payload, {
+      transaction
+    });
+
+    const cuotas = construirCuotasPeriodicas({
+      periodico: nuevoPeriodico,
+      cantidadPeriodos
+    });
+
+    const gastosGenerados = await GastosGastosModel.bulkCreate(cuotas, {
+      transaction
+    });
+
+    await transaction.commit();
+
+    const data = await GastosPeriodicosModel.findByPk(nuevoPeriodico.id, {
+      include: buildIncludePeriodicos()
+    });
+    const [dataConSede] = await anexarSedesARegistros([data]);
+
+    return res.status(201).json({
+      ok: true,
+      message: `Gasto periódico programado en ${cantidadPeriodos} período${cantidadPeriodos === 1 ? '' : 's'}.`,
+      data: {
+        ...dataConSede,
+        cantidad_periodos: cantidadPeriodos,
+        cantidad_gastos_generados: gastosGenerados.length,
+        importe_por_periodo: Number(nuevoPeriodico.importe_total || 0),
+        importe_comprometido:
+          Number(nuevoPeriodico.importe_total || 0) * cantidadPeriodos,
+        primera_fecha: fechas[0],
+        ultima_fecha: fechas[fechas.length - 1]
+      }
+    });
+  } catch (error) {
+    if (transaction && !transaction.finished) await transaction.rollback();
+    return manejarErrorControlador({
+      res,
+      error,
+      nombre: 'CR_ProgramarGastoPeriodico_CTS'
+    });
   }
 };
 

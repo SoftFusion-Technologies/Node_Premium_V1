@@ -492,7 +492,7 @@ const buildIncludeGastos = (user = null) => [
   {
     model: GastosPeriodicosModel,
     as: 'gasto_periodico',
-    attributes: ['id', 'nombre', 'frecuencia', 'activo'],
+    attributes: ['id', 'nombre', 'frecuencia', 'cantidad_periodos', 'activo'],
     required: false
   },
   {

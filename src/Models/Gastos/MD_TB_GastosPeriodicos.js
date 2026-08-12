@@ -97,6 +97,14 @@ const GastosPeriodicosModel = db.define(
       defaultValue: 'mensual'
     },
 
+    // Benjamin Orellana - 2026/08/12 - Cantidad finita de períodos cuando la
+    // serie se programa completa desde el formulario unificado de Gastos.
+    // NULL conserva compatibilidad con periódicos históricos/indefinidos.
+    cantidad_periodos: {
+      type: DataTypes.SMALLINT.UNSIGNED,
+      allowNull: true
+    },
+
     fecha_inicio: {
       type: DataTypes.DATEONLY,
       allowNull: false

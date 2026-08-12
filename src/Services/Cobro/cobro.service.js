@@ -31,7 +31,7 @@ import {
 import { copiarRestriccionesPlan } from "../Agenda/agendaRestricciones.service.js";
 import { imputarReservasPendientesMembresia } from "../Agenda/reservasPendientes.service.js";
 
-const TIPOS_CONCEPTO = ["producto", "servicio", "plan"];
+const TIPOS_CONCEPTO = ["producto", "servicio", "plan", "deuda"];
 const TIPOS_CLIENTE = ["alumno", "empleado", "sin_cliente"];
 const CODIGO_SALDO_FAVOR = "SALDO_FAVOR";
 
@@ -199,7 +199,12 @@ const consultaCatalogo = async ({
   return rows[0] || null;
 };
 
-const resolverConceptos = async ({ conceptos, sedeId, transaction }) => {
+const resolverConceptos = async ({
+  conceptos,
+  sedeId,
+  alumnoId = null,
+  transaction,
+}) => {
   if (!Array.isArray(conceptos) || conceptos.length === 0) {
     throw new CobroOperacionError(
       "Debe agregar al menos un concepto al cobro.",
@@ -220,9 +225,11 @@ const resolverConceptos = async ({ conceptos, sedeId, transaction }) => {
         "La cantidad de cada concepto debe ser mayor a cero.",
       );
     }
-    if (item.tipo === "plan" && cantidad !== 1) {
+    if (["plan", "deuda"].includes(item.tipo) && cantidad !== 1) {
       throw new CobroOperacionError(
-        "Los planes deben cobrarse de a una membresía por operación.",
+        item.tipo === "deuda"
+          ? "Cada línea de deuda debe representar una mensualidad con cantidad 1."
+          : "Los planes deben cobrarse de a una membresía por operación.",
       );
     }
 
@@ -233,6 +240,131 @@ const resolverConceptos = async ({ conceptos, sedeId, transaction }) => {
       throw new CobroOperacionError(
         "Descuentos e impuestos deben estar entre 0% y 100%.",
       );
+    }
+
+    if (item.tipo === "deuda") {
+      if (!idValido(alumnoId)) {
+        throw new CobroOperacionError(
+          "Para saldar una deuda debe seleccionar un alumno.",
+          409,
+          "DEUDA_REQUIERE_ALUMNO",
+        );
+      }
+
+      if (
+        Number(item.descuento_porcentaje || 0) !== 0 ||
+        Number(item.impuesto_porcentaje || 0) !== 0
+      ) {
+        throw new CobroOperacionError(
+          "Una deuda existente no admite descuentos ni impuestos al saldarla.",
+          409,
+          "DEUDA_SIN_AJUSTES",
+        );
+      }
+
+      const rows = await db.query(
+        `SELECT
+           pm.id,
+           pm.alumno_id,
+           pm.membresia_id,
+           pm.sede_id,
+           pm.monto_total,
+           pm.monto_pagado,
+           pm.saldo,
+           COALESCE((
+             SELECT SUM(ppv.monto)
+             FROM pagos_pagos ppv
+             WHERE ppv.mensualidad_id = pm.id
+               AND ppv.estado = 'pendiente_validacion'
+           ), 0) AS monto_en_validacion,
+           pm.estado,
+           pm.fecha_vencimiento,
+           am.plan_id,
+           COALESCE(p.nombre, CONCAT('Mensualidad #', pm.id)) AS nombre,
+           'Deuda pendiente' AS categoria_nombre
+         FROM pagos_mensualidades pm
+         LEFT JOIN alumnos_membresias am ON am.id = pm.membresia_id
+         LEFT JOIN planes_planes p ON p.id = am.plan_id
+         WHERE pm.id = :mensualidadId
+           AND pm.alumno_id = :alumnoId
+           AND pm.sede_id = :sedeId
+           AND pm.estado IN ('pendiente','parcial','vencida')
+           AND pm.saldo > 0
+         LIMIT 1`,
+        {
+          replacements: {
+            mensualidadId: Number(item.referencia_id),
+            alumnoId: Number(alumnoId),
+            sedeId: Number(sedeId),
+          },
+          type: QueryTypes.SELECT,
+          transaction,
+        },
+      );
+
+      const deuda = rows[0] || null;
+      if (!deuda) {
+        throw new CobroOperacionError(
+          "La deuda seleccionada ya no está disponible o no pertenece al alumno/sede.",
+          409,
+          "DEUDA_NO_DISPONIBLE",
+        );
+      }
+
+      const saldoPendiente = redondear(Number(deuda.saldo || 0));
+      const montoEnValidacion = redondear(Number(deuda.monto_en_validacion || 0));
+      const saldoDisponible = redondear(
+        Math.max(saldoPendiente - montoEnValidacion, 0),
+      );
+      if (saldoDisponible <= 0.009) {
+        throw new CobroOperacionError(
+          "La deuda seleccionada ya tiene todo su saldo cubierto por un pago pendiente de validación.",
+          409,
+          "DEUDA_EN_VALIDACION",
+        );
+      }
+
+      const importeSaldar =
+        item.precio_unitario === undefined || item.precio_unitario === null
+          ? saldoDisponible
+          : redondear(Number(item.precio_unitario));
+
+      if (!Number.isFinite(importeSaldar) || importeSaldar <= 0) {
+        throw new CobroOperacionError("El importe a saldar no es válido.");
+      }
+      if (importeSaldar - saldoDisponible > 0.009) {
+        throw new CobroOperacionError(
+          "El importe a saldar no puede superar el saldo disponible de la deuda. Puede haber un pago pendiente de validación.",
+          409,
+          "DEUDA_IMPORTE_EXCEDIDO",
+        );
+      }
+
+      resueltos.push({
+        id: Number(deuda.id),
+        nombre: `Deuda · ${deuda.nombre}`,
+        categoria_nombre: deuda.categoria_nombre,
+        tipo: "deuda",
+        referencia_id: Number(deuda.id),
+        cantidad: 1,
+        precio_catalogo: saldoDisponible,
+        precio_unitario: importeSaldar,
+        descuento_porcentaje: 0,
+        descuento_importe: 0,
+        impuesto_porcentaje: 0,
+        impuesto_importe: 0,
+        importe: importeSaldar,
+        total: importeSaldar,
+        membresia_id: deuda.membresia_id ? Number(deuda.membresia_id) : null,
+        mensualidad_id: Number(deuda.id),
+        plan_id: deuda.plan_id ? Number(deuda.plan_id) : null,
+        saldo_pendiente: saldoPendiente,
+        monto_en_validacion: montoEnValidacion,
+        saldo_disponible: saldoDisponible,
+        monto_pagado_actual: Number(deuda.monto_pagado || 0),
+        fecha_vencimiento: deuda.fecha_vencimiento,
+      });
+      continue;
     }
 
     const catalogo = await consultaCatalogo({
@@ -287,6 +419,25 @@ const resolverConceptos = async ({ conceptos, sedeId, transaction }) => {
     throw new CobroOperacionError(
       "La primera versión admite un solo plan por cobro.",
     );
+  }
+
+  const deudas = resueltos.filter((item) => item.tipo === "deuda");
+  if (deudas.length > 0 && deudas.length !== resueltos.length) {
+    throw new CobroOperacionError(
+      "Las deudas deben cobrarse en una operación separada de planes, productos y servicios.",
+      409,
+      "DEUDA_COBRO_EXCLUSIVO",
+    );
+  }
+  if (deudas.length > 0) {
+    const idsDeuda = deudas.map((item) => Number(item.mensualidad_id));
+    if (new Set(idsDeuda).size !== idsDeuda.length) {
+      throw new CobroOperacionError(
+        "Una misma deuda no puede agregarse dos veces al mismo cobro.",
+        409,
+        "DEUDA_DUPLICADA",
+      );
+    }
   }
 
   return resueltos;
@@ -1185,6 +1336,7 @@ export const registrarCobro = async ({ payload, usuario }) => {
     const conceptos = await resolverConceptos({
       conceptos: payload.conceptos,
       sedeId,
+      alumnoId: alumno?.id,
       transaction,
     });
     const lineaPlan = conceptos.find((item) => item.tipo === "plan");
@@ -1313,6 +1465,7 @@ export const registrarCobro = async ({ payload, usuario }) => {
     });
 
     let pagoPlan = null;
+    let pagoDeuda = null;
     const medioPagoPlan =
       pagos.find((item) => !item.es_saldo_favor) || pagos[0];
     for (const linea of conceptos) {
@@ -1372,6 +1525,28 @@ export const registrarCobro = async ({ payload, usuario }) => {
         );
       }
 
+      if (linea.tipo === "deuda") {
+        const resultadoDeuda = await crearPagoDeudaCobro({
+          alumno,
+          sedeId,
+          linea,
+          estadoCobro,
+          medioPagoId: medioPagoPlan.medio_pago_id,
+          usuarioId,
+          cobroId: cobro.id,
+          transaction,
+        });
+        pagoDeuda = resultadoDeuda.pago;
+        await detalle.update(
+          {
+            membresia_id: resultadoDeuda.membresiaId,
+            mensualidad_id: Number(resultadoDeuda.mensualidad.id),
+            pago_id: Number(resultadoDeuda.pago.id),
+          },
+          { transaction },
+        );
+      }
+
       if (estadoCobro === "confirmado") {
         await descontarStock({
           linea,
@@ -1384,18 +1559,18 @@ export const registrarCobro = async ({ payload, usuario }) => {
     }
 
     if (estadoCobro === "confirmado") {
-      const esCobroExclusivoDePlan =
-        conceptos.length === 1 && Boolean(pagoPlan);
+      const pagoAlumno = conceptos.length === 1 ? pagoPlan || pagoDeuda : null;
+      const esCobroExclusivoDeAlumno = Boolean(pagoAlumno);
       const movimientoFinanciero = await FinanzasMovimientosModel.create(
         {
           sede_id: sedeId,
           categoria_id: null,
-          pago_id: esCobroExclusivoDePlan ? Number(pagoPlan.id) : null,
+          pago_id: esCobroExclusivoDeAlumno ? Number(pagoAlumno.id) : null,
           tipo: "ingreso",
           fecha: fechaArgentina(),
           descripcion: `Cobro #${cobro.id}`,
           monto: totalPagado.toFixed(2),
-          origen: esCobroExclusivoDePlan ? "pago_alumno" : "manual",
+          origen: esCobroExclusivoDeAlumno ? "pago_alumno" : "manual",
           referencia: `COBRO-${cobro.id}`,
           usuario_registro_id: usuarioId,
           estado: "vigente",
@@ -1472,6 +1647,218 @@ const cargarCobroBloqueado = async ({ cobroId, sedeId, transaction }) => {
       "COBRO_NO_ENCONTRADO",
     );
   return cobro;
+};
+
+// Benjamin Orellana - 2026/08/11 - Determina el estado de una mensualidad luego de imputar/revertir un pago.
+const estadoMensualidadSegunSaldo = ({ montoTotal, montoPagado, fechaVencimiento }) => {
+  const total = redondear(Number(montoTotal || 0));
+  const pagado = redondear(Number(montoPagado || 0));
+  const saldo = redondear(Math.max(total - pagado, 0));
+  if (saldo <= 0.009) return "pagada";
+  if (fechaVencimiento && String(fechaVencimiento).slice(0, 10) < fechaArgentina()) {
+    return "vencida";
+  }
+  if (pagado > 0.009) return "parcial";
+  return "pendiente";
+};
+
+// Benjamin Orellana - 2026/08/11 - Mantiene el mismo criterio operativo del módulo Pagos
+// cuando una deuda se cobra desde el drawer central. No crea un segundo saldo paralelo.
+const sincronizarEstadosDeuda = async ({ mensualidad, usuarioId, transaction }) => {
+  const membresia = mensualidad.membresia_id
+    ? await AlumnosMembresiasModel.findByPk(mensualidad.membresia_id, {
+        transaction,
+        lock: transaction.LOCK.UPDATE,
+      })
+    : null;
+  const alumno = await AlumnosModel.findByPk(mensualidad.alumno_id, {
+    transaction,
+    lock: transaction.LOCK.UPDATE,
+  });
+
+  if (!membresia || !alumno) return { membresia, alumno };
+  if (["baja", "congelado"].includes(alumno.estado)) return { membresia, alumno };
+
+  const mensualidadPagada = Number(mensualidad.saldo || 0) <= 0.009;
+  const otraDeudaPendiente = mensualidadPagada
+    ? await PagosMensualidadesModel.findOne({
+        where: {
+          id: { [Op.ne]: Number(mensualidad.id) },
+          alumno_id: Number(mensualidad.alumno_id),
+          membresia_id: Number(mensualidad.membresia_id),
+          estado: { [Op.in]: ["pendiente", "parcial", "vencida"] },
+          saldo: { [Op.gt]: 0 },
+        },
+        transaction,
+      })
+    : null;
+  if (mensualidadPagada && !otraDeudaPendiente) {
+    await membresia.update(
+      { estado: "activa", updated_at: new Date() },
+      { transaction },
+    );
+    await imputarReservasPendientesMembresia({ membresia, transaction });
+    await alumno.update(
+      {
+        estado: "activo",
+        sede_id: Number(membresia.sede_id),
+        fecha_inicio: alumno.fecha_inicio || membresia.fecha_inicio,
+        usuario_validacion_id:
+          alumno.usuario_validacion_id || Number(usuarioId) || null,
+        updated_at: new Date(),
+      },
+      { transaction },
+    );
+  } else {
+    await membresia.update(
+      { estado: "pendiente_pago", updated_at: new Date() },
+      { transaction },
+    );
+    await alumno.update(
+      {
+        estado: "pendiente_pago",
+        sede_id: Number(membresia.sede_id),
+        updated_at: new Date(),
+      },
+      { transaction },
+    );
+  }
+
+  return { membresia, alumno };
+};
+
+const aplicarImporteDeudaEnMensualidad = async ({
+  mensualidad,
+  monto,
+  usuarioId,
+  transaction,
+}) => {
+  const importe = redondear(Number(monto || 0));
+  const saldoActual = redondear(Number(mensualidad.saldo || 0));
+  if (!Number.isFinite(importe) || importe <= 0) {
+    throw new CobroOperacionError("El importe de la deuda a saldar no es válido.");
+  }
+  if (importe - saldoActual > 0.009) {
+    throw new CobroOperacionError(
+      "El importe a saldar supera el saldo pendiente actual de la deuda.",
+      409,
+      "DEUDA_SALDO_CAMBIO",
+    );
+  }
+
+  const nuevoPagado = redondear(Number(mensualidad.monto_pagado || 0) + importe);
+  const nuevoSaldo = redondear(Math.max(Number(mensualidad.monto_total || 0) - nuevoPagado, 0));
+  await mensualidad.update(
+    {
+      monto_pagado: nuevoPagado.toFixed(2),
+      saldo: nuevoSaldo.toFixed(2),
+      estado: estadoMensualidadSegunSaldo({
+        montoTotal: mensualidad.monto_total,
+        montoPagado: nuevoPagado,
+        fechaVencimiento: mensualidad.fecha_vencimiento,
+      }),
+      updated_at: new Date(),
+    },
+    { transaction },
+  );
+  await sincronizarEstadosDeuda({ mensualidad, usuarioId, transaction });
+};
+
+const crearPagoDeudaCobro = async ({
+  alumno,
+  sedeId,
+  linea,
+  estadoCobro,
+  medioPagoId,
+  usuarioId,
+  cobroId,
+  transaction,
+}) => {
+  if (linea.tipo !== "deuda") return null;
+
+  const mensualidad = await PagosMensualidadesModel.findOne({
+    where: {
+      id: Number(linea.mensualidad_id || linea.referencia_id),
+      alumno_id: Number(alumno.id),
+      sede_id: Number(sedeId),
+      estado: { [Op.in]: ["pendiente", "parcial", "vencida"] },
+    },
+    transaction,
+    lock: transaction.LOCK.UPDATE,
+  });
+  if (!mensualidad || Number(mensualidad.saldo || 0) <= 0) {
+    throw new CobroOperacionError(
+      "La deuda seleccionada ya fue saldada o dejó de estar disponible.",
+      409,
+      "DEUDA_NO_DISPONIBLE",
+    );
+  }
+
+  // Reserva operativa: los pagos pendientes de validación todavía no reducen
+  // pagos_mensualidades.saldo, pero sí deben descontarse del importe cobrable.
+  // La mensualidad está bloqueada FOR UPDATE, por lo que también evita dos
+  // cobros concurrentes sobre el mismo saldo.
+  const montoEnValidacion = redondear(
+    Number(
+      (await PagosModel.sum("monto", {
+        where: {
+          mensualidad_id: Number(mensualidad.id),
+          estado: "pendiente_validacion",
+        },
+        transaction,
+      })) || 0,
+    ),
+  );
+  const saldoDisponible = redondear(
+    Math.max(Number(mensualidad.saldo || 0) - montoEnValidacion, 0),
+  );
+  if (saldoDisponible <= 0.009) {
+    throw new CobroOperacionError(
+      "La deuda ya tiene su saldo cubierto por un pago pendiente de validación.",
+      409,
+      "DEUDA_EN_VALIDACION",
+    );
+  }
+  if (Number(linea.total || 0) - saldoDisponible > 0.009) {
+    throw new CobroOperacionError(
+      "El importe supera el saldo disponible de la deuda. Actualizá las deudas e intentá nuevamente.",
+      409,
+      "DEUDA_SALDO_RESERVADO",
+    );
+  }
+
+  const confirmado = estadoCobro === "confirmado";
+  const pago = await PagosModel.create(
+    {
+      mensualidad_id: Number(mensualidad.id),
+      alumno_id: Number(alumno.id),
+      sede_id: Number(sedeId),
+      medio_pago_id: Number(medioPagoId),
+      usuario_registro_id: Number(usuarioId),
+      usuario_validacion_id: confirmado ? Number(usuarioId) : null,
+      fecha_pago: new Date(),
+      monto: Number(linea.total).toFixed(2),
+      estado: confirmado ? "confirmado" : "pendiente_validacion",
+      referencia: `COBRO-${cobroId}`,
+      observaciones: `Pago de deuda generado desde cobro #${cobroId}`,
+    },
+    { transaction },
+  );
+
+  if (confirmado) {
+    await aplicarImporteDeudaEnMensualidad({
+      mensualidad,
+      monto: linea.total,
+      usuarioId,
+      transaction,
+    });
+  }
+
+  return {
+    pago,
+    mensualidad,
+    membresiaId: mensualidad.membresia_id ? Number(mensualidad.membresia_id) : null,
+  };
 };
 
 const aplicarPlanPendiente = async ({ detalle, usuarioId, transaction }) => {
@@ -1613,6 +2000,55 @@ const aplicarPlanPendiente = async ({ detalle, usuarioId, transaction }) => {
   return pago;
 };
 
+const aplicarDeudaPendiente = async ({ detalle, usuarioId, transaction }) => {
+  if (detalle.tipo !== "deuda") return null;
+
+  const mensualidad = detalle.mensualidad_id
+    ? await PagosMensualidadesModel.findByPk(detalle.mensualidad_id, {
+        transaction,
+        lock: transaction.LOCK.UPDATE,
+      })
+    : null;
+  const pago = detalle.pago_id
+    ? await PagosModel.findByPk(detalle.pago_id, {
+        transaction,
+        lock: transaction.LOCK.UPDATE,
+      })
+    : null;
+
+  if (!mensualidad || !pago) {
+    throw new CobroOperacionError(
+      "El cobro pendiente no conserva los registros necesarios para saldar la deuda.",
+      409,
+      "DEUDA_INCOMPLETA",
+    );
+  }
+  if (pago.estado === "confirmado") return pago;
+  if (pago.estado !== "pendiente_validacion") {
+    throw new CobroOperacionError(
+      "El pago asociado a la deuda ya no está pendiente de validación.",
+      409,
+      "DEUDA_PAGO_INVALIDO",
+    );
+  }
+
+  await aplicarImporteDeudaEnMensualidad({
+    mensualidad,
+    monto: Number(pago.monto),
+    usuarioId,
+    transaction,
+  });
+  await pago.update(
+    {
+      estado: "confirmado",
+      usuario_validacion_id: Number(usuarioId),
+      updated_at: new Date(),
+    },
+    { transaction },
+  );
+  return pago;
+};
+
 const aplicarStockPendiente = async ({
   detalle,
   sedeId,
@@ -1720,6 +2156,7 @@ export const confirmarCobroPendiente = async ({
     const esRevalidacionDeEdicion = idValido(cobro.finanzas_movimiento_id);
 
     let pagoPlan = null;
+    let pagoDeuda = null;
     if (!esRevalidacionDeEdicion) {
       for (const detalle of detalles) {
         const pagoAplicado = await aplicarPlanPendiente({
@@ -1728,6 +2165,12 @@ export const confirmarCobroPendiente = async ({
           transaction,
         });
         if (pagoAplicado) pagoPlan = pagoAplicado;
+        const pagoDeudaAplicado = await aplicarDeudaPendiente({
+          detalle,
+          usuarioId,
+          transaction,
+        });
+        if (pagoDeudaAplicado) pagoDeuda = pagoDeudaAplicado;
         await aplicarStockPendiente({
           detalle,
           sedeId: Number(sedeId),
@@ -1737,7 +2180,8 @@ export const confirmarCobroPendiente = async ({
       }
     }
 
-    const esCobroExclusivoDePlan = detalles.length === 1 && Boolean(pagoPlan);
+    const pagoAlumno = detalles.length === 1 ? pagoPlan || pagoDeuda : null;
+    const esCobroExclusivoDeAlumno = Boolean(pagoAlumno);
     const movimientoFinanciero = esRevalidacionDeEdicion
       ? await FinanzasMovimientosModel.findByPk(
           Number(cobro.finanzas_movimiento_id),
@@ -1747,12 +2191,12 @@ export const confirmarCobroPendiente = async ({
           {
             sede_id: Number(sedeId),
             categoria_id: null,
-            pago_id: esCobroExclusivoDePlan ? Number(pagoPlan.id) : null,
+            pago_id: esCobroExclusivoDeAlumno ? Number(pagoAlumno.id) : null,
             tipo: "ingreso",
             fecha: fechaArgentina(),
             descripcion: `Cobro #${cobro.id} validado`,
             monto: totalPagado.toFixed(2),
-            origen: esCobroExclusivoDePlan ? "pago_alumno" : "manual",
+            origen: esCobroExclusivoDeAlumno ? "pago_alumno" : "manual",
             referencia: `COBRO-${cobro.id}`,
             usuario_registro_id: usuarioId,
             estado: "vigente",
@@ -1879,6 +2323,20 @@ export const rechazarCobroPendiente = async ({
       lock: transaction.LOCK.UPDATE,
     });
     for (const detalle of detalles) {
+      if (detalle.tipo === "deuda") {
+        if (detalle.pago_id) {
+          await PagosModel.update(
+            {
+              estado: "rechazado",
+              usuario_validacion_id: usuarioId,
+              observaciones: motivoLimpio,
+              updated_at: new Date(),
+            },
+            { where: { id: detalle.pago_id }, transaction },
+          );
+        }
+        continue;
+      }
       if (detalle.tipo !== "plan") continue;
       if (detalle.membresia_id) {
         await AlumnosMembresiasModel.update(
@@ -1968,6 +2426,77 @@ export const rechazarCobroPendiente = async ({
     if (!transaction.finished) await transaction.rollback();
     throw error;
   }
+};
+
+const revertirDeudaConfirmada = async ({
+  detalle,
+  motivo,
+  usuarioId,
+  transaction,
+}) => {
+  if (detalle.tipo !== "deuda") return;
+
+  const mensualidad = detalle.mensualidad_id
+    ? await PagosMensualidadesModel.findByPk(detalle.mensualidad_id, {
+        transaction,
+        lock: transaction.LOCK.UPDATE,
+      })
+    : null;
+  const pago = detalle.pago_id
+    ? await PagosModel.findByPk(detalle.pago_id, {
+        transaction,
+        lock: transaction.LOCK.UPDATE,
+      })
+    : null;
+
+  if (!mensualidad || !pago) {
+    throw new CobroOperacionError(
+      "El cobro no conserva los registros de la deuda y no puede anularse automáticamente.",
+      409,
+      "DEUDA_INCOMPLETA",
+    );
+  }
+  if (pago.estado === "anulado") return;
+  if (pago.estado !== "confirmado") {
+    throw new CobroOperacionError(
+      "El pago asociado a la deuda no está confirmado.",
+      409,
+      "DEUDA_PAGO_INVALIDO",
+    );
+  }
+
+  const nuevoPagado = redondear(
+    Math.max(Number(mensualidad.monto_pagado || 0) - Number(pago.monto || 0), 0),
+  );
+  const nuevoSaldo = redondear(
+    Math.max(Number(mensualidad.monto_total || 0) - nuevoPagado, 0),
+  );
+  await mensualidad.update(
+    {
+      monto_pagado: nuevoPagado.toFixed(2),
+      saldo: nuevoSaldo.toFixed(2),
+      estado: estadoMensualidadSegunSaldo({
+        montoTotal: mensualidad.monto_total,
+        montoPagado: nuevoPagado,
+        fechaVencimiento: mensualidad.fecha_vencimiento,
+      }),
+      updated_at: new Date(),
+    },
+    { transaction },
+  );
+  await pago.update(
+    {
+      estado: "anulado",
+      usuario_validacion_id: Number(usuarioId),
+      observaciones: [pago.observaciones, `Anulado desde cobro: ${motivo}`]
+        .filter(Boolean)
+        .join(" | ")
+        .slice(0, 1000),
+      updated_at: new Date(),
+    },
+    { transaction },
+  );
+  await sincronizarEstadosDeuda({ mensualidad, usuarioId, transaction });
 };
 
 const validarYRevertirPlan = async ({
@@ -2589,6 +3118,14 @@ export const editarCobroConfirmado = async ({
       transaction,
       lock: transaction.LOCK.UPDATE,
     });
+    if (detallesAnteriores.some((detalle) => detalle.tipo === "deuda")) {
+      throw new CobroOperacionError(
+        "Los cobros usados para saldar una deuda no se editan directamente. Anulá el cobro y registralo nuevamente para conservar la trazabilidad de la mensualidad.",
+        409,
+        "DEUDA_COBRO_NO_EDITABLE",
+      );
+    }
+
     const pagosAnteriores = await CobrosPagosModel.findAll({
       where: {
         cobro_id: Number(cobro.id),
@@ -2639,6 +3176,7 @@ export const editarCobroConfirmado = async ({
     const conceptosNuevos = await resolverConceptos({
       conceptos: payload?.conceptos,
       sedeId,
+      alumnoId: alumno?.id,
       transaction,
     });
     const planAnterior = detallesAnteriores.find(
@@ -3187,6 +3725,12 @@ export const anularCobroConfirmado = async ({
 
     for (const detalle of detalles) {
       await validarYRevertirPlan({
+        detalle,
+        motivo: motivoLimpio,
+        usuarioId,
+        transaction,
+      });
+      await revertirDeudaConfirmada({
         detalle,
         motivo: motivoLimpio,
         usuarioId,

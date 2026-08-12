@@ -13,7 +13,7 @@ const CobrosDetallesModel = db.define(
     },
     cobro_id: { type: DataTypes.BIGINT.UNSIGNED, allowNull: false },
     tipo: {
-      type: DataTypes.ENUM('producto', 'servicio', 'plan'),
+      type: DataTypes.ENUM('producto', 'servicio', 'plan', 'deuda'),
       allowNull: false
     },
     referencia_id: { type: DataTypes.BIGINT.UNSIGNED, allowNull: false },

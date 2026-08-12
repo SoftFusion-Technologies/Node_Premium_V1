@@ -386,6 +386,55 @@ const validarPayloadAnamnesis = (payload = {}, modo = 'create') => {
   return errores;
 };
 
+
+// 2026-08-12 - Sincroniza en alumnos_alumnos la aceptación realizada
+// por el propio alumno desde el portal. Conserva la primera fecha real.
+const sincronizarAceptacionTerminosAlumnoDesdeAnamnesis = async (
+  anamnesis,
+  transaction
+) => {
+  if (!anamnesis) return;
+
+  const snap =
+    typeof anamnesis.toJSON === 'function'
+      ? anamnesis.toJSON()
+      : { ...anamnesis };
+
+  if (
+    snap.origen_carga !== 'alumno' ||
+    Number(snap.acepta_terminos_salud) !== 1 ||
+    !snap.alumno_id
+  ) {
+    return;
+  }
+
+  const alumno = await AlumnosModel.findByPk(snap.alumno_id, { transaction });
+
+  if (!alumno) return;
+
+  const alumnoPlano =
+    typeof alumno.toJSON === 'function'
+      ? alumno.toJSON()
+      : { ...alumno };
+
+  const cambios = {};
+
+  if (Number(alumnoPlano.acepta_terminos) !== 1) {
+    cambios.acepta_terminos = 1;
+  }
+
+  if (!alumnoPlano.fecha_aceptacion_terminos) {
+    cambios.fecha_aceptacion_terminos =
+      snap.fecha_aceptacion ||
+      snap.created_at ||
+      new Date();
+  }
+
+  if (Object.keys(cambios).length > 0) {
+    await alumno.update(cambios, { transaction });
+  }
+};
+
 const aplicarScopeSedesAnamnesis = async (
   where = {},
   user = null,
@@ -949,6 +998,11 @@ export const CR_MiAnamnesis_CTS = async (req, res) => {
       }
     );
 
+    await sincronizarAceptacionTerminosAlumnoDesdeAnamnesis(
+      nuevaAnamnesis,
+      transaction
+    );
+
     await transaction.commit();
 
     const data = await construirAnamnesisRespuesta(nuevaAnamnesis);
@@ -1094,6 +1148,21 @@ export const UR_MiAnamnesis_CTS = async (req, res) => {
       });
     }
 
+    // Conservar la primera fecha real de aceptación.
+    // Editar posteriormente la anamnesis no debe cambiar la fecha legal.
+    const anamnesisAntes =
+      typeof result.anamnesis.toJSON === 'function'
+        ? result.anamnesis.toJSON()
+        : { ...result.anamnesis };
+
+    if (
+      Number(anamnesisAntes.acepta_terminos_salud) === 1 &&
+      Number(payload.acepta_terminos_salud) === 1 &&
+      anamnesisAntes.fecha_aceptacion
+    ) {
+      payload.fecha_aceptacion = anamnesisAntes.fecha_aceptacion;
+    }
+
     // El alumno siempre genera archivo: cualquier cambio suyo es contenido clínico.
     await archivarAnamnesis(result.anamnesis, {
       usuarioModificacionId: req.alumno?.usuario_app_id ?? null,
@@ -1104,6 +1173,11 @@ export const UR_MiAnamnesis_CTS = async (req, res) => {
     await result.anamnesis.update(
       { ...payload, estado_revision: 'pendiente' },
       { transaction }
+    );
+
+    await sincronizarAceptacionTerminosAlumnoDesdeAnamnesis(
+      result.anamnesis,
+      transaction
     );
 
     await transaction.commit();

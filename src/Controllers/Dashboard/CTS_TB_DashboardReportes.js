@@ -165,6 +165,20 @@ const CORTES_ACTIVIDAD = [
   { clave: 'fin_mes', etiqueta: 'Fin de mes', dia: null }
 ];
 
+// En el mes actual, Día 10 se muestra desde el primer día para conservar una
+// referencia inicial. Los demás cortes solo se exponen al alcanzar su fecha.
+const corteActividadDisponible = ({ anio, mes, corteDef, fechaHoy }) => {
+  const periodoConsultado = `${anio}-${String(mes).padStart(2, '0')}`;
+  const periodoActual = fechaHoy.slice(0, 7);
+  if (periodoConsultado < periodoActual) return true;
+  if (periodoConsultado > periodoActual) return false;
+  if (corteDef.clave === '10') return true;
+
+  const ultimoDiaMes = new Date(anio, mes, 0).getDate();
+  const diaCorte = corteDef.dia || ultimoDiaMes;
+  return fechaHoy >= `${periodoConsultado}-${String(diaCorte).padStart(2, '0')}`;
+};
+
 /*
  * Sergio Manrique - 2026/07/12
  * Por cada sede y cada corte del mes (10 / 20 / 25 / fin de mes): cantidad de
@@ -196,9 +210,13 @@ export const OBR_DashboardCortesActividad_CTS = async (req, res) => {
     }
 
     const { sedeId } = scope;
+    const fechaHoy = resolverFechaHoy();
 
     const filasPorCorte = await Promise.all(
       CORTES_ACTIVIDAD.map(async (corteDef) => {
+        const disponible = corteActividadDisponible({
+          anio: rango.anio, mes: rango.mes, corteDef, fechaHoy
+        });
         const fechas = resolverFechasCorte(rango.anio, rango.mes, corteDef.dia);
 
         const rows = await db.query(
@@ -244,7 +262,7 @@ export const OBR_DashboardCortesActividad_CTS = async (req, res) => {
           }
         );
 
-        return { clave: corteDef.clave, etiqueta: corteDef.etiqueta, rows };
+        return { clave: corteDef.clave, etiqueta: corteDef.etiqueta, disponible, rows };
       })
     );
 
@@ -285,14 +303,15 @@ export const OBR_DashboardCortesActividad_CTS = async (req, res) => {
         sedesMap.get(fila.sede_id).cortes.push({
           clave: bloque.clave,
           etiqueta: bloque.etiqueta,
-          activos,
-          activos_mes_anterior: activosMesAnterior,
-          variacion,
-          facturacion_acumulada: facturacionAcumulada,
-          cuotas_vendidas: cuotasVendidas,
-          cuotas_vendidas_mes_anterior: cuotasVendidasMesAnterior,
-          variacion_cuotas_vendidas: variacionCuotasVendidas,
-          porcentaje_ocupacion: cupoMaximo > 0 ? Math.round((activos / cupoMaximo) * 10000) / 100 : null,
+          disponible: bloque.disponible,
+          activos: bloque.disponible ? activos : null,
+          activos_mes_anterior: bloque.disponible ? activosMesAnterior : null,
+          variacion: bloque.disponible ? variacion : null,
+          facturacion_acumulada: bloque.disponible ? facturacionAcumulada : null,
+          cuotas_vendidas: bloque.disponible ? cuotasVendidas : null,
+          cuotas_vendidas_mes_anterior: bloque.disponible ? cuotasVendidasMesAnterior : null,
+          variacion_cuotas_vendidas: bloque.disponible ? variacionCuotasVendidas : null,
+          porcentaje_ocupacion: bloque.disponible && cupoMaximo > 0 ? Math.round((activos / cupoMaximo) * 10000) / 100 : null,
           // Sergio Manrique - 2026/08/05 - El semáforo de actividad de la
           // sede se calcula con la variación de CUOTAS VENDIDAS, no con la
           // variación de alumnos activos: el cliente pidió que el análisis
@@ -300,8 +319,8 @@ export const OBR_DashboardCortesActividad_CTS = async (req, res) => {
           // mueven mes a mes) y no en el conteo de socios activos (que
           // cambia muy poco de un corte a otro y no refleja el ritmo real
           // de ventas).
-          estado_activos: estadoPorVariacion(variacionCuotasVendidas),
-          estado_facturacion: estadoPorVariacionFacturacion(variacionFacturacionPct)
+          estado_activos: bloque.disponible ? estadoPorVariacion(variacionCuotasVendidas) : null,
+          estado_facturacion: bloque.disponible ? estadoPorVariacionFacturacion(variacionFacturacionPct) : null
         });
       }
     }

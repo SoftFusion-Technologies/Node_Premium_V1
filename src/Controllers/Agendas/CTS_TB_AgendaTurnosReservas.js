@@ -985,8 +985,9 @@ export const UR_AsistenciaAdmin_CTS = async (req, res) => {
  * automático. Dentro de la ventana (o con la clase ya en curso/pasada), el
  * reembolso pasa a ser opcional: solo se hace si el body manda
  * devolver_credito_vencido = true (lo decide el admin en el frontend).
- * Solo se bloquea por completo una vez que la clase ya terminó
- * (fecha + hora_fin): ahí ni se puede dar de baja.
+ * También se permite dar de baja una vez finalizada la clase, para que Gestión
+ * pueda registrar una cancelación tardía. En ese caso el reembolso sigue siendo
+ * opcional y solo se hace si el body manda devolver_credito_vencido = true.
  * Si la reserva sí da derecho a reembolso y hay lista de espera, promueve
  * al primero automáticamente al liberarse el cupo.
  */
@@ -1017,11 +1018,6 @@ export const ER_ReservaAdmin_CTS = async (req, res) => {
       await transaccion.rollback();
       return res.status(404).json({ message: 'Turno no encontrado.' });
     }
-    if (dayjs(`${turno.fecha} ${turno.hora_fin}`).isBefore(dayjs())) {
-      await transaccion.rollback();
-      return res.status(400).json({ message: 'No se puede dar de baja una reserva de una clase que ya finalizó.' });
-    }
-
     const minutosLimite = await obtenerMinutosCancelacion();
     const inicioTurno = dayjs(`${turno.fecha} ${turno.hora_inicio}`);
     const minutosRestantes = inicioTurno.diff(dayjs(), 'minute');

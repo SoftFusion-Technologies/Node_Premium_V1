@@ -14,7 +14,7 @@
 
 import express from 'express';
 
-import { authenticateToken, requireRolGlobal } from '../Security/auth.js';
+import { authenticateToken, requireRolGlobal, requireSedeAccess } from '../Security/auth.js';
 import { authenticateAlumnoToken } from '../Security/authAlumno.js';
 
 import {
@@ -71,6 +71,17 @@ export const ROLES_ADMIN = [
 import { OBRS_HoraServidorAgenda_CTS } from '../Controllers/Agendas/CTS_AgendaReloj.js';
 
 const router = express.Router();
+
+// Benjamin Orellana - 2026/08/12 - SUPER_ADMIN conserva el comportamiento
+// previo del reporte. Para COORD_SEDE/PROFESOR se exige acceso operativo a la
+// sede solicitada, evitando consultas manuales sobre otras sedes.
+const requireSedeAccessOcupacion = (req, res, next) => {
+  if (String(req.user?.rol_codigo || '').toUpperCase() === 'SUPER_ADMIN') {
+    return next();
+  }
+
+  return requireSedeAccess(req, res, next);
+};
 
 // Referencia temporal de servidor para la línea de tiempo de la Agenda.
 router.get(
@@ -163,13 +174,16 @@ router.get(
 );
 
 /*
- * Benjamin Orellana - 2026/08/11 - Reporte agregado de ocupación.
- * Exclusivo SUPER_ADMIN. Query params: sede_id, fecha_desde, fecha_hasta.
+ * Benjamin Orellana - 2026/08/12 - Reporte agregado de ocupación.
+ * Visible para SUPER_ADMIN, COORD_SEDE y PROFESOR. Los dos últimos quedan
+ * obligatoriamente acotados a una sede que tengan asignada y operativa.
+ * Query params: sede_id, fecha_desde, fecha_hasta.
  */
 router.get(
   '/agenda-admin/ocupacion',
   authenticateToken,
-  requireRolGlobal(['SUPER_ADMIN']),
+  requireRolGlobal(['SUPER_ADMIN', 'COORD_SEDE', 'PROFESOR']),
+  requireSedeAccessOcupacion,
   OBRS_OcupacionAgenda_CTS
 );
 

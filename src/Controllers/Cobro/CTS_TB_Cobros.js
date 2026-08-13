@@ -311,6 +311,17 @@ export const OBR_Cobros_CTS = async (req, res) => {
         `SELECT c.id, c.fecha_cobro, c.cliente_tipo, c.alumno_id,
           c.cliente_usuario_id, c.importe, c.descuentos, c.impuestos,
           c.total, c.moneda, c.estado,
+          CASE
+            WHEN c.estado = 'confirmado' AND EXISTS (
+              SELECT 1
+              FROM cobros_detalles cd_ai
+              INNER JOIN pagos_pagos pp_ai ON pp_ai.id = cd_ai.pago_id
+              WHERE cd_ai.cobro_id = c.id
+                AND cd_ai.tipo = 'plan'
+                AND pp_ai.estado = 'anulado'
+            ) THEN 1
+            ELSE 0
+          END AS anulacion_incompleta,
           COALESCE((
             SELECT SUM(cp_total.monto)
             FROM cobros_pagos cp_total
@@ -370,7 +381,18 @@ export const OBR_Cobros_CTS = async (req, res) => {
           ) ELSE 0 END), 0) AS total_confirmado,
           SUM(CASE WHEN c.estado = 'pendiente_validacion' THEN 1 ELSE 0 END) AS pendientes,
           SUM(CASE WHEN c.estado = 'rechazado' THEN 1 ELSE 0 END) AS rechazados,
-          SUM(CASE WHEN c.estado = 'anulado' THEN 1 ELSE 0 END) AS anulados
+          SUM(CASE WHEN c.estado = 'anulado' THEN 1 ELSE 0 END) AS anulados,
+          SUM(CASE
+            WHEN c.estado = 'confirmado' AND EXISTS (
+              SELECT 1
+              FROM cobros_detalles cd_ai
+              INNER JOIN pagos_pagos pp_ai ON pp_ai.id = cd_ai.pago_id
+              WHERE cd_ai.cobro_id = c.id
+                AND cd_ai.tipo = 'plan'
+                AND pp_ai.estado = 'anulado'
+            ) THEN 1
+            ELSE 0
+          END) AS anulaciones_incompletas
         FROM cobros_cobros c
         LEFT JOIN alumnos_alumnos a ON a.id = c.alumno_id
         LEFT JOIN usuarios_usuarios uc ON uc.id = c.cliente_usuario_id

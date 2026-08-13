@@ -3676,10 +3676,11 @@ export const anularCobroConfirmado = async ({
 
     const sesion = await CajasSesionesModel.findOne({
       where: {
-        id: Number(cajaSesionId),
+        ...(idValido(cajaSesionId) ? { id: Number(cajaSesionId) } : {}),
         sede_id: Number(sedeId),
         estado: "abierta",
       },
+      order: [["fecha_apertura", "DESC"], ["id", "DESC"]],
       transaction,
       lock: transaction.LOCK.UPDATE,
     });
@@ -3707,10 +3708,12 @@ export const anularCobroConfirmado = async ({
     });
     if (
       pagosCobro.length === 0 ||
-      pagosCobro.some((pago) => pago.estado !== "confirmado")
+      pagosCobro.some(
+        (pago) => !["confirmado", "anulado"].includes(String(pago.estado)),
+      )
     ) {
       throw new CobroOperacionError(
-        "Los medios de pago no están íntegramente confirmados.",
+        "Los medios de pago no tienen un estado compatible con la anulación.",
         409,
         "PAGOS_COBRO_INCONSISTENTES",
       );
@@ -3745,25 +3748,53 @@ export const anularCobroConfirmado = async ({
       });
     }
 
-    const movimientoReversion = await FinanzasMovimientosModel.create(
-      {
-        sede_id: Number(sedeId),
-        categoria_id: null,
-        pago_id: null,
-        tipo: "egreso",
-        fecha: fechaArgentina(),
-        descripcion: `Anulación de cobro #${cobro.id}`,
-        monto: totalPagadoCobro.toFixed(2),
-        origen: "ajuste",
+    // Una anulación iniciada desde Pagos podía haber marcado previamente como
+    // anulado el movimiento financiero original sin actualizar cobros_cobros.
+    // En ese caso NO generamos un segundo egreso: solo completamos la reversión
+    // faltante de membresía/caja/cobro.
+    const movimientoOriginalFinanzas = cobro.finanzas_movimiento_id
+      ? await FinanzasMovimientosModel.findByPk(cobro.finanzas_movimiento_id, {
+          transaction,
+          lock: transaction.LOCK.UPDATE,
+        })
+      : await FinanzasMovimientosModel.findOne({
+          where: { referencia: `COBRO-${cobro.id}` },
+          transaction,
+          lock: transaction.LOCK.UPDATE,
+        });
+
+    let movimientoReversion = await FinanzasMovimientosModel.findOne({
+      where: {
         referencia: `ANULACION-COBRO-${cobro.id}`,
-        usuario_registro_id: usuarioId,
         estado: "vigente",
-        observaciones: motivoLimpio,
       },
-      { transaction },
-    );
+      transaction,
+      lock: transaction.LOCK.UPDATE,
+    });
+
+    if (!movimientoReversion && movimientoOriginalFinanzas?.estado === "vigente") {
+      movimientoReversion = await FinanzasMovimientosModel.create(
+        {
+          sede_id: Number(sedeId),
+          categoria_id: null,
+          pago_id: null,
+          tipo: "egreso",
+          fecha: fechaArgentina(),
+          descripcion: `Anulación de cobro #${cobro.id}`,
+          monto: totalPagadoCobro.toFixed(2),
+          origen: "ajuste",
+          referencia: `ANULACION-COBRO-${cobro.id}`,
+          usuario_registro_id: usuarioId,
+          estado: "vigente",
+          observaciones: motivoLimpio,
+        },
+        { transaction },
+      );
+    }
 
     for (const pagoCobro of pagosCobro) {
+      if (pagoCobro.estado === "anulado") continue;
+
       const esSaldoFavor =
         medioSaldo && Number(pagoCobro.medio_pago_id) === Number(medioSaldo.id);
       if (esSaldoFavor) {
@@ -3790,25 +3821,37 @@ export const anularCobroConfirmado = async ({
           );
           continue;
         }
-        await CajasMovimientosModel.create(
-          {
-            caja_sesion_id: Number(sesion.id),
-            caja_id: Number(sesion.caja_id),
-            sede_id: Number(sedeId),
+        const reversionCajaExistente = await CajasMovimientosModel.findOne({
+          where: {
             cobro_pago_id: Number(pagoCobro.id),
-            medio_pago_id: Number(pagoCobro.medio_pago_id),
-            usuario_registro_id: usuarioId,
-            tipo: "egreso",
             origen: "reversion",
-            fecha_movimiento: new Date(),
-            monto: Number(pagoCobro.monto).toFixed(2),
-            descripcion: `Anulación de cobro #${cobro.id}`,
-            estado: "vigente",
             referencia: `ANULACION-COBRO-${cobro.id}`,
-            observaciones: motivoLimpio,
+            estado: "vigente",
           },
-          { transaction },
-        );
+          transaction,
+          lock: transaction.LOCK.UPDATE,
+        });
+        if (!reversionCajaExistente) {
+          await CajasMovimientosModel.create(
+            {
+              caja_sesion_id: Number(sesion.id),
+              caja_id: Number(sesion.caja_id),
+              sede_id: Number(sedeId),
+              cobro_pago_id: Number(pagoCobro.id),
+              medio_pago_id: Number(pagoCobro.medio_pago_id),
+              usuario_registro_id: usuarioId,
+              tipo: "egreso",
+              origen: "reversion",
+              fecha_movimiento: new Date(),
+              monto: Number(pagoCobro.monto).toFixed(2),
+              descripcion: `Anulación de cobro #${cobro.id}`,
+              estado: "vigente",
+              referencia: `ANULACION-COBRO-${cobro.id}`,
+              observaciones: motivoLimpio,
+            },
+            { transaction },
+          );
+        }
       }
       await pagoCobro.update(
         { estado: "anulado", updated_at: new Date() },
@@ -3823,7 +3866,9 @@ export const anularCobroConfirmado = async ({
     await cobro.update(
       {
         estado: "anulado",
-        finanzas_reversion_id: Number(movimientoReversion.id),
+        finanzas_reversion_id: movimientoReversion
+          ? Number(movimientoReversion.id)
+          : cobro.finanzas_reversion_id || null,
         usuario_anulacion_id: usuarioId,
         fecha_anulacion: new Date(),
         motivo_anulacion: motivoLimpio,

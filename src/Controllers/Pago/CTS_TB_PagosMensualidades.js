@@ -9,6 +9,9 @@ import PagosMensualidadesModel from '../../Models/Pago/MD_TB_PagosMensualidades.
 import AlumnosModel from '../../Models/Alumno/MD_TB_Alumnos.js';
 import AlumnosMembresiasModel from '../../Models/Alumno/MD_TB_AlumnosMembresias.js';
 import SedesModel from '../../Models/Sede/MD_TB_Sedes.js';
+import CobrosModel from '../../Models/Cobro/MD_TB_Cobros.js';
+import CobrosDetallesModel from '../../Models/Cobro/MD_TB_CobrosDetalles.js';
+import { anularCobroConfirmado, CobroOperacionError } from '../../Services/Cobro/cobro.service.js';
 
 const ESTADOS_MENSUALIDAD_VALIDOS = [
   'pendiente',
@@ -1566,52 +1569,101 @@ export const UR_MarcarMensualidadVencida_CTS = async (req, res) => {
 
 // Benjamin Orellana - 2026/05/29 - Anula una mensualidad mediante baja lógica.
 export const DR_PagosMensualidades_CTS = async (req, res) => {
-  const transaction = await db.transaction();
+  const { id } = req.params;
+  const { observaciones, caja_sesion_id } = req.body;
 
   try {
-    const { id } = req.params;
-    const { observaciones } = req.body;
-
-    const mensualidad = await PagosMensualidadesModel.findByPk(id, {
-      transaction
+    // Si la mensualidad fue creada desde Nuevo Cobro, anular la cuota implica
+    // anular el cobro completo para mantener una única fuente de verdad.
+    const detalleCobro = await CobrosDetallesModel.findOne({
+      where: { mensualidad_id: Number(id) },
+      order: [['id', 'DESC']]
     });
 
-    if (!mensualidad) {
-      await transaction.rollback();
-      return responderError(
-        res,
-        404,
-        'No se encontró la mensualidad solicitada.'
-      );
+    if (detalleCobro) {
+      const cobroVinculado = await CobrosModel.findByPk(detalleCobro.cobro_id);
+
+      if (cobroVinculado?.estado === 'confirmado') {
+        const motivo =
+          String(observaciones || '').trim() ||
+          `Anulación desde Cuotas de mensualidad #${id}`;
+
+        const resultado = await anularCobroConfirmado({
+          cobroId: cobroVinculado.id,
+          sedeId: cobroVinculado.sede_id,
+          cajaSesionId: caja_sesion_id || null,
+          usuario: req.user,
+          motivo
+        });
+
+        const mensualidadActualizada = await PagosMensualidadesModel.findByPk(id, {
+          include: includeMensualidad
+        });
+
+        return res.status(200).json({
+          ok: true,
+          message: resultado.repetido
+            ? 'La operación ya estaba anulada.'
+            : 'Cuota y cobro anulados correctamente.',
+          data: mensualidadActualizada,
+          cobro_id: Number(cobroVinculado.id),
+          anulacion_unificada: true
+        });
+      }
     }
 
-    await mensualidad.update(
-      {
-        estado: 'anulada',
-        observaciones:
-          observaciones !== undefined && observaciones !== null
-            ? String(observaciones).trim()
-            : mensualidad.observaciones,
-        updated_at: new Date()
-      },
-      { transaction }
-    );
+    const transaction = await db.transaction();
 
-    await transaction.commit();
+    try {
+      const mensualidad = await PagosMensualidadesModel.findByPk(id, {
+        transaction
+      });
 
-    const mensualidadActualizada = await PagosMensualidadesModel.findByPk(id, {
-      include: includeMensualidad
-    });
+      if (!mensualidad) {
+        await transaction.rollback();
+        return responderError(
+          res,
+          404,
+          'No se encontró la mensualidad solicitada.'
+        );
+      }
 
-    return res.status(200).json({
-      ok: true,
-      message: 'Mensualidad anulada correctamente.',
-      data: mensualidadActualizada
-    });
+      await mensualidad.update(
+        {
+          estado: 'anulada',
+          observaciones:
+            observaciones !== undefined && observaciones !== null
+              ? String(observaciones).trim()
+              : mensualidad.observaciones,
+          updated_at: new Date()
+        },
+        { transaction }
+      );
+
+      await transaction.commit();
+
+      const mensualidadActualizada = await PagosMensualidadesModel.findByPk(id, {
+        include: includeMensualidad
+      });
+
+      return res.status(200).json({
+        ok: true,
+        message: 'Mensualidad anulada correctamente.',
+        data: mensualidadActualizada,
+        anulacion_unificada: false
+      });
+    } catch (error) {
+      if (!transaction.finished) await transaction.rollback();
+      throw error;
+    }
   } catch (error) {
-    await transaction.rollback();
-
     console.error('Error en DR_PagosMensualidades_CTS:', error);
+
+    if (error instanceof CobroOperacionError) {
+      return responderError(res, error.status, error.message, {
+        code: error.code
+      });
+    }
 
     return responderError(res, 500, 'Error interno al anular la mensualidad.');
   }

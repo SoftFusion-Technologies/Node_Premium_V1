@@ -17,6 +17,9 @@ import { imputarReservasPendientesMembresia } from '../../Services/Agenda/reserv
 
 // Benjamin Orellana - 2026/05/30 - Modelo de movimientos financieros para registrar ingresos por pagos confirmados.
 import FinanzasMovimientosModel from '../../Models/Finanzas/MD_TB_FinanzasMovimientos.js';
+import CobrosModel from '../../Models/Cobro/MD_TB_Cobros.js';
+import CobrosDetallesModel from '../../Models/Cobro/MD_TB_CobrosDetalles.js';
+import { anularCobroConfirmado, CobroOperacionError } from '../../Services/Cobro/cobro.service.js';
 
 const ESTADOS_PAGO_VALIDOS = [
   'pendiente_validacion',
@@ -1894,73 +1897,128 @@ export const UR_RechazarPago_CTS = async (req, res) => {
 
 // Benjamin Orellana - 2026/05/30 - Anula un pago y revierte la mensualidad si estaba confirmado.
 export const UR_AnularPago_CTS = async (req, res) => {
-  const transaction = await db.transaction();
+  const { id } = req.params;
+  const { observaciones, caja_sesion_id } = req.body;
 
   try {
-    const { id } = req.params;
-    const { observaciones } = req.body;
+    const pagoBase = await PagosModel.findByPk(id);
 
-    const pago = await PagosModel.findByPk(id, { transaction });
-
-    if (!pago) {
-      await transaction.rollback();
+    if (!pagoBase) {
       return responderError(res, 404, 'No se encontró el pago solicitado.');
     }
 
-    if (pago.estado === 'anulado') {
-      await transaction.rollback();
-      return responderError(res, 400, 'El pago ya se encuentra anulado.');
-    }
+    // 2026/08/13 - Si el pago nació desde Nuevo Cobro, la anulación canónica
+    // es la del cobro completo. Así no quedan Pagos/Cuotas y Cobros partidos.
+    const detalleCobro = await CobrosDetallesModel.findOne({
+      where: { pago_id: Number(id) },
+      order: [['id', 'DESC']]
+    });
 
-    if (pago.estado === 'confirmado' && pago.mensualidad_id) {
-      const reversionPago = await revertirPagoConfirmadoEnMensualidad(
-        pago.mensualidad_id,
-        pago.monto,
-        transaction
-      );
+    if (detalleCobro) {
+      const cobroVinculado = await CobrosModel.findByPk(detalleCobro.cobro_id);
 
-      if (reversionPago && !reversionPago.ok) {
-        await transaction.rollback();
-        return responderError(res, reversionPago.status, reversionPago.message);
+      if (cobroVinculado?.estado === 'confirmado') {
+        const motivo =
+          String(observaciones || '').trim() ||
+          `Anulación desde Cuotas del pago #${pagoBase.id}`;
+
+        const resultado = await anularCobroConfirmado({
+          cobroId: cobroVinculado.id,
+          sedeId: cobroVinculado.sede_id,
+          cajaSesionId: caja_sesion_id || null,
+          usuario: req.user,
+          motivo
+        });
+
+        const pagoActualizado = await PagosModel.findByPk(id, {
+          include: includePago
+        });
+
+        return res.status(200).json({
+          ok: true,
+          message: resultado.repetido
+            ? 'La operación ya estaba anulada.'
+            : 'Pago, cuota y cobro anulados correctamente.',
+          data: pagoActualizado,
+          cobro_id: Number(cobroVinculado.id),
+          anulacion_unificada: true
+        });
       }
     }
 
-    // Benjamin Orellana - 2026/05/30 - Anula el movimiento financiero asociado al pago confirmado.
-    if (pago.estado === 'confirmado') {
-      await anularMovimientoIngresoPagoAlumno(
-        pago.id,
-        observaciones,
-        transaction
+    // Pagos históricos/legacy sin Cobro vinculado conservan la lógica anterior.
+    const transaction = await db.transaction();
+
+    try {
+      const pago = await PagosModel.findByPk(id, { transaction });
+
+      if (!pago) {
+        await transaction.rollback();
+        return responderError(res, 404, 'No se encontró el pago solicitado.');
+      }
+
+      if (pago.estado === 'anulado') {
+        await transaction.rollback();
+        return responderError(res, 400, 'El pago ya se encuentra anulado.');
+      }
+
+      if (pago.estado === 'confirmado' && pago.mensualidad_id) {
+        const reversionPago = await revertirPagoConfirmadoEnMensualidad(
+          pago.mensualidad_id,
+          pago.monto,
+          transaction
+        );
+
+        if (reversionPago && !reversionPago.ok) {
+          await transaction.rollback();
+          return responderError(res, reversionPago.status, reversionPago.message);
+        }
+      }
+
+      if (pago.estado === 'confirmado') {
+        await anularMovimientoIngresoPagoAlumno(
+          pago.id,
+          observaciones,
+          transaction
+        );
+      }
+
+      await pago.update(
+        {
+          estado: 'anulado',
+          observaciones:
+            observaciones !== undefined && observaciones !== null
+              ? String(observaciones).trim()
+              : pago.observaciones,
+          updated_at: new Date()
+        },
+        { transaction }
       );
+
+      await transaction.commit();
+
+      const pagoActualizado = await PagosModel.findByPk(id, {
+        include: includePago
+      });
+
+      return res.status(200).json({
+        ok: true,
+        message: 'Pago anulado correctamente.',
+        data: pagoActualizado,
+        anulacion_unificada: false
+      });
+    } catch (error) {
+      if (!transaction.finished) await transaction.rollback();
+      throw error;
     }
-
-    await pago.update(
-      {
-        estado: 'anulado',
-        observaciones:
-          observaciones !== undefined && observaciones !== null
-            ? String(observaciones).trim()
-            : pago.observaciones,
-        updated_at: new Date()
-      },
-      { transaction }
-    );
-
-    await transaction.commit();
-
-    const pagoActualizado = await PagosModel.findByPk(id, {
-      include: includePago
-    });
-
-    return res.status(200).json({
-      ok: true,
-      message: 'Pago anulado correctamente.',
-      data: pagoActualizado
-    });
   } catch (error) {
-    await transaction.rollback();
-
     console.error('Error en UR_AnularPago_CTS:', error);
+
+    if (error instanceof CobroOperacionError) {
+      return responderError(res, error.status, error.message, {
+        code: error.code
+      });
+    }
 
     return responderError(res, 500, 'Error interno al anular el pago.');
   }

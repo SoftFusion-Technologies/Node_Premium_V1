@@ -499,7 +499,11 @@ export const OBR_CobroDetalle_CTS = async (req, res) => {
 
     const [detalles, pagos] = await Promise.all([
       db.query(
-        `SELECT * FROM cobros_detalles WHERE cobro_id = :id ORDER BY id ASC`,
+        `SELECT cd.*, pp.estado AS pago_estado
+        FROM cobros_detalles cd
+        LEFT JOIN pagos_pagos pp ON pp.id = cd.pago_id
+        WHERE cd.cobro_id = :id
+        ORDER BY cd.id ASC`,
         { replacements, type: QueryTypes.SELECT }
       ),
       db.query(

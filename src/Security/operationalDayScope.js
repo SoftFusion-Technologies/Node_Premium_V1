@@ -72,34 +72,15 @@ export const obtenerAsignacionSedeUsuario = (user, sedeId) => {
 };
 
 export const obtenerRolEfectivoSede = (user, sedeId) => {
-  if (usuarioTieneAccesoTodasSedes(user)) {
-    return normalizarRol(user?.rol_codigo);
-  }
-
-  const sede = obtenerAsignacionSedeUsuario(user, sedeId);
-
-  return normalizarRol(
-    sede?.asignacion?.rol_codigo || sede?.rol_codigo || user?.rol_codigo
-  );
+  // El rol no cambia por sede. El parámetro se conserva por compatibilidad.
+  void sedeId;
+  return normalizarRol(user?.rol_codigo);
 };
 
 export const usuarioEsOperadorDiario = (user) => {
   if (!user || usuarioTieneAccesoTodasSedes(user)) return false;
 
-  if (ROLES_OPERACION_DIARIA.includes(normalizarRol(user?.rol_codigo))) {
-    return true;
-  }
-
-  return (
-    Array.isArray(user?.sedes) &&
-    user.sedes.some((sede) =>
-      ROLES_OPERACION_DIARIA.includes(
-        normalizarRol(
-          sede?.asignacion?.rol_codigo || sede?.rol_codigo || user?.rol_codigo
-        )
-      )
-    )
-  );
+  return ROLES_OPERACION_DIARIA.includes(normalizarRol(user?.rol_codigo));
 };
 
 export const usuarioTieneAlcanceOperativoDiario = (user, sedeId) => {
@@ -107,7 +88,13 @@ export const usuarioTieneAlcanceOperativoDiario = (user, sedeId) => {
 
   if (!Number(sedeId)) return true;
 
-  return ROLES_OPERACION_DIARIA.includes(obtenerRolEfectivoSede(user, sedeId));
+  const asignacion = obtenerAsignacionSedeUsuario(user, sedeId)?.asignacion;
+  return Boolean(
+    asignacion &&
+      asignacion.activo !== false &&
+      asignacion.puede_operar !== false &&
+      ROLES_OPERACION_DIARIA.includes(obtenerRolEfectivoSede(user, sedeId))
+  );
 };
 
 export const validarFechaConsultaOperativa = ({

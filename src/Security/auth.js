@@ -59,6 +59,11 @@ const PREFIJOS_FINANCIEROS_BLOQUEADOS_OPERATIVOS = [
 const PERMISOS_FINANCIEROS_OPERATIVOS = new Set([
   'cobros.ver',
   'cobros.registrar',
+  'cobros.corregir_medio_pago',
+  'cobros.editar',
+  'cobros.anular',
+  'cobros.rechazar',
+  'cobros.validar',
   'caja.ver',
   'caja.abrir',
   'caja.contar',
@@ -201,12 +206,9 @@ const buscarSedesUsuario = async (
   if (!accesoTodasSedes && !asignaciones.length) return [];
 
   const sedeIds = asignaciones.map((item) => item.sede_id);
-  const rolIds = [
-    Number(rolGlobalId),
-    ...(accesoTodasSedes
-      ? []
-      : asignaciones.map((item) => Number(item.rol_id || rolGlobalId)))
-  ].filter(Boolean);
+  // RBAC: usuarios_sedes delimita alcance. El único rol que define
+  // capacidades es usuarios_usuarios.rol_id.
+  const rolIds = [Number(rolGlobalId)].filter(Boolean);
 
   const [sedes, contextoRoles] = await Promise.all([
     SedesModel.findAll({
@@ -261,28 +263,19 @@ const buscarSedesUsuario = async (
     .map((sede) => {
       const asignacionPlano =
         asignacionesPorSede.get(Number(sede.id)) || null;
-      const rolEfectivoId = Number(
-        accesoTodasSedes
-          ? rolGlobalId
-          : asignacionPlano?.rol_id || rolGlobalId
-      );
+      const rolEfectivoId = Number(rolGlobalId);
       const rolEfectivo = contextoRoles.rolesPorId.get(rolEfectivoId) || null;
       const permisosGlobales =
         contextoRoles.permisosPorRolId.get(Number(rolGlobalId)) || [];
-      const permisosRolSede =
-        contextoRoles.permisosPorRolId.get(rolEfectivoId) || [];
-      const permisosEfectivos =
-        !accesoTodasSedes && asignacionPlano?.rol_id
-        ? permisosRolSede.filter((codigo) => permisosGlobales.includes(codigo))
-        : permisosGlobales;
+      const permisosEfectivos = permisosGlobales;
 
       return {
         ...sede,
         asignacion: {
           id: asignacionPlano?.id || null,
-          rol_id: accesoTodasSedes
-            ? rolGlobalId
-            : asignacionPlano?.rol_id || null,
+          // Se expone el rol global también dentro de la asignación para no
+          // romper consumidores antiguos. El valor persistido por sede no manda.
+          rol_id: rolGlobalId || null,
           rol_efectivo_id: rolEfectivoId || null,
           rol_codigo: rolEfectivo?.codigo || null,
           rol_nombre: rolEfectivo?.nombre || null,
@@ -643,10 +636,9 @@ const obtenerSedeIdRequest = (req) => {
 };
 
 /*
- * RBAC PREMIUM: exige al menos uno de los permisos indicados. Cuando la
- * petición informa sede, se evalúa el rol efectivo de usuarios_sedes; sin
- * sede se utiliza el rol global del usuario. Los roles globales no dependen
- * de una asignación local y mantienen acceso total.
+ * RBAC PREMIUM: exige al menos uno de los permisos del ROL GLOBAL.
+ * usuarios_sedes sólo define alcance geográfico. Si la petición informa una
+ * sede, un usuario no global debe tener una asignación activa para esa sede.
  */
 export const requirePermission = (permisosRequeridos = []) => {
   const requeridos = (Array.isArray(permisosRequeridos)
@@ -673,11 +665,21 @@ export const requirePermission = (permisosRequeridos = []) => {
     const sedeAsignada = sedeId
       ? req.user.sedes?.find((sede) => Number(sede.id) === sedeId)
       : null;
-    const rolEfectivo = String(
-      sedeAsignada?.asignacion?.rol_codigo || req.user.rol_codigo || ''
-    )
+    const rolEfectivo = String(req.user.rol_codigo || '')
       .trim()
       .toUpperCase();
+
+    if (
+      sedeId &&
+      !usuarioTieneAccesoTodasSedes(req.user) &&
+      (!sedeAsignada || sedeAsignada?.asignacion?.activo === false)
+    ) {
+      return res.status(403).json({
+        ok: false,
+        code: 'SEDE_ACCESS_DENIED',
+        message: 'No tiene acceso a la sede indicada.'
+      });
+    }
 
     const rolOperacionDiaria = ['COORD_SEDE', 'PROFESOR'].includes(rolEfectivo);
     const requeridosEvaluables = rolOperacionDiaria
@@ -699,9 +701,7 @@ export const requirePermission = (permisosRequeridos = []) => {
       return next();
     }
 
-    const permisosEfectivos = sedeAsignada
-      ? sedeAsignada.asignacion?.permisos || []
-      : req.user.permisos || [];
+    const permisosEfectivos = req.user.permisos || [];
     const autorizado = requeridosEvaluables.some((codigo) =>
       permisosEfectivos.includes(codigo)
     );
@@ -816,9 +816,7 @@ export const requireFinanzasSede = (req, res, next) => {
     ? req.user.sedes.find((sede) => Number(sede.id) === sedeId)
     : null;
 
-  const rolEfectivo = String(
-    sedeAsignada?.asignacion?.rol_codigo || req.user?.rol_codigo || ''
-  )
+  const rolEfectivo = String(req.user?.rol_codigo || '')
     .trim()
     .toUpperCase();
 
@@ -829,13 +827,18 @@ export const requireFinanzasSede = (req, res, next) => {
     return next();
   }
 
-  if (!sedeAsignada?.asignacion?.puede_ver_finanzas) {
+  if (
+    !sedeAsignada ||
+    sedeAsignada?.asignacion?.activo === false ||
+    sedeAsignada?.asignacion?.puede_operar === false
+  ) {
     return res.status(403).json({
       ok: false,
-      message: 'No tiene permisos financieros para la sede indicada.'
+      message: 'No tiene acceso operativo a la sede indicada.'
     });
   }
 
+  // La capacidad financiera se resuelve con requirePermission/RBAC global.
   return next();
 };
 

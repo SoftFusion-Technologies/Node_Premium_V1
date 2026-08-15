@@ -153,19 +153,8 @@ export const usuarioEsGlobalGastos = (user) => {
 };
 
 const obtenerRolesEfectivosUsuario = (user) => {
-  const roles = new Set();
-
-  if (user?.rol_codigo) roles.add(String(user.rol_codigo).toUpperCase());
-
-  if (Array.isArray(user?.sedes)) {
-    user.sedes.forEach((sede) => {
-      const rol =
-        sede?.asignacion?.rol_codigo || sede?.rol_codigo || user?.rol_codigo;
-      if (rol) roles.add(String(rol).toUpperCase());
-    });
-  }
-
-  return [...roles];
+  const rol = String(user?.rol_codigo || '').trim().toUpperCase();
+  return rol ? [rol] : [];
 };
 
 export const validarRolLecturaGastos = (user) => {

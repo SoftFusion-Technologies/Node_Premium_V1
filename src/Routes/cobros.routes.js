@@ -159,7 +159,7 @@ router.patch(
 router.patch(
   '/cobros/:id/editar',
   ...seguridadSede,
-  requirePermission('cobros.anular'),
+  requirePermission('cobros.editar'),
   requireCobroDelDiaActual,
   UR_EditarCobro_CTS
 );
@@ -167,7 +167,7 @@ router.patch(
 router.patch(
   '/cobros/:id/corregir-medio-pago',
   ...seguridadSede,
-  requirePermission('cobros.anular'),
+  requirePermission('cobros.corregir_medio_pago'),
   requireCobroDelDiaActual,
   UR_CorregirMedioPagoCobro_CTS
 );

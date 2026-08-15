@@ -11,7 +11,11 @@ import AlumnosMembresiasModel from '../../Models/Alumno/MD_TB_AlumnosMembresias.
 import PagosMensualidadesModel from '../../Models/Pago/MD_TB_PagosMensualidades.js';
 import { normalizarCicloMembresiasAlumno } from '../../Services/Alumno/membresiaCiclo.service.js';
 
-const ESTADOS_ALUMNO_NO_AUTOMATICOS = ['baja', 'congelado'];
+const ESTADOS_ALUMNO_NO_AUTOMATICOS = [
+  'baja',
+  'congelado',
+  'pendiente_validacion'
+];
 
 const ESTADOS_MENSUALIDAD_COBRABLES = ['pendiente', 'parcial'];
 

@@ -194,7 +194,7 @@ const obtenerSedesUsuario = async (
           ...sedePlano,
           asignacion: {
             id: asignacionPlano?.id || null,
-            rol_id: asignacionPlano?.rol_id || rolId || null,
+            rol_id: rolId || null,
             es_sede_principal: false,
             puede_operar: true,
             puede_ver_reportes: true,
@@ -211,7 +211,7 @@ const obtenerSedesUsuario = async (
         ...sedePlano,
         asignacion: {
           id: asignacionPlano.id,
-          rol_id: asignacionPlano.rol_id,
+          rol_id: rolId || null,
           es_sede_principal: Boolean(asignacionPlano.es_sede_principal),
           puede_operar: Boolean(asignacionPlano.puede_operar),
           puede_ver_reportes: Boolean(asignacionPlano.puede_ver_reportes),
@@ -418,34 +418,15 @@ const prepararAsignacionesSedes = (
 
       asignaciones.push({
         sede_id: Number(sedeId),
-        rol_id:
-          typeof item === 'object' && item !== null && item.rol_id
-            ? Number(item.rol_id)
-            : null,
+        // El rol y el perfil se heredan del usuario. Una sede no redefine
+        // capacidades; sólo define dónde puede operar.
+        rol_id: null,
         es_sede_principal:
           Number(sedeId) === Number(sedePrincipalId) ||
           normalizarBoolean(item?.es_sede_principal, false),
-        puede_operar:
-          typeof item === 'object' && item !== null
-            ? normalizarBoolean(
-                item.puede_operar,
-                perfilAcceso.puede_operar
-              )
-            : perfilAcceso.puede_operar,
-        puede_ver_reportes:
-          typeof item === 'object' && item !== null
-            ? normalizarBoolean(
-                item.puede_ver_reportes,
-                perfilAcceso.puede_ver_reportes
-              )
-            : perfilAcceso.puede_ver_reportes,
-        puede_ver_finanzas:
-          typeof item === 'object' && item !== null
-            ? normalizarBoolean(
-                item.puede_ver_finanzas,
-                perfilAcceso.puede_ver_finanzas
-              )
-            : perfilAcceso.puede_ver_finanzas
+        puede_operar: perfilAcceso.puede_operar,
+        puede_ver_reportes: perfilAcceso.puede_ver_reportes,
+        puede_ver_finanzas: perfilAcceso.puede_ver_finanzas
       });
     });
   }
@@ -496,7 +477,7 @@ const crearAsignacionesSedesIniciales = async ({
       {
         usuario_id: usuarioId,
         sede_id: asignacion.sede_id,
-        rol_id: asignacion.rol_id || rolId || null,
+        rol_id: rolId || null,
         es_sede_principal: asignacion.es_sede_principal ? 1 : 0,
         puede_operar: asignacion.puede_operar ? 1 : 0,
         puede_ver_reportes: asignacion.puede_ver_reportes ? 1 : 0,
@@ -1281,6 +1262,23 @@ export const UR_Usuarios_CTS = async (req, res) => {
       transaction
     });
 
+    // Mantiene usuarios_sedes como espejo compatible del rol global. Esto
+    // corrige usuarios históricos y evita nuevas desincronizaciones al editar
+    // el rol del usuario.
+    const perfilRolDestino = obtenerPerfilAccesoSede(rolDestino?.codigo);
+    await UsuariosSedesModel.update(
+      {
+        rol_id: usuario.rol_id,
+        puede_operar: perfilRolDestino.puede_operar ? 1 : 0,
+        puede_ver_reportes: perfilRolDestino.puede_ver_reportes ? 1 : 0,
+        puede_ver_finanzas: perfilRolDestino.puede_ver_finanzas ? 1 : 0
+      },
+      {
+        where: { usuario_id: usuario.id },
+        transaction
+      }
+    );
+
     if (accesoTodasSedesDestino) {
       await UsuariosSedesModel.update(
         { es_sede_principal: 0 },
@@ -1320,9 +1318,12 @@ export const UR_Usuarios_CTS = async (req, res) => {
       if (asignacionExistente) {
         await asignacionExistente.update(
           {
+            rol_id: usuario.rol_id,
             es_sede_principal: 1,
             activo: 1,
-            puede_operar: 1
+            puede_operar: perfilRolDestino.puede_operar ? 1 : 0,
+            puede_ver_reportes: perfilRolDestino.puede_ver_reportes ? 1 : 0,
+            puede_ver_finanzas: perfilRolDestino.puede_ver_finanzas ? 1 : 0
           },
           {
             transaction

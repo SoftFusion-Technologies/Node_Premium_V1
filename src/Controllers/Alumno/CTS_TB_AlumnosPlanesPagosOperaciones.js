@@ -532,17 +532,9 @@ const usuarioPuedeOperarSedeMembresia = (user, sedeId) => {
 };
 
 const usuarioEsCoordinadorSede = (user, sedeId) => {
-  const rolGlobal = String(user?.rol_codigo || '').trim().toUpperCase();
-  if (rolGlobal === 'COORD_SEDE') return true;
-
-  const sedeUsuario = obtenerAsignacionSedeUsuario(user, sedeId);
-  const rolEfectivo = String(
-    sedeUsuario?.asignacion?.rol_codigo || sedeUsuario?.rol_codigo || ''
-  )
-    .trim()
-    .toUpperCase();
-
-  return rolEfectivo === 'COORD_SEDE';
+  // El rol es global; sedeId sólo se valida luego como alcance operativo.
+  void sedeId;
+  return String(user?.rol_codigo || '').trim().toUpperCase() === 'COORD_SEDE';
 };
 
 const registrarAuditoriaMembresiaMigracion = async ({
@@ -1258,6 +1250,42 @@ export const CR_MembresiaMigracionAlumnoPlanesPagos_CTS = async (req, res) => {
       );
     }
 
+    const rolCodigo = obtenerRolCodigoRequest(req);
+    const esSuperAdmin = rolCodigo === 'SUPER_ADMIN';
+    const esCoordinador = rolCodigo === 'COORD_SEDE';
+    const sedeSolicitadaId = Number(req.body.sede_id);
+
+    if (!esSuperAdmin && !esCoordinador) {
+      await transaction.rollback();
+      return responderError(
+        res,
+        403,
+        'No tiene permisos para asignar una membresía desde la ficha del alumno.'
+      );
+    }
+
+    if (
+      esCoordinador &&
+      Number(alumno.sede_id) !== sedeSolicitadaId
+    ) {
+      await transaction.rollback();
+      return responderError(
+        res,
+        403,
+        'El coordinador puede asignar plan, vencimiento y créditos únicamente en la sede actual del alumno.',
+        { campos_bloqueados: ['sede_id'] }
+      );
+    }
+
+    if (!usuarioPuedeOperarSedeMembresia(req.user, sedeSolicitadaId)) {
+      await transaction.rollback();
+      return responderError(
+        res,
+        403,
+        'No tiene acceso operativo a la sede del alumno.'
+      );
+    }
+
     const [plan, sede] = await Promise.all([
       PlanesModel.findOne({
         where: { id: Number(req.body.plan_id), activo: 1 },
@@ -1356,7 +1384,9 @@ export const CR_MembresiaMigracionAlumnoPlanesPagos_CTS = async (req, res) => {
       req,
       alumno,
       membresia,
-      accion: 'CREAR_MEMBRESIA_MIGRACION',
+      accion: esCoordinador
+        ? 'CREAR_MEMBRESIA_COORD_SEDE'
+        : 'CREAR_MEMBRESIA_MIGRACION',
       valoresNuevos: {
         alumno_id: alumnoId,
         ...payload,
@@ -1482,24 +1512,17 @@ export const UR_MembresiaMigracionAlumnoPlanesPagos_CTS = async (req, res) => {
       );
     }
 
-    if (esCoordinador) {
-      const camposProtegidos = [];
-
-      if (Number(req.body.plan_id) !== Number(membresia.plan_id)) {
-        camposProtegidos.push('plan_id');
-      }
-      if (Number(req.body.sede_id) !== Number(membresia.sede_id)) {
-        camposProtegidos.push('sede_id');
-      }
-      if (camposProtegidos.length > 0) {
-        await transaction.rollback();
-        return responderError(
-          res,
-          403,
-          'El coordinador puede modificar las fechas, los créditos disponibles y la observación, pero no el plan ni la sede.',
-          { campos_bloqueados: camposProtegidos }
-        );
-      }
+    if (
+      esCoordinador &&
+      Number(req.body.sede_id) !== Number(membresia.sede_id)
+    ) {
+      await transaction.rollback();
+      return responderError(
+        res,
+        403,
+        'El coordinador puede editar el plan, vencimiento y créditos, pero no mover la membresía a otra sede.',
+        { campos_bloqueados: ['sede_id'] }
+      );
     }
 
     const [plan, sede] = await Promise.all([
@@ -1622,15 +1645,10 @@ export const UR_MembresiaMigracionAlumnoPlanesPagos_CTS = async (req, res) => {
       );
     }
 
-    const clasesUsadasActuales = Math.max(
-      Number(membresia.clases_usadas || 0),
-      0
-    );
-    const clasesDisponiblesSolicitadas = Number(
-      req.body.clases_disponibles
-    );
-    const clasesIncluidasNormalizadas =
-      clasesUsadasActuales + clasesDisponiblesSolicitadas;
+    const clasesIncluidasSolicitadas = Number(req.body.clases_incluidas);
+    const clasesDisponiblesSolicitadas = Number(req.body.clases_disponibles);
+    const clasesUsadasSolicitadas =
+      clasesIncluidasSolicitadas - clasesDisponiblesSolicitadas;
 
     const precioLista = cambiaPlanOSede
       ? await obtenerPrecioReferenciaMigracion({
@@ -1655,7 +1673,7 @@ export const UR_MembresiaMigracionAlumnoPlanesPagos_CTS = async (req, res) => {
     const payload = obtenerPayloadMembresiaMigracion({
       body: {
         ...req.body,
-        clases_incluidas: clasesIncluidasNormalizadas,
+        clases_incluidas: clasesIncluidasSolicitadas,
         clases_disponibles: clasesDisponiblesSolicitadas
       },
       plan,
@@ -1665,10 +1683,12 @@ export const UR_MembresiaMigracionAlumnoPlanesPagos_CTS = async (req, res) => {
       estadoActual: membresia.estado
     });
 
-    // Los créditos consumidos son históricos y nunca se reescriben.
-    // Al aumentar disponibles, se incrementan automáticamente los incluidos.
-    payload.clases_incluidas = clasesIncluidasNormalizadas;
-    payload.clases_usadas = clasesUsadasActuales;
+    // Esta operación es una corrección administrativa explícita. Incluidos y
+    // disponibles son los valores declarados por el operador y los utilizados
+    // se recalculan como la diferencia entre ambos. Esto permite reparar datos
+    // históricos inflados sin sumar créditos artificialmente.
+    payload.clases_incluidas = clasesIncluidasSolicitadas;
+    payload.clases_usadas = clasesUsadasSolicitadas;
     payload.clases_disponibles = clasesDisponiblesSolicitadas;
 
     // Ajustar fechas o créditos no debe reescribir descuentos, importes ni el

@@ -37,13 +37,9 @@ import {
 const ROLES_SIN_BORRADO_TURNOS = new Set(['PROFESOR', 'COORD_SEDE']);
 
 const obtenerRolEfectivoAgenda = (usuario, sedeId) => {
-  const sedeAsignada = Array.isArray(usuario?.sedes)
-    ? usuario.sedes.find((sede) => Number(sede.id ?? sede.sede_id) === Number(sedeId))
-    : null;
-
-  return String(
-    sedeAsignada?.asignacion?.rol_codigo || usuario?.rol_codigo || ''
-  ).toUpperCase();
+  // La sede delimita alcance, no redefine el rol.
+  void sedeId;
+  return String(usuario?.rol_codigo || '').toUpperCase();
 };
 
 const usuarioPuedeEliminarTurnos = (usuario, sedeIds = []) => {

@@ -157,12 +157,7 @@ export const requireFinancialScope = ({
       const sede = asignacionSede(req.user, sedeId);
       const asignacion = sede?.asignacion;
 
-      if (
-        !sede ||
-        !asignacion?.activo ||
-        !asignacion?.puede_operar ||
-        (requireFinanzas && !asignacion?.puede_ver_finanzas)
-      ) {
+      if (!sede || !asignacion?.activo || !asignacion?.puede_operar) {
         return responder(
           res,
           403,
@@ -175,11 +170,14 @@ export const requireFinancialScope = ({
         ? permission
         : [permission]
       ).filter(Boolean);
-      const tienePermisoLocal = permisosRequeridos.some((codigo) =>
-        asignacion.permisos?.includes(codigo)
+      // El permiso proviene del rol global; la asignación sólo acredita que
+      // el usuario puede operar sobre la sede real del registro.
+      void requireFinanzas;
+      const tienePermisoGlobal = permisosRequeridos.some((codigo) =>
+        req.user.permisos?.includes(codigo)
       );
 
-      if (permisosRequeridos.length && !tienePermisoLocal) {
+      if (permisosRequeridos.length && !tienePermisoGlobal) {
         return responder(
           res,
           403,

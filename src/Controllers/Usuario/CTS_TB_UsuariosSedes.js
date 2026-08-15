@@ -498,9 +498,7 @@ export const CR_UsuariosSedes_CTS = async (req, res) => {
       });
     }
 
-    const rolAsignacion = await validarRolExistente(
-      payload.rol_id || usuario.rol_id
-    );
+    const rolAsignacion = await validarRolExistente(usuario.rol_id);
 
     if (!rolAsignacion) {
       await transaction.rollback();
@@ -513,10 +511,12 @@ export const CR_UsuariosSedes_CTS = async (req, res) => {
 
     const perfilAcceso = obtenerPerfilAccesoSede(rolAsignacion.codigo);
 
+    // La sede hereda el rol/perfil global. Se ignoran overrides enviados
+    // por clientes antiguos para evitar comportamientos distintos por sede.
     payload.rol_id = rolAsignacion.id;
-    payload.puede_operar ??= perfilAcceso.puede_operar ? 1 : 0;
-    payload.puede_ver_reportes ??= perfilAcceso.puede_ver_reportes ? 1 : 0;
-    payload.puede_ver_finanzas ??= perfilAcceso.puede_ver_finanzas ? 1 : 0;
+    payload.puede_operar = perfilAcceso.puede_operar ? 1 : 0;
+    payload.puede_ver_reportes = perfilAcceso.puede_ver_reportes ? 1 : 0;
+    payload.puede_ver_finanzas = perfilAcceso.puede_ver_finanzas ? 1 : 0;
 
     const asignacionExistente = await UsuariosSedesModel.findOne({
       where: {
@@ -556,8 +556,7 @@ export const CR_UsuariosSedes_CTS = async (req, res) => {
     if (asignacionExistente) {
       await asignacionExistente.update(
         {
-          rol_id:
-            payload.rol_id || asignacionExistente.rol_id || usuario.rol_id,
+          rol_id: usuario.rol_id,
           es_sede_principal: payload.es_sede_principal,
           puede_operar: payload.puede_operar,
           puede_ver_reportes: payload.puede_ver_reportes,
@@ -663,18 +662,22 @@ export const UR_UsuariosSedes_CTS = async (req, res) => {
       });
     }
 
-    if (payload.rol_id) {
-      const rol = await validarRolExistente(payload.rol_id);
+    const usuario = await validarUsuarioExistente(asignacion.usuario_id);
+    const rolGlobal = usuario ? await validarRolExistente(usuario.rol_id) : null;
 
-      if (!rol) {
-        await transaction.rollback();
-
-        return res.status(400).json({
-          ok: false,
-          message: 'El rol indicado no existe o está inactivo.'
-        });
-      }
+    if (!usuario || !rolGlobal) {
+      await transaction.rollback();
+      return res.status(400).json({
+        ok: false,
+        message: 'No se pudo resolver el rol global activo del usuario.'
+      });
     }
+
+    const perfilAcceso = obtenerPerfilAccesoSede(rolGlobal.codigo);
+    delete payload.rol_id;
+    delete payload.puede_operar;
+    delete payload.puede_ver_reportes;
+    delete payload.puede_ver_finanzas;
 
     if (payload.es_sede_principal === 1) {
       await UsuariosSedesModel.update(
@@ -703,9 +706,16 @@ export const UR_UsuariosSedes_CTS = async (req, res) => {
       );
     }
 
-    await asignacion.update(payload, {
-      transaction
-    });
+    await asignacion.update(
+      {
+        ...payload,
+        rol_id: rolGlobal.id,
+        puede_operar: perfilAcceso.puede_operar ? 1 : 0,
+        puede_ver_reportes: perfilAcceso.puede_ver_reportes ? 1 : 0,
+        puede_ver_finanzas: perfilAcceso.puede_ver_finanzas ? 1 : 0
+      },
+      { transaction }
+    );
 
     await transaction.commit();
 

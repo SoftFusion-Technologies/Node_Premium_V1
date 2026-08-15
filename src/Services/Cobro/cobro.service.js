@@ -936,6 +936,7 @@ const crearMembresiaPlan = async ({
   medioPagoId,
   usuarioId,
   cobroId,
+  renovacionExplicita = false,
   transaction,
 }) => {
   const hoy = fechaArgentina();
@@ -966,7 +967,11 @@ const crearMembresiaPlan = async ({
     membresiaVigente &&
       Number(membresiaVigente.plan_id) !== Number(linea.referencia_id),
   );
-  const iniciarCicloAhora = renovarAhoraPorCuposAgotados || cambiarPlanAhora;
+  // Una renovación iniciada desde el botón "Renovar membresía" siempre
+  // representa la compra de un ciclo nuevo: comienza hoy y reinicia créditos.
+  // Se distingue del cobro/regularización del ciclo vigente.
+  const iniciarCicloAhora =
+    renovacionExplicita || renovarAhoraPorCuposAgotados || cambiarPlanAhora;
 
   if (cambiarPlanAhora) {
     await validarSinReservasFuturasParaCambioPlan({
@@ -989,7 +994,10 @@ const crearMembresiaPlan = async ({
     lock: transaction.LOCK.UPDATE,
   });
 
-  if (renovacionFuturaExistente && !iniciarCicloAhora) {
+  if (
+    renovacionFuturaExistente &&
+    (!iniciarCicloAhora || renovacionExplicita)
+  ) {
     throw new CobroOperacionError(
       `El alumno ya tiene una renovación futura desde ${renovacionFuturaExistente.fecha_inicio}. Debe utilizar, completar o anular ese período antes de generar otro.`,
       409,
@@ -1072,11 +1080,19 @@ const crearMembresiaPlan = async ({
         planId: linea.referencia_id,
         transaction,
       }),
-      observaciones: cambiarPlanAhora
-        ? `Generada por cobro #${cobroId} | NUEVO_CICLO_CAMBIO_PLAN desde membresía #${membresiaVigente.id}`
-        : renovarAhoraPorCuposAgotados
-          ? `Generada por cobro #${cobroId} | NUEVO_CICLO_CUPOS_AGOTADOS desde membresía #${membresiaVigente.id}`
-          : `Generada por cobro #${cobroId}`,
+      observaciones: renovacionExplicita
+        ? `Generada por cobro #${cobroId} | NUEVO_CICLO_RENOVACION_EXPLICITA${
+            membresiaVigente
+              ? ` desde membresía #${membresiaVigente.id} | VENCIMIENTO_ANTERIOR=${String(
+                  membresiaVigente.fecha_vencimiento || "",
+                ).slice(0, 10)}`
+              : ""
+          }`
+        : cambiarPlanAhora
+          ? `Generada por cobro #${cobroId} | NUEVO_CICLO_CAMBIO_PLAN desde membresía #${membresiaVigente.id}`
+          : renovarAhoraPorCuposAgotados
+            ? `Generada por cobro #${cobroId} | NUEVO_CICLO_CUPOS_AGOTADOS desde membresía #${membresiaVigente.id}`
+            : `Generada por cobro #${cobroId}`,
     },
     { transaction },
   );
@@ -1103,18 +1119,20 @@ const crearMembresiaPlan = async ({
         ? saldoMensualidad.toFixed(2)
         : Number(linea.total).toFixed(2),
       estado: estadoMensualidad,
-      observaciones: cambiarPlanAhora
-        ? `Generada por cobro #${cobroId} | Cambio de plan inmediato desde membresía #${membresiaVigente.id}`
-        : renovarAhoraPorCuposAgotados
-          ? `Generada por cobro #${cobroId} | Nuevo ciclo inmediato por cupos agotados desde membresía #${membresiaVigente.id}`
-          : `Generada por cobro #${cobroId}`,
+      observaciones: renovacionExplicita
+        ? `Generada por cobro #${cobroId} | Renovación explícita: nuevo ciclo desde ${fechaInicio}`
+        : cambiarPlanAhora
+          ? `Generada por cobro #${cobroId} | Cambio de plan inmediato desde membresía #${membresiaVigente.id}`
+          : renovarAhoraPorCuposAgotados
+            ? `Generada por cobro #${cobroId} | Nuevo ciclo inmediato por cupos agotados desde membresía #${membresiaVigente.id}`
+            : `Generada por cobro #${cobroId}`,
     },
     { transaction },
   );
 
-  // Renovar sin cupos o elegir un plan distinto reemplaza el ciclo operativo.
-  // Los periodos anteriores conservan pagos, asistencias y trazabilidad, pero
-  // dejan de competir como membresia actual.
+  // Una renovación explícita, renovar sin cupos o elegir otro plan reemplaza
+  // el ciclo operativo. El período anterior conserva pagos, reservas,
+  // asistencias y créditos históricos, pero deja de competir como actual.
   if (confirmado && iniciarCicloAhora) {
     const membresiasReemplazadas = cambiarPlanAhora
       ? await AlumnosMembresiasModel.findAll({
@@ -1137,12 +1155,27 @@ const crearMembresiaPlan = async ({
         {
           estado: cambiarPlanAhora ? "cancelada" : "vencida",
           ...(cambiarPlanAhora ? { clases_disponibles: 0 } : {}),
+          ...(renovacionExplicita
+            ? {
+                fecha_vencimiento: (() => {
+                  const fechaCierreRenovacion = sumarDias(fechaInicio, -1);
+                  const fechaInicioAnterior = String(
+                    membresiaAnterior.fecha_inicio || "",
+                  ).slice(0, 10);
+                  return fechaCierreRenovacion >= fechaInicioAnterior
+                    ? fechaCierreRenovacion
+                    : fechaInicioAnterior;
+                })(),
+              }
+            : {}),
           observaciones: `${observacionesAnteriores}${
             observacionesAnteriores ? " | " : ""
           }${
             cambiarPlanAhora
               ? `Reemplazada por cambio de plan del cobro #${cobroId}`
-              : `Cerrada por nuevo ciclo inmediato del cobro #${cobroId}`
+              : renovacionExplicita
+                ? `Cerrada por renovación explícita del cobro #${cobroId}`
+                : `Cerrada por nuevo ciclo inmediato del cobro #${cobroId}`
           }`,
           updated_at: new Date(),
         },
@@ -1288,6 +1321,9 @@ export const registrarCobro = async ({ payload, usuario }) => {
     const cobradorUsuarioId = Number(payload.cobrador_usuario_id || usuarioId);
     const idempotencyKey = String(payload.idempotency_key || "").trim();
     const clienteTipo = payload.cliente_tipo;
+    const renovacionExplicita =
+      String(payload.origen_operacion || "").trim().toLowerCase() ===
+      "renovacion_membresia";
 
     if (!idValido(sedeId) || !idValido(usuarioId))
       throw new CobroOperacionError("Sede o usuario inválido.");
@@ -1512,6 +1548,7 @@ export const registrarCobro = async ({ payload, usuario }) => {
               medioPagoId: medioPagoPlan.medio_pago_id,
               usuarioId,
               cobroId: cobro.id,
+              renovacionExplicita,
               transaction,
             });
         pagoPlan = resultadoPlan.pago;
@@ -1894,6 +1931,9 @@ const aplicarPlanPendiente = async ({ detalle, usuarioId, transaction }) => {
   }
 
   const observacionesMembresia = String(membresia.observaciones || "");
+  const esNuevoCicloPorRenovacionExplicita = observacionesMembresia.includes(
+    "NUEVO_CICLO_RENOVACION_EXPLICITA",
+  );
   const esNuevoCicloPorCupos = observacionesMembresia.includes(
     "NUEVO_CICLO_CUPOS_AGOTADOS",
   );
@@ -1908,7 +1948,11 @@ const aplicarPlanPendiente = async ({ detalle, usuarioId, transaction }) => {
     });
   }
 
-  if (esNuevoCicloPorCupos || esNuevoCicloPorCambioPlan) {
+  if (
+    esNuevoCicloPorRenovacionExplicita ||
+    esNuevoCicloPorCupos ||
+    esNuevoCicloPorCambioPlan
+  ) {
     const whereMembresiasAnteriores = esNuevoCicloPorCambioPlan
       ? {
           id: { [Op.ne]: Number(membresia.id) },
@@ -1936,12 +1980,33 @@ const aplicarPlanPendiente = async ({ detalle, usuarioId, transaction }) => {
         {
           estado: esNuevoCicloPorCambioPlan ? "cancelada" : "vencida",
           ...(esNuevoCicloPorCambioPlan ? { clases_disponibles: 0 } : {}),
+          ...(esNuevoCicloPorRenovacionExplicita
+            ? {
+                fecha_vencimiento: (() => {
+                  const fechaInicioNuevo = String(
+                    membresia.fecha_inicio || "",
+                  ).slice(0, 10);
+                  const fechaCierreConfirmacionRenovacion = sumarDias(
+                    fechaInicioNuevo,
+                    -1,
+                  );
+                  const fechaInicioAnterior = String(
+                    membresiaAnterior.fecha_inicio || "",
+                  ).slice(0, 10);
+                  return fechaCierreConfirmacionRenovacion >= fechaInicioAnterior
+                    ? fechaCierreConfirmacionRenovacion
+                    : fechaInicioAnterior;
+                })(),
+              }
+            : {}),
           observaciones: `${observacionesAnteriores}${
             observacionesAnteriores ? " | " : ""
           }${
             esNuevoCicloPorCambioPlan
               ? `Reemplazada al confirmar cambio de plan del cobro #${detalle.cobro_id}`
-              : `Cerrada al confirmar nuevo ciclo del cobro #${detalle.cobro_id}`
+              : esNuevoCicloPorRenovacionExplicita
+                ? `Cerrada al confirmar renovación explícita del cobro #${detalle.cobro_id}`
+                : `Cerrada al confirmar nuevo ciclo del cobro #${detalle.cobro_id}`
           }`,
           updated_at: new Date(),
         },
@@ -2590,6 +2655,64 @@ const validarYRevertirPlan = async ({
     },
     { transaction },
   );
+
+  const observacionesNueva = String(membresia.observaciones || "");
+  if (observacionesNueva.includes("NUEVO_CICLO_RENOVACION_EXPLICITA")) {
+    const coincidenciaOrigen = observacionesNueva.match(
+      /NUEVO_CICLO_RENOVACION_EXPLICITA desde membresía #(\d+)/,
+    );
+    const coincidenciaVencimientoAnterior = observacionesNueva.match(
+      /VENCIMIENTO_ANTERIOR=(\d{4}-\d{2}-\d{2})/,
+    );
+    const membresiaAnteriorId = Number(coincidenciaOrigen?.[1] || 0);
+    const vencimientoAnteriorOriginal =
+      coincidenciaVencimientoAnterior?.[1] || null;
+
+    if (idValido(membresiaAnteriorId)) {
+      const membresiaAnterior = await AlumnosMembresiasModel.findByPk(
+        membresiaAnteriorId,
+        { transaction, lock: transaction.LOCK.UPDATE },
+      );
+      const hoy = fechaArgentina();
+      const otraActiva = await AlumnosMembresiasModel.findOne({
+        where: {
+          id: { [Op.notIn]: [Number(membresia.id), membresiaAnteriorId] },
+          alumno_id: Number(membresia.alumno_id),
+          estado: "activa",
+          fecha_inicio: { [Op.lte]: hoy },
+          fecha_vencimiento: { [Op.gte]: hoy },
+        },
+        transaction,
+        lock: transaction.LOCK.UPDATE,
+      });
+
+      const vencimientoParaRestaurar =
+        vencimientoAnteriorOriginal ||
+        String(membresiaAnterior?.fecha_vencimiento || "").slice(0, 10);
+
+      if (
+        membresiaAnterior &&
+        !otraActiva &&
+        String(membresiaAnterior.fecha_inicio || "").slice(0, 10) <= hoy &&
+        vencimientoParaRestaurar >= hoy
+      ) {
+        const observacionesAnterior = String(
+          membresiaAnterior.observaciones || "",
+        ).trim();
+        await membresiaAnterior.update(
+          {
+            estado: "activa",
+            fecha_vencimiento: vencimientoParaRestaurar,
+            observaciones: `${observacionesAnterior}${
+              observacionesAnterior ? " | " : ""
+            }Reactivada por anulación de renovación del cobro #${detalle.cobro_id}`,
+            updated_at: new Date(),
+          },
+          { transaction },
+        );
+      }
+    }
+  }
 };
 
 const devolverStockCobro = async ({

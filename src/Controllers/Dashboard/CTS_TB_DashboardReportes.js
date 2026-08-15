@@ -135,7 +135,25 @@ const resolverFechasCorte = (anio, mes, diaCorte) => {
   const corteAnterior = `${anioAnterior}-${String(mesAnterior).padStart(2, '0')}-${String(diaCorteAnterior).padStart(2, '0')}`;
   const primerDiaMesAnterior = `${anioAnterior}-${String(mesAnterior).padStart(2, '0')}-01`;
 
-  return { corte, primerDiaMes, corteAnterior, primerDiaMesAnterior };
+  // Ventana de 12 meses calendario inmediatamente anteriores al mes del corte
+  // (sin incluirlo), para promediar la facturación acumulada a ese mismo
+  // corte en cada uno de esos meses. DAY(fecha_pago) <= diaCorteProm filtra
+  // "hasta el día X de cada mes"; para "fin de mes" no hay tope real de día,
+  // así que se usa 31 (ningún mes tiene más días que eso).
+  const ventanaPromInicioDate = new Date(anio, mes - 13, 1);
+  const ventanaPromInicio = `${ventanaPromInicioDate.getFullYear()}-${String(ventanaPromInicioDate.getMonth() + 1).padStart(2, '0')}-01`;
+  const ventanaPromFin = primerDiaMes;
+  const diaCorteProm = diaCorte || 31;
+
+  return {
+    corte,
+    primerDiaMes,
+    corteAnterior,
+    primerDiaMesAnterior,
+    ventanaPromInicio,
+    ventanaPromFin,
+    diaCorteProm
+  };
 };
 
 // Umbral de variación (en cantidad de alumnos, o en % para facturación) a
@@ -239,6 +257,15 @@ export const OBR_DashboardCortesActividad_CTS = async (req, res) => {
             (SELECT COALESCE(SUM(p.monto), 0) FROM pagos_pagos p
               WHERE p.sede_id = s.id AND p.estado = 'confirmado'
                 AND DATE(p.fecha_pago) BETWEEN :primerDiaMesAnterior AND :corteAnterior) AS facturacion_acumulada_mes_anterior,
+            (SELECT AVG(totales.total) FROM (
+              SELECT SUM(p2.monto) AS total
+              FROM pagos_pagos p2
+              WHERE p2.sede_id = s.id AND p2.estado = 'confirmado'
+                AND DATE(p2.fecha_pago) >= :ventanaPromInicio
+                AND DATE(p2.fecha_pago) < :ventanaPromFin
+                AND DAY(p2.fecha_pago) <= :diaCorteProm
+              GROUP BY DATE_FORMAT(p2.fecha_pago, '%Y-%m')
+            ) totales) AS facturacion_acumulada_promedio_anual,
             (SELECT COUNT(*) FROM pagos_mensualidades pm
               WHERE pm.sede_id = s.id
                 AND pm.fecha_emision BETWEEN :primerDiaMes AND :corte) AS cuotas_vendidas,
@@ -256,6 +283,9 @@ export const OBR_DashboardCortesActividad_CTS = async (req, res) => {
               corteAnterior: fechas.corteAnterior,
               primerDiaMes: fechas.primerDiaMes,
               primerDiaMesAnterior: fechas.primerDiaMesAnterior,
+              ventanaPromInicio: fechas.ventanaPromInicio,
+              ventanaPromFin: fechas.ventanaPromFin,
+              diaCorteProm: fechas.diaCorteProm,
               ...scope.replacements
             },
             type: QueryTypes.SELECT
@@ -280,6 +310,7 @@ export const OBR_DashboardCortesActividad_CTS = async (req, res) => {
         const activosMesAnterior = Number(fila.activos_mes_anterior) || 0;
         const facturacionAcumulada = Number(fila.facturacion_acumulada) || 0;
         const facturacionAcumuladaMesAnterior = Number(fila.facturacion_acumulada_mes_anterior) || 0;
+        const facturacionAcumuladaPromedioAnual = Number(fila.facturacion_acumulada_promedio_anual) || 0;
         const cuotasVendidas = Number(fila.cuotas_vendidas) || 0;
         const cuotasVendidasMesAnterior = Number(fila.cuotas_vendidas_mes_anterior) || 0;
 
@@ -300,6 +331,20 @@ export const OBR_DashboardCortesActividad_CTS = async (req, res) => {
           variacionFacturacionPct = UMBRAL_SEMAFORO;
         }
 
+        // Misma lógica que arriba pero contra el promedio de ese mismo corte
+        // en los últimos 12 meses calendario, en vez de solo el mes anterior
+        // — el cliente pidió esta base como alternativa porque un único mes
+        // anterior puede ser atípico. Se ofrecen ambas: el frontend elige
+        // cuál mostrar con un selector de vista.
+        let variacionPromedioAnualPct = null;
+        if (facturacionAcumuladaPromedioAnual > 0) {
+          variacionPromedioAnualPct = Math.round(
+            ((facturacionAcumulada - facturacionAcumuladaPromedioAnual) / facturacionAcumuladaPromedioAnual) * 10000
+          ) / 100;
+        } else if (facturacionAcumulada > 0) {
+          variacionPromedioAnualPct = UMBRAL_SEMAFORO;
+        }
+
         sedesMap.get(fila.sede_id).cortes.push({
           clave: bloque.clave,
           etiqueta: bloque.etiqueta,
@@ -308,6 +353,8 @@ export const OBR_DashboardCortesActividad_CTS = async (req, res) => {
           activos_mes_anterior: bloque.disponible ? activosMesAnterior : null,
           variacion: bloque.disponible ? variacion : null,
           facturacion_acumulada: bloque.disponible ? facturacionAcumulada : null,
+          facturacion_acumulada_mes_anterior: bloque.disponible ? facturacionAcumuladaMesAnterior : null,
+          facturacion_acumulada_promedio_anual: bloque.disponible ? facturacionAcumuladaPromedioAnual : null,
           cuotas_vendidas: bloque.disponible ? cuotasVendidas : null,
           cuotas_vendidas_mes_anterior: bloque.disponible ? cuotasVendidasMesAnterior : null,
           variacion_cuotas_vendidas: bloque.disponible ? variacionCuotasVendidas : null,
@@ -320,7 +367,8 @@ export const OBR_DashboardCortesActividad_CTS = async (req, res) => {
           // cambia muy poco de un corte a otro y no refleja el ritmo real
           // de ventas).
           estado_activos: bloque.disponible ? estadoPorVariacion(variacionCuotasVendidas) : null,
-          estado_facturacion: bloque.disponible ? estadoPorVariacionFacturacion(variacionFacturacionPct) : null
+          estado_facturacion: bloque.disponible ? estadoPorVariacionFacturacion(variacionFacturacionPct) : null,
+          estado_facturacion_promedio_anual: bloque.disponible ? estadoPorVariacionFacturacion(variacionPromedioAnualPct) : null
         });
       }
     }

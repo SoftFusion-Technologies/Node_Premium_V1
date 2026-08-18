@@ -14,7 +14,7 @@ export const PERFILES_ACCESO_SEDE = {
   COORD_SEDE: {
     puede_operar: true,
     puede_ver_reportes: true,
-    puede_ver_finanzas: false
+    puede_ver_finanzas: true
   },
   FRONT_COMERCIAL: {
     puede_operar: true,

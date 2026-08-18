@@ -514,7 +514,8 @@ const asegurarAsignacionesTodasSedes = async ({
   usuarioId,
   rolId,
   rolCodigo,
-  transaction
+  transaction,
+  resetPerfil = false
 }) => {
   const asignaciones = await prepararAsignacionesTodasSedes(
     rolCodigo,
@@ -522,7 +523,7 @@ const asegurarAsignacionesTodasSedes = async ({
   );
 
   for (const asignacion of asignaciones) {
-    const [registro] = await UsuariosSedesModel.findOrCreate({
+    const [registro, creado] = await UsuariosSedesModel.findOrCreate({
       where: {
         usuario_id: usuarioId,
         sede_id: asignacion.sede_id
@@ -538,17 +539,23 @@ const asegurarAsignacionesTodasSedes = async ({
       transaction
     });
 
-    await registro.update(
-      {
-        rol_id: rolId,
-        es_sede_principal: 0,
-        puede_operar: 1,
-        puede_ver_reportes: 1,
-        puede_ver_finanzas: 1,
-        activo: 1
-      },
-      { transaction }
-    );
+    const cambiosAsignacion = {
+      rol_id: rolId,
+      es_sede_principal: 0,
+      activo: 1
+    };
+
+    if (resetPerfil || creado) {
+      cambiosAsignacion.puede_operar = asignacion.puede_operar ? 1 : 0;
+      cambiosAsignacion.puede_ver_reportes = asignacion.puede_ver_reportes
+        ? 1
+        : 0;
+      cambiosAsignacion.puede_ver_finanzas = asignacion.puede_ver_finanzas
+        ? 1
+        : 0;
+    }
+
+    await registro.update(cambiosAsignacion, { transaction });
   }
 };
 
@@ -1258,26 +1265,34 @@ export const UR_Usuarios_CTS = async (req, res) => {
       }
     }
 
+    const rolCambio = Number(rolDestino?.id) !== Number(usuario.rol_id);
+
     await usuario.update(payload, {
       transaction
     });
 
-    // Mantiene usuarios_sedes como espejo compatible del rol global. Esto
-    // corrige usuarios históricos y evita nuevas desincronizaciones al editar
-    // el rol del usuario.
+    // usuarios_sedes mantiene rol_id como espejo del rol global. Los alcances
+    // personalizados se conservan en ediciones normales; sólo se restauran
+    // al perfil por defecto cuando efectivamente cambia el rol.
     const perfilRolDestino = obtenerPerfilAccesoSede(rolDestino?.codigo);
-    await UsuariosSedesModel.update(
-      {
-        rol_id: usuario.rol_id,
-        puede_operar: perfilRolDestino.puede_operar ? 1 : 0,
-        puede_ver_reportes: perfilRolDestino.puede_ver_reportes ? 1 : 0,
-        puede_ver_finanzas: perfilRolDestino.puede_ver_finanzas ? 1 : 0
-      },
-      {
-        where: { usuario_id: usuario.id },
-        transaction
-      }
-    );
+    const cambiosRolSedes = {
+      rol_id: usuario.rol_id
+    };
+
+    if (rolCambio) {
+      cambiosRolSedes.puede_operar = perfilRolDestino.puede_operar ? 1 : 0;
+      cambiosRolSedes.puede_ver_reportes = perfilRolDestino.puede_ver_reportes
+        ? 1
+        : 0;
+      cambiosRolSedes.puede_ver_finanzas = perfilRolDestino.puede_ver_finanzas
+        ? 1
+        : 0;
+    }
+
+    await UsuariosSedesModel.update(cambiosRolSedes, {
+      where: { usuario_id: usuario.id },
+      transaction
+    });
 
     if (accesoTodasSedesDestino) {
       await UsuariosSedesModel.update(
@@ -1292,7 +1307,8 @@ export const UR_Usuarios_CTS = async (req, res) => {
         usuarioId: usuario.id,
         rolId: usuario.rol_id,
         rolCodigo: rolDestino?.codigo,
-        transaction
+        transaction,
+        resetPerfil: rolCambio
       });
     } else if (payload.sede_principal_id) {
       await UsuariosSedesModel.update(
@@ -1316,19 +1332,25 @@ export const UR_Usuarios_CTS = async (req, res) => {
       });
 
       if (asignacionExistente) {
-        await asignacionExistente.update(
-          {
-            rol_id: usuario.rol_id,
-            es_sede_principal: 1,
-            activo: 1,
-            puede_operar: perfilRolDestino.puede_operar ? 1 : 0,
-            puede_ver_reportes: perfilRolDestino.puede_ver_reportes ? 1 : 0,
-            puede_ver_finanzas: perfilRolDestino.puede_ver_finanzas ? 1 : 0
-          },
-          {
-            transaction
-          }
-        );
+        const cambiosSedePrincipal = {
+          rol_id: usuario.rol_id,
+          es_sede_principal: 1,
+          activo: 1
+        };
+
+        if (rolCambio) {
+          cambiosSedePrincipal.puede_operar = perfilRolDestino.puede_operar
+            ? 1
+            : 0;
+          cambiosSedePrincipal.puede_ver_reportes =
+            perfilRolDestino.puede_ver_reportes ? 1 : 0;
+          cambiosSedePrincipal.puede_ver_finanzas =
+            perfilRolDestino.puede_ver_finanzas ? 1 : 0;
+        }
+
+        await asignacionExistente.update(cambiosSedePrincipal, {
+          transaction
+        });
       } else {
         const perfilAcceso = obtenerPerfilAccesoSede(rolDestino?.codigo);
 

@@ -511,12 +511,16 @@ export const CR_UsuariosSedes_CTS = async (req, res) => {
 
     const perfilAcceso = obtenerPerfilAccesoSede(rolAsignacion.codigo);
 
-    // La sede hereda el rol/perfil global. Se ignoran overrides enviados
-    // por clientes antiguos para evitar comportamientos distintos por sede.
+    // Una asignación nueva parte del perfil sugerido por el rol, pero puede
+    // recibir restricciones explícitas de alcance para esta sede. Los flags
+    // no otorgan permisos RBAC: sólo delimitan dónde pueden ejercerse.
     payload.rol_id = rolAsignacion.id;
-    payload.puede_operar = perfilAcceso.puede_operar ? 1 : 0;
-    payload.puede_ver_reportes = perfilAcceso.puede_ver_reportes ? 1 : 0;
-    payload.puede_ver_finanzas = perfilAcceso.puede_ver_finanzas ? 1 : 0;
+    payload.puede_operar =
+      payload.puede_operar ?? (perfilAcceso.puede_operar ? 1 : 0);
+    payload.puede_ver_reportes =
+      payload.puede_ver_reportes ?? (perfilAcceso.puede_ver_reportes ? 1 : 0);
+    payload.puede_ver_finanzas =
+      payload.puede_ver_finanzas ?? (perfilAcceso.puede_ver_finanzas ? 1 : 0);
 
     const asignacionExistente = await UsuariosSedesModel.findOne({
       where: {
@@ -613,7 +617,7 @@ export const CR_UsuariosSedes_CTS = async (req, res) => {
 };
 
 /*
- * Benjamin Orellana - 2026/05/10 - Actualiza permisos de una asignación usuario-sede.
+ * Benjamin Orellana - 2026/05/10 - Actualiza el alcance de una asignación usuario-sede.
  */
 export const UR_UsuariosSedes_CTS = async (req, res) => {
   const transaction = await db.transaction();
@@ -673,11 +677,9 @@ export const UR_UsuariosSedes_CTS = async (req, res) => {
       });
     }
 
-    const perfilAcceso = obtenerPerfilAccesoSede(rolGlobal.codigo);
+    // El rol sigue siendo global y no puede redefinirse por sede. En cambio,
+    // los tres flags de alcance sí pueden administrarse por asignación.
     delete payload.rol_id;
-    delete payload.puede_operar;
-    delete payload.puede_ver_reportes;
-    delete payload.puede_ver_finanzas;
 
     if (payload.es_sede_principal === 1) {
       await UsuariosSedesModel.update(
@@ -709,10 +711,7 @@ export const UR_UsuariosSedes_CTS = async (req, res) => {
     await asignacion.update(
       {
         ...payload,
-        rol_id: rolGlobal.id,
-        puede_operar: perfilAcceso.puede_operar ? 1 : 0,
-        puede_ver_reportes: perfilAcceso.puede_ver_reportes ? 1 : 0,
-        puede_ver_finanzas: perfilAcceso.puede_ver_finanzas ? 1 : 0
+        rol_id: rolGlobal.id
       },
       { transaction }
     );

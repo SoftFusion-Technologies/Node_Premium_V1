@@ -19,6 +19,7 @@ import express from "express";
 import {
   authenticateToken,
   requirePermission,
+  requireOperacionFinancieraAlumno,
   requireRolGlobal,
 } from "../Security/auth.js";
 import { authenticateAlumnoToken } from "../Security/authAlumno.js";
@@ -1031,13 +1032,13 @@ router.patch(
 router.post(
   "/alumnos/:alumno_id/marcar-deuda",
   authenticateToken,
-  requirePermission("deudas.gestionar"),
+  requireOperacionFinancieraAlumno("deudas.gestionar"),
   requireFinancialScope({
     sources: [
       sourceParam("alumno", "alumno_id"),
       sourceBody("mensualidad", "mensualidad_id"),
     ],
-    permission: "deudas.gestionar",
+    requireFinanzas: false,
   }),
   CR_MarcarDeudaAlumnoPlanesPagos_CTS,
 );
@@ -1046,13 +1047,13 @@ router.post(
 router.post(
   "/alumnos/:alumno_id/agregar-bonificacion",
   authenticateToken,
-  requirePermission(["deudas.gestionar", "saldos.gestionar"]),
+  requireOperacionFinancieraAlumno(["deudas.gestionar", "saldos.gestionar"]),
   requireFinancialScope({
     sources: [
       sourceParam("alumno", "alumno_id"),
       sourceBody("mensualidad", "mensualidad_id"),
     ],
-    permission: ["deudas.gestionar", "saldos.gestionar"],
+    requireFinanzas: false,
   }),
   CR_BonificacionAlumno_CTS,
 );
@@ -1061,8 +1062,11 @@ router.post(
 router.get(
   "/alumnos/:alumno_id/saldo",
   authenticateToken,
-  requirePermission("saldos.ver"),
-  alcanceAlumno("saldos.ver"),
+  requireOperacionFinancieraAlumno(["saldos.ver", "saldos.gestionar"]),
+  requireFinancialScope({
+    sources: [sourceParam("alumno", "alumno_id")],
+    requireFinanzas: false,
+  }),
   OBR_SaldoAlumno_CTS,
 );
 

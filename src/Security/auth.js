@@ -640,6 +640,46 @@ const obtenerSedeIdRequest = (req) => {
  * usuarios_sedes sólo define alcance geográfico. Si la petición informa una
  * sede, un usuario no global debe tener una asignación activa para esa sede.
  */
+
+/*
+ * Benjamin Orellana - 2026/08/19 - Excepción operativa acotada para acciones
+ * financieras sobre la ficha de UN alumno. COORD_SEDE y PROFESOR pueden
+ * ejecutar estas operaciones aunque el permiso financiero global siga
+ * bloqueado para módulos históricos/configuración.
+ *
+ * IMPORTANTE: usar este middleware únicamente en rutas que inmediatamente
+ * validen la sede real del alumno/entidad con requireFinancialScope sin
+ * permiso financiero global. No habilita módulos de Finanzas.
+ */
+export const requireOperacionFinancieraAlumno = (permisosRequeridos = []) => {
+  const requeridos = (Array.isArray(permisosRequeridos)
+    ? permisosRequeridos
+    : [permisosRequeridos]
+  )
+    .map((item) => String(item || '').trim())
+    .filter(Boolean);
+
+  return (req, res, next) => {
+    if (!req.user) {
+      return res.status(401).json({
+        ok: false,
+        code: 'USER_NOT_AUTHENTICATED',
+        message: 'Usuario no autenticado.'
+      });
+    }
+
+    const rol = String(req.user.rol_codigo || '')
+      .trim()
+      .toUpperCase();
+
+    if (['COORD_SEDE', 'PROFESOR'].includes(rol)) {
+      return next();
+    }
+
+    return requirePermission(requeridos)(req, res, next);
+  };
+};
+
 export const requirePermission = (permisosRequeridos = []) => {
   const requeridos = (Array.isArray(permisosRequeridos)
     ? permisosRequeridos

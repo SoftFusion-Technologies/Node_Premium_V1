@@ -16,7 +16,11 @@
 import express from 'express';
 
 // Benjamin Orellana - 2026/05/10 - Importa middlewares de seguridad para proteger rutas PREMIUM.
-import { authenticateToken, requirePermission } from '../Security/auth.js';
+import {
+  authenticateToken,
+  requirePermission,
+  requireOperacionFinancieraAlumno
+} from '../Security/auth.js';
 import { authenticateAlumnoToken } from '../Security/authAlumno.js';
 import {
   requireFinancialScope,
@@ -277,8 +281,12 @@ router.get(
  */
 router.get(
   '/alumnos/:alumno_id/mensualidades',
-  ...seguridadPagosVer,
-  alcanceAlumno('pagos.ver'),
+  authenticateToken,
+  requireOperacionFinancieraAlumno(['pagos.ver', 'deudas.gestionar']),
+  requireFinancialScope({
+    sources: [sourceParam('alumno', 'alumno_id')],
+    requireFinanzas: false
+  }),
   OBR_MensualidadesPorAlumno_CTS
 );
 

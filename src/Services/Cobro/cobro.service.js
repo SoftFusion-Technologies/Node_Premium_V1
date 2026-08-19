@@ -491,8 +491,16 @@ const validarCliente = async ({
   return { alumno, cobrador };
 };
 
-const resolverPagos = async ({ pagos, total, transaction }) => {
+const resolverPagos = async ({
+  pagos,
+  total,
+  permitirSinPagos = false,
+  transaction,
+}) => {
   if (!Array.isArray(pagos) || pagos.length === 0) {
+    if (permitirSinPagos) {
+      return { pagos: [], totalPagado: 0 };
+    }
     throw new CobroOperacionError(
       "Debe seleccionar al menos un medio de pago.",
     );
@@ -785,9 +793,11 @@ const crearMembresiaPlanMigracionCobrada = async ({
     Math.max(Number(linea.total) - montoPagadoConfirmado, 0),
   );
   const estadoMensualidad = confirmado
-    ? saldoMensualidad > 0.009
-      ? "parcial"
-      : "pagada"
+    ? saldoMensualidad <= 0.009
+      ? "pagada"
+      : montoPagadoConfirmado > 0.009
+        ? "parcial"
+        : "pendiente"
     : "pendiente";
   const basePlan = redondear(linea.importe - linea.descuento_importe);
   const observacionesMembresia = [
@@ -849,22 +859,32 @@ const crearMembresiaPlanMigracionCobrada = async ({
     { transaction },
   );
 
-  const pago = await PagosModel.create(
-    {
-      mensualidad_id: Number(mensualidad.id),
-      alumno_id: Number(alumno.id),
-      sede_id: Number(sedeId),
-      medio_pago_id: Number(medioPagoId),
-      usuario_registro_id: Number(usuarioId),
-      usuario_validacion_id: confirmado ? Number(usuarioId) : null,
-      fecha_pago: new Date(),
-      monto: Number(montoPagado).toFixed(2),
-      estado: confirmado ? "confirmado" : "pendiente_validacion",
-      referencia: `COBRO-${cobroId}`,
-      observaciones: `Pago de membresía migrada generado por cobro #${cobroId}`,
-    },
-    { transaction },
-  );
+  let pago = null;
+  if (Number(montoPagado || 0) > 0.009) {
+    if (!idValido(medioPagoId)) {
+      throw new CobroOperacionError(
+        "No se pudo identificar el medio usado para abonar el plan.",
+        409,
+        "MEDIO_PAGO_PLAN_INVALIDO",
+      );
+    }
+    pago = await PagosModel.create(
+      {
+        mensualidad_id: Number(mensualidad.id),
+        alumno_id: Number(alumno.id),
+        sede_id: Number(sedeId),
+        medio_pago_id: Number(medioPagoId),
+        usuario_registro_id: Number(usuarioId),
+        usuario_validacion_id: confirmado ? Number(usuarioId) : null,
+        fecha_pago: new Date(),
+        monto: Number(montoPagado).toFixed(2),
+        estado: confirmado ? "confirmado" : "pendiente_validacion",
+        referencia: `COBRO-${cobroId}`,
+        observaciones: `Pago de membresía migrada generado por cobro #${cobroId}`,
+      },
+      { transaction },
+    );
+  }
 
   await SistemaAuditoriaLogsModel.create(
     {
@@ -887,7 +907,7 @@ const crearMembresiaPlanMigracionCobrada = async ({
         clases_disponibles: configuracion.clases_disponibles,
         cobro_id: Number(cobroId),
         mensualidad_id: Number(mensualidad.id),
-        pago_id: Number(pago.id),
+        pago_id: pago?.id ? Number(pago.id) : null,
       },
       ip: null,
       user_agent: null,
@@ -1051,9 +1071,11 @@ const crearMembresiaPlan = async ({
     Math.max(Number(linea.total) - montoPagadoConfirmado, 0),
   );
   const estadoMensualidad = confirmado
-    ? saldoMensualidad > 0.009
-      ? "parcial"
-      : "pagada"
+    ? saldoMensualidad <= 0.009
+      ? "pagada"
+      : montoPagadoConfirmado > 0.009
+        ? "parcial"
+        : "pendiente"
     : "pendiente";
   const basePlan = redondear(linea.importe - linea.descuento_importe);
 
@@ -1184,22 +1206,32 @@ const crearMembresiaPlan = async ({
     }
   }
 
-  const pago = await PagosModel.create(
-    {
-      mensualidad_id: Number(mensualidad.id),
-      alumno_id: Number(alumno.id),
-      sede_id: Number(sedeId),
-      medio_pago_id: Number(medioPagoId),
-      usuario_registro_id: Number(usuarioId),
-      usuario_validacion_id: confirmado ? Number(usuarioId) : null,
-      fecha_pago: new Date(),
-      monto: Number(montoPagado).toFixed(2),
-      estado: confirmado ? "confirmado" : "pendiente_validacion",
-      referencia: `COBRO-${cobroId}`,
-      observaciones: `Pago de plan generado por cobro #${cobroId}`,
-    },
-    { transaction },
-  );
+  let pago = null;
+  if (Number(montoPagado || 0) > 0.009) {
+    if (!idValido(medioPagoId)) {
+      throw new CobroOperacionError(
+        "No se pudo identificar el medio usado para abonar el plan.",
+        409,
+        "MEDIO_PAGO_PLAN_INVALIDO",
+      );
+    }
+    pago = await PagosModel.create(
+      {
+        mensualidad_id: Number(mensualidad.id),
+        alumno_id: Number(alumno.id),
+        sede_id: Number(sedeId),
+        medio_pago_id: Number(medioPagoId),
+        usuario_registro_id: Number(usuarioId),
+        usuario_validacion_id: confirmado ? Number(usuarioId) : null,
+        fecha_pago: new Date(),
+        monto: Number(montoPagado).toFixed(2),
+        estado: confirmado ? "confirmado" : "pendiente_validacion",
+        referencia: `COBRO-${cobroId}`,
+        observaciones: `Pago de plan generado por cobro #${cobroId}`,
+      },
+      { transaction },
+    );
+  }
 
   // La normalizacion es deliberadamente no destructiva: ninguna reserva ni
   // cobro adelanta periodos futuros sin una accion administrativa explicita.
@@ -1235,6 +1267,202 @@ const crearMembresiaPlan = async ({
   }
 
   return { membresia, mensualidad, pago };
+};
+
+// Benjamin Orellana - 2026/08/18 - Una venta fiada de productos/servicios
+// utiliza pagos_mensualidades como fuente de verdad del saldo deudor. La fila
+// se crea sin membresía para no inventar un plan y queda identificada de forma
+// estable por el cobro que la originó.
+const marcadorDeudaFiadaCobro = (cobroId) => `[FIADO COBRO #${Number(cobroId)}]`;
+
+const obtenerDeudaFiadaCobro = async ({
+  cobroId,
+  alumnoId,
+  sedeId,
+  transaction,
+  bloquear = false,
+}) => {
+  if (!idValido(cobroId) || !idValido(alumnoId) || !idValido(sedeId)) return null;
+
+  return PagosMensualidadesModel.findOne({
+    where: {
+      alumno_id: Number(alumnoId),
+      sede_id: Number(sedeId),
+      membresia_id: null,
+      observaciones: {
+        [Op.like]: `${marcadorDeudaFiadaCobro(cobroId)}%`,
+      },
+    },
+    order: [["id", "DESC"]],
+    transaction,
+    ...(bloquear ? { lock: transaction.LOCK.UPDATE } : {}),
+  });
+};
+
+const crearDeudaFiadaCobro = async ({
+  cobro,
+  conceptos,
+  totalPagado,
+  montoDeuda = null,
+  usuarioId,
+  transaction,
+}) => {
+  if (!idValido(cobro?.alumno_id)) return null;
+
+  // Si el cobro mezcla plan + otros conceptos, la mensualidad del plan conserva
+  // únicamente su propio saldo. Esta deuda administrativa representa solo la
+  // parte impaga de productos/servicios para no duplicar el saldo del plan.
+  const conceptosFiados = (conceptos || []).filter(
+    (item) => String(item.tipo) !== "plan",
+  );
+  if (conceptosFiados.length === 0) return null;
+
+  const totalConceptosFiados = redondear(
+    conceptosFiados.reduce((suma, item) => suma + Number(item.total || 0), 0),
+  );
+  const deuda = redondear(
+    montoDeuda == null
+      ? Math.max(totalConceptosFiados - Number(totalPagado || 0), 0)
+      : Math.max(Number(montoDeuda || 0), 0),
+  );
+  if (deuda <= 0.009) return null;
+
+  const existente = await obtenerDeudaFiadaCobro({
+    cobroId: cobro.id,
+    alumnoId: cobro.alumno_id,
+    sedeId: cobro.sede_id,
+    transaction,
+    bloquear: true,
+  });
+  if (existente) return existente;
+
+  const hoy = fechaArgentina();
+  const fechaBase = new Date(`${hoy}T00:00:00Z`);
+  const detalleConceptos = conceptosFiados
+    .map((item) => {
+      const nombre = item.nombre_snapshot || item.nombre || "Concepto";
+      const cantidad = Number(item.cantidad || 1);
+      return `${nombre}${cantidad !== 1 ? ` x${cantidad}` : ""}`;
+    })
+    .join(", ")
+    .slice(0, 300);
+  const marcador = marcadorDeudaFiadaCobro(cobro.id);
+
+  const mensualidad = await PagosMensualidadesModel.create(
+    {
+      alumno_id: Number(cobro.alumno_id),
+      membresia_id: null,
+      sede_id: Number(cobro.sede_id),
+      periodo_anio: fechaBase.getUTCFullYear(),
+      periodo_mes: fechaBase.getUTCMonth() + 1,
+      periodo_desde: hoy,
+      periodo_hasta: hoy,
+      fecha_emision: hoy,
+      fecha_vencimiento: hoy,
+      monto_total: deuda.toFixed(2),
+      monto_pagado: "0.00",
+      saldo: deuda.toFixed(2),
+      estado: "pendiente",
+      observaciones: `${marcador} Venta fiada. Total ${totalConceptosFiados.toFixed(2)}; abonado ${Number(totalPagado || 0).toFixed(2)}; deuda ${deuda.toFixed(2)}${detalleConceptos ? `; conceptos: ${detalleConceptos}` : ""}`,
+    },
+    { transaction },
+  );
+
+  await SistemaAuditoriaLogsModel.create(
+    {
+      usuario_id: Number(usuarioId),
+      sede_id: Number(cobro.sede_id),
+      modulo: "COBROS",
+      accion: "GENERAR_DEUDA_FIADA",
+      entidad: "pagos_mensualidades",
+      entidad_id: Number(mensualidad.id),
+      descripcion: `Cobro #${cobro.id}: deuda fiada por ${deuda.toFixed(2)}.`,
+      valores_anteriores: null,
+      valores_nuevos: {
+        cobro_id: Number(cobro.id),
+        alumno_id: Number(cobro.alumno_id),
+        monto_total_cobro: Number(cobro.total || 0),
+        monto_total_conceptos_fiados: totalConceptosFiados,
+        monto_abonado: Number(totalPagado || 0),
+        deuda_generada: deuda,
+        mensualidad_id: Number(mensualidad.id),
+      },
+      ip: null,
+      user_agent: null,
+    },
+    { transaction },
+  );
+
+  return mensualidad;
+};
+
+const revertirDeudaFiadaCobro = async ({
+  cobro,
+  motivo,
+  usuarioId,
+  transaction,
+}) => {
+  if (!idValido(cobro?.alumno_id)) return null;
+  const mensualidad = await obtenerDeudaFiadaCobro({
+    cobroId: cobro.id,
+    alumnoId: cobro.alumno_id,
+    sedeId: cobro.sede_id,
+    transaction,
+    bloquear: true,
+  });
+  if (!mensualidad || mensualidad.estado === "anulada") return mensualidad;
+
+  const pagoAplicado = await PagosModel.findOne({
+    where: {
+      mensualidad_id: Number(mensualidad.id),
+      estado: { [Op.in]: ["confirmado", "pendiente_validacion"] },
+    },
+    transaction,
+    lock: transaction.LOCK.UPDATE,
+  });
+  if (pagoAplicado) {
+    throw new CobroOperacionError(
+      "La deuda generada por esta venta ya tiene un pago registrado. Anulá o regularizá ese pago antes de anular la venta fiada.",
+      409,
+      "DEUDA_FIADA_CON_PAGOS",
+    );
+  }
+
+  const saldoAnteriorDeudaFiada = Number(mensualidad.saldo || 0);
+  await mensualidad.update(
+    {
+      monto_pagado: "0.00",
+      saldo: "0.00",
+      estado: "anulada",
+      observaciones: [
+        mensualidad.observaciones,
+        `[ANULACIÓN FIADO COBRO #${cobro.id}] ${motivo}`,
+      ]
+        .filter(Boolean)
+        .join(" | "),
+      updated_at: new Date(),
+    },
+    { transaction },
+  );
+
+  await SistemaAuditoriaLogsModel.create(
+    {
+      usuario_id: Number(usuarioId),
+      sede_id: Number(cobro.sede_id),
+      modulo: "COBROS",
+      accion: "ANULAR_DEUDA_FIADA",
+      entidad: "pagos_mensualidades",
+      entidad_id: Number(mensualidad.id),
+      descripcion: `Deuda fiada del cobro #${cobro.id} anulada junto con la venta.`,
+      valores_anteriores: { saldo: saldoAnteriorDeudaFiada },
+      valores_nuevos: { saldo: 0, estado: "anulada", motivo },
+      ip: null,
+      user_agent: null,
+    },
+    { transaction },
+  );
+
+  return mensualidad;
 };
 
 const descontarStock = async ({
@@ -1310,6 +1538,43 @@ const descontarStock = async ({
     },
     { transaction },
   );
+};
+
+// Distribuye el importe abonado de forma determinística: primero cubre los
+// planes (para que cada mensualidad reciba solo lo que le corresponde) y luego
+// los productos/servicios. Así un cobro mixto puede quedar parcial o totalmente
+// fiado sin duplicar deuda ni sobreimputar pagos a una mensualidad.
+const distribuirPagoConceptos = ({ conceptos = [], totalPagado = 0 }) => {
+  let disponible = redondear(Math.max(Number(totalPagado || 0), 0));
+  const pagosPlan = new Map();
+
+  for (const linea of conceptos) {
+    if (String(linea.tipo) !== "plan") continue;
+    const montoLinea = redondear(Math.max(Number(linea.total || 0), 0));
+    const aplicado = redondear(Math.min(disponible, montoLinea));
+    pagosPlan.set(linea, aplicado);
+    disponible = redondear(Math.max(disponible - aplicado, 0));
+  }
+
+  const conceptosNoPlan = conceptos.filter(
+    (linea) => String(linea.tipo) !== "plan",
+  );
+  const totalNoPlan = redondear(
+    conceptosNoPlan.reduce(
+      (suma, linea) => suma + Math.max(Number(linea.total || 0), 0),
+      0,
+    ),
+  );
+  const pagadoNoPlan = redondear(Math.min(disponible, totalNoPlan));
+  const deudaNoPlan = redondear(Math.max(totalNoPlan - pagadoNoPlan, 0));
+
+  return {
+    pagosPlan,
+    conceptosNoPlan,
+    totalNoPlan,
+    pagadoNoPlan,
+    deudaNoPlan,
+  };
 };
 
 export const registrarCobro = async ({ payload, usuario }) => {
@@ -1404,16 +1669,25 @@ export const registrarCobro = async ({ payload, usuario }) => {
         "El total del cobro debe ser mayor a cero.",
       );
 
+    const solicitaPagoParcial =
+      payload.pago_parcial === true || Number(payload.pago_parcial) === 1;
+    if (solicitaPagoParcial && clienteTipo !== "alumno") {
+      throw new CobroOperacionError(
+        "Solo se puede dejar deuda a un alumno identificado.",
+        409,
+        "FIADO_REQUIERE_ALUMNO",
+      );
+    }
+
     const pagosResueltos = await resolverPagos({
       pagos: payload.pagos,
       total: resumen.total,
+      permitirSinPagos: solicitaPagoParcial,
       transaction,
     });
     const pagos = pagosResueltos.pagos;
     const totalPagado = pagosResueltos.totalPagado;
     const esPagoParcial = totalPagado + 0.009 < resumen.total;
-    const solicitaPagoParcial =
-      payload.pago_parcial === true || Number(payload.pago_parcial) === 1;
 
     if (esPagoParcial) {
       if (!solicitaPagoParcial) {
@@ -1421,14 +1695,19 @@ export const registrarCobro = async ({ payload, usuario }) => {
           "La suma de los medios de pago debe coincidir con el total del cobro.",
         );
       }
-      if (conceptos.length !== 1 || !lineaPlan) {
+      if (conceptos.some((item) => item.tipo === "deuda")) {
         throw new CobroOperacionError(
-          "El pago parcial solo está disponible cuando el cobro contiene un único plan.",
+          "No se puede volver a fiar el pago de una deuda existente.",
           409,
-          "PAGO_PARCIAL_NO_PERMITIDO",
+          "DEUDA_NO_REFIABLE",
         );
       }
     }
+    const distribucionPago = distribuirPagoConceptos({
+      conceptos,
+      totalPagado,
+    });
+
     const consumoSaldo = await prepararConsumoSaldo({
       pagos,
       alumnoId: alumno?.id,
@@ -1463,9 +1742,13 @@ export const registrarCobro = async ({ payload, usuario }) => {
         observaciones: esPagoParcial
           ? [
               payload.observaciones,
-              `Pago parcial ${totalPagado.toFixed(2)}; deuda ${redondear(
-                resumen.total - totalPagado,
-              ).toFixed(2)}`,
+              totalPagado <= 0.009
+                ? `Venta fiada; deuda ${redondear(
+                    resumen.total - totalPagado,
+                  ).toFixed(2)}`
+                : `Pago parcial ${totalPagado.toFixed(2)}; deuda ${redondear(
+                    resumen.total - totalPagado,
+                  ).toFixed(2)}`,
             ]
               .filter(Boolean)
               .join(" | ")
@@ -1503,7 +1786,7 @@ export const registrarCobro = async ({ payload, usuario }) => {
     let pagoPlan = null;
     let pagoDeuda = null;
     const medioPagoPlan =
-      pagos.find((item) => !item.es_saldo_favor) || pagos[0];
+      pagos.find((item) => !item.es_saldo_favor) || pagos[0] || null;
     for (const linea of conceptos) {
       const detalle = await CobrosDetallesModel.create(
         {
@@ -1533,8 +1816,8 @@ export const registrarCobro = async ({ payload, usuario }) => {
               linea,
               configuracion: configuracionMembresiaMigracion,
               estadoCobro,
-              montoPagado: totalPagado,
-              medioPagoId: medioPagoPlan.medio_pago_id,
+              montoPagado: distribucionPago.pagosPlan.get(linea) || 0,
+              medioPagoId: medioPagoPlan?.medio_pago_id || null,
               usuarioId,
               cobroId: cobro.id,
               transaction,
@@ -1544,8 +1827,8 @@ export const registrarCobro = async ({ payload, usuario }) => {
               sedeId,
               linea,
               estadoCobro,
-              montoPagado: totalPagado,
-              medioPagoId: medioPagoPlan.medio_pago_id,
+              montoPagado: distribucionPago.pagosPlan.get(linea) || 0,
+              medioPagoId: medioPagoPlan?.medio_pago_id || null,
               usuarioId,
               cobroId: cobro.id,
               renovacionExplicita,
@@ -1556,7 +1839,9 @@ export const registrarCobro = async ({ payload, usuario }) => {
           {
             membresia_id: Number(resultadoPlan.membresia.id),
             mensualidad_id: Number(resultadoPlan.mensualidad.id),
-            pago_id: Number(resultadoPlan.pago.id),
+            pago_id: resultadoPlan.pago?.id
+              ? Number(resultadoPlan.pago.id)
+              : null,
           },
           { transaction },
         );
@@ -1596,29 +1881,43 @@ export const registrarCobro = async ({ payload, usuario }) => {
     }
 
     if (estadoCobro === "confirmado") {
+      if (esPagoParcial && distribucionPago.deudaNoPlan > 0.009) {
+        await crearDeudaFiadaCobro({
+          cobro,
+          conceptos: distribucionPago.conceptosNoPlan,
+          totalPagado: distribucionPago.pagadoNoPlan,
+          montoDeuda: distribucionPago.deudaNoPlan,
+          usuarioId,
+          transaction,
+        });
+      }
+
       const pagoAlumno = conceptos.length === 1 ? pagoPlan || pagoDeuda : null;
       const esCobroExclusivoDeAlumno = Boolean(pagoAlumno);
-      const movimientoFinanciero = await FinanzasMovimientosModel.create(
-        {
-          sede_id: sedeId,
-          categoria_id: null,
-          pago_id: esCobroExclusivoDeAlumno ? Number(pagoAlumno.id) : null,
-          tipo: "ingreso",
-          fecha: fechaArgentina(),
-          descripcion: `Cobro #${cobro.id}`,
-          monto: totalPagado.toFixed(2),
-          origen: esCobroExclusivoDeAlumno ? "pago_alumno" : "manual",
-          referencia: `COBRO-${cobro.id}`,
-          usuario_registro_id: usuarioId,
-          estado: "vigente",
-          observaciones: payload.observaciones || "Generado desde Nuevo Cobro",
-        },
-        { transaction },
-      );
-      await cobro.update(
-        { finanzas_movimiento_id: Number(movimientoFinanciero.id) },
-        { transaction },
-      );
+      let movimientoFinanciero = null;
+      if (totalPagado > 0.009) {
+        movimientoFinanciero = await FinanzasMovimientosModel.create(
+          {
+            sede_id: sedeId,
+            categoria_id: null,
+            pago_id: esCobroExclusivoDeAlumno ? Number(pagoAlumno.id) : null,
+            tipo: "ingreso",
+            fecha: fechaArgentina(),
+            descripcion: `Cobro #${cobro.id}`,
+            monto: totalPagado.toFixed(2),
+            origen: esCobroExclusivoDeAlumno ? "pago_alumno" : "manual",
+            referencia: `COBRO-${cobro.id}`,
+            usuario_registro_id: usuarioId,
+            estado: "vigente",
+            observaciones: payload.observaciones || "Generado desde Nuevo Cobro",
+          },
+          { transaction },
+        );
+        await cobro.update(
+          { finanzas_movimiento_id: Number(movimientoFinanciero.id) },
+          { transaction },
+        );
+      }
 
       for (let indice = 0; indice < pagosCreados.length; indice += 1) {
         if (pagos[indice].es_saldo_favor || !pagos[indice].impacta_caja) continue;
@@ -1684,6 +1983,564 @@ const cargarCobroBloqueado = async ({ cobroId, sedeId, transaction }) => {
       "COBRO_NO_ENCONTRADO",
     );
   return cobro;
+};
+
+
+// Benjamin Orellana - 2026/08/19 - Preanálisis centralizado de anulación.
+// La misma lectura se reutiliza al ejecutar la transacción para que la UI pueda
+// explicar qué se revertirá y el backend siga siendo la fuente de verdad.
+const construirAnalisisAnulacionCobro = async ({
+  cobro,
+  detalles,
+  pagosCobro,
+  sedeId,
+  transaction,
+}) => {
+  const impactos = [];
+  const bloqueos = [];
+  const advertencias = [];
+  const noSeModifica = [
+    "Otros cobros y pagos no vinculados a esta operación.",
+    "Membresías, deudas y saldos del alumno que pertenezcan a otros cobros.",
+  ];
+
+  const agregarImpacto = (impacto) => impactos.push(impacto);
+  const agregarBloqueo = (code, titulo, detalle = null, metadata = {}) => {
+    if (bloqueos.some((item) => item.code === code && item.titulo === titulo)) return;
+    bloqueos.push({ code, titulo, detalle, ...metadata });
+  };
+  const agregarAdvertencia = (titulo, detalle = null) =>
+    advertencias.push({ titulo, detalle });
+
+  const [clienteRow] = await db.query(
+    `SELECT
+       CASE
+         WHEN c.cliente_tipo = 'alumno' THEN CONCAT_WS(' ', a.nombre, a.apellido)
+         WHEN c.cliente_tipo = 'empleado' THEN CONCAT_WS(' ', u.nombre, u.apellido)
+         ELSE 'Cobro sin cliente'
+       END AS cliente_nombre
+     FROM cobros_cobros c
+     LEFT JOIN alumnos_alumnos a ON a.id = c.alumno_id
+     LEFT JOIN usuarios_usuarios u ON u.id = c.cliente_usuario_id
+     WHERE c.id = :cobroId
+     LIMIT 1`,
+    {
+      replacements: { cobroId: Number(cobro.id) },
+      type: QueryTypes.SELECT,
+      transaction,
+    },
+  );
+
+  if (cobro.estado === "anulado") {
+    agregarBloqueo(
+      "COBRO_YA_ANULADO",
+      "El cobro ya se encuentra anulado.",
+      cobro.motivo_anulacion || null,
+    );
+  } else if (cobro.estado !== "confirmado") {
+    agregarBloqueo(
+      "ESTADO_COBRO_INVALIDO",
+      "Solo pueden anularse cobros confirmados.",
+      `Estado actual: ${cobro.estado}.`,
+    );
+  }
+
+  const pagosIncompatibles = (pagosCobro || []).filter(
+    (pago) => !["confirmado", "anulado"].includes(String(pago.estado)),
+  );
+  if (pagosIncompatibles.length > 0) {
+    agregarBloqueo(
+      "PAGOS_COBRO_INCONSISTENTES",
+      "Hay medios de pago con un estado incompatible con la anulación.",
+      pagosIncompatibles
+        .map((pago) => `Pago #${pago.id}: ${pago.estado}`)
+        .join(" · "),
+    );
+  }
+
+  const pagosConfirmados = (pagosCobro || []).filter(
+    (pago) => String(pago.estado) === "confirmado",
+  );
+  const medioSaldo = await PagosMediosPagoModel.findOne({
+    where: { codigo: CODIGO_SALDO_FAVOR },
+    transaction,
+  });
+  const mediosIds = [...new Set(pagosConfirmados.map((pago) => Number(pago.medio_pago_id)).filter(idValido))];
+  const medios = mediosIds.length
+    ? await PagosMediosPagoModel.findAll({
+        where: { id: { [Op.in]: mediosIds } },
+        transaction,
+      })
+    : [];
+  const medioPorId = new Map(medios.map((medio) => [Number(medio.id), medio]));
+
+  const totalPagado = redondear(
+    pagosConfirmados.reduce((suma, pago) => suma + Number(pago.monto || 0), 0),
+  );
+  if (totalPagado > 0.009) {
+    const detalleMedios = pagosConfirmados
+      .map((pago) => {
+        const medio = medioPorId.get(Number(pago.medio_pago_id));
+        return `${medio?.nombre || `Medio #${pago.medio_pago_id}`}: ${Number(pago.monto || 0).toFixed(2)}`;
+      })
+      .join(" · ");
+    agregarImpacto({
+      tipo: "pagos",
+      titulo: "Pagos del cobro",
+      detalle: `Se marcarán como anulados${detalleMedios ? ` · ${detalleMedios}` : ""}.`,
+      monto: totalPagado,
+    });
+  } else {
+    agregarAdvertencia(
+      "El cobro no tiene dinero confirmado para revertir.",
+      "Puede tratarse de una venta 100% fiada o de una anulación ya parcialmente sincronizada.",
+    );
+  }
+
+  const pagosSaldoFavor = medioSaldo
+    ? pagosConfirmados.filter(
+        (pago) => Number(pago.medio_pago_id) === Number(medioSaldo.id),
+      )
+    : [];
+  const totalSaldoFavor = redondear(
+    pagosSaldoFavor.reduce((suma, pago) => suma + Number(pago.monto || 0), 0),
+  );
+  if (totalSaldoFavor > 0.009) {
+    agregarImpacto({
+      tipo: "saldo_favor",
+      titulo: "Saldo a favor",
+      detalle: "El importe consumido vuelve a acreditarse en la cuenta del alumno.",
+      monto: totalSaldoFavor,
+    });
+  }
+
+  const pagosCajaIds = pagosConfirmados
+    .filter(
+      (pago) =>
+        !medioSaldo || Number(pago.medio_pago_id) !== Number(medioSaldo.id),
+    )
+    .map((pago) => Number(pago.id));
+
+  let movimientosCajaARevertir = [];
+  if (pagosCajaIds.length > 0) {
+    const originales = await CajasMovimientosModel.findAll({
+      where: {
+        cobro_pago_id: { [Op.in]: pagosCajaIds },
+        origen: "cobro",
+        estado: "vigente",
+      },
+      transaction,
+    });
+    const reversiones = await CajasMovimientosModel.findAll({
+      where: {
+        cobro_pago_id: { [Op.in]: pagosCajaIds },
+        origen: "reversion",
+        referencia: `ANULACION-COBRO-${cobro.id}`,
+        estado: "vigente",
+      },
+      transaction,
+    });
+    const pagosYaRevertidos = new Set(
+      reversiones.map((movimiento) => Number(movimiento.cobro_pago_id)),
+    );
+    movimientosCajaARevertir = originales.filter(
+      (movimiento) => !pagosYaRevertidos.has(Number(movimiento.cobro_pago_id)),
+    );
+  }
+
+  const totalCaja = redondear(
+    movimientosCajaARevertir.reduce(
+      (suma, movimiento) => suma + Number(movimiento.monto || 0),
+      0,
+    ),
+  );
+  let sesionAbierta = null;
+  if (movimientosCajaARevertir.length > 0) {
+    sesionAbierta = await CajasSesionesModel.findOne({
+      where: { sede_id: Number(sedeId), estado: "abierta" },
+      order: [["fecha_apertura", "DESC"], ["id", "DESC"]],
+      transaction,
+    });
+
+    if (!sesionAbierta) {
+      agregarBloqueo(
+        "CAJA_CERRADA",
+        "Debe existir una caja abierta para registrar la reversión.",
+        `Hay ${movimientosCajaARevertir.length} movimiento${movimientosCajaARevertir.length === 1 ? "" : "s"} de caja por compensar.`,
+      );
+    } else {
+      agregarImpacto({
+        tipo: "caja",
+        titulo: "Caja",
+        detalle: `Se registrará ${movimientosCajaARevertir.length === 1 ? "un movimiento compensatorio" : `${movimientosCajaARevertir.length} movimientos compensatorios`} en la caja abierta #${sesionAbierta.id}.`,
+        monto: totalCaja,
+      });
+
+      const esEntreTurnos = movimientosCajaARevertir.some(
+        (movimiento) => Number(movimiento.caja_sesion_id) !== Number(sesionAbierta.id),
+      );
+      if (esEntreTurnos) {
+        agregarAdvertencia(
+          "La venta pertenece a otra sesión de caja.",
+          `La sesión original se conserva como historial y la compensación se registrará en la caja abierta #${sesionAbierta.id}.`,
+        );
+      }
+    }
+  }
+
+  const movimientoOriginalFinanzas = cobro.finanzas_movimiento_id
+    ? await FinanzasMovimientosModel.findByPk(cobro.finanzas_movimiento_id, {
+        transaction,
+      })
+    : await FinanzasMovimientosModel.findOne({
+        where: { referencia: `COBRO-${cobro.id}` },
+        transaction,
+      });
+  const movimientoReversionExistente = await FinanzasMovimientosModel.findOne({
+    where: {
+      referencia: `ANULACION-COBRO-${cobro.id}`,
+      estado: "vigente",
+    },
+    transaction,
+  });
+  if (
+    totalPagado > 0.009 &&
+    movimientoOriginalFinanzas?.estado === "vigente" &&
+    !movimientoReversionExistente
+  ) {
+    agregarImpacto({
+      tipo: "finanzas",
+      titulo: "Finanzas",
+      detalle: "Se generará un egreso compensatorio vinculado a la anulación.",
+      monto: totalPagado,
+    });
+  } else if (totalPagado > 0.009 && movimientoReversionExistente) {
+    agregarAdvertencia(
+      "La reversión financiera ya existe.",
+      `Movimiento #${movimientoReversionExistente.id}; no se generará un duplicado.`,
+    );
+  } else if (totalPagado > 0.009 && !movimientoOriginalFinanzas) {
+    agregarAdvertencia(
+      "No se encontró un movimiento financiero original.",
+      "La anulación continuará con los demás impactos y no inventará una reversión financiera.",
+    );
+  }
+
+  const deudaFiada = idValido(cobro.alumno_id)
+    ? await obtenerDeudaFiadaCobro({
+        cobroId: cobro.id,
+        alumnoId: cobro.alumno_id,
+        sedeId,
+        transaction,
+        bloquear: false,
+      })
+    : null;
+  if (deudaFiada && deudaFiada.estado !== "anulada") {
+    const pagosDeuda = await PagosModel.findAll({
+      where: {
+        mensualidad_id: Number(deudaFiada.id),
+        estado: { [Op.in]: ["confirmado", "pendiente_validacion"] },
+      },
+      transaction,
+    });
+    if (pagosDeuda.length > 0) {
+      const cobrosPagadores = await db.query(
+        `SELECT
+           cd.cobro_id,
+           c.total AS total_cobro,
+           c.estado,
+           c.fecha_cobro,
+           SUM(cd.total) AS monto_aplicado
+         FROM cobros_detalles cd
+         INNER JOIN cobros_cobros c ON c.id = cd.cobro_id
+         WHERE cd.pago_id IN (:pagosIds)
+         GROUP BY cd.cobro_id, c.total, c.estado, c.fecha_cobro
+         ORDER BY cd.cobro_id ASC`,
+        {
+          replacements: { pagosIds: pagosDeuda.map((pago) => Number(pago.id)) },
+          type: QueryTypes.SELECT,
+          transaction,
+        },
+      );
+      agregarBloqueo(
+        "DEUDA_FIADA_CON_PAGOS",
+        "La deuda generada por esta venta ya recibió pagos.",
+        cobrosPagadores.length
+          ? `Para anular este cobro, anulá primero ${cobrosPagadores.map((item) => `#${item.cobro_id}`).join(", ")}.`
+          : "Primero anulá los pagos aplicados a esa deuda.",
+        {
+          dependencias: cobrosPagadores.map((item) => ({
+            cobro_id: Number(item.cobro_id),
+            total: Number(item.total_cobro || 0),
+            monto_aplicado: Number(item.monto_aplicado || 0),
+            estado: item.estado,
+            fecha_cobro: item.fecha_cobro,
+            motivo: "Pago posterior de la deuda generada por este cobro",
+          })),
+        },
+      );
+    } else {
+      agregarImpacto({
+        tipo: "deuda_fiada",
+        titulo: "Saldo deudor generado",
+        detalle: `Se anulará la deuda administrativa #${deudaFiada.id} originada por esta venta.`,
+        monto: Number(deudaFiada.saldo || deudaFiada.monto_total || 0),
+      });
+    }
+  }
+
+  for (const detalle of detalles || []) {
+    if (detalle.tipo === "producto") {
+      const salida = await ProductosStockMovimientosModel.findOne({
+        where: {
+          referencia_tipo: "cobro_detalle",
+          referencia_id: Number(detalle.id),
+          tipo: "egreso_venta",
+        },
+        transaction,
+      });
+      const devolucionExistente = await ProductosStockMovimientosModel.findOne({
+        where: {
+          referencia_tipo: "cobro_anulacion",
+          referencia_id: Number(detalle.id),
+          tipo: "devolucion",
+        },
+        transaction,
+      });
+      if (salida && !devolucionExistente) {
+        agregarImpacto({
+          tipo: "stock",
+          titulo: detalle.nombre_snapshot || "Producto",
+          detalle: `Se devolverán ${Number(detalle.cantidad || 0)} unidad${Number(detalle.cantidad || 0) === 1 ? "" : "es"} al stock de la sede.`,
+          cantidad: Number(detalle.cantidad || 0),
+          referencia_id: Number(detalle.referencia_id),
+        });
+      } else if (devolucionExistente) {
+        agregarAdvertencia(
+          `El stock de ${detalle.nombre_snapshot || "un producto"} ya fue devuelto.`,
+          `Movimiento #${devolucionExistente.id}; no se duplicará la devolución.`,
+        );
+      }
+      continue;
+    }
+
+    if (detalle.tipo === "deuda") {
+      const mensualidad = detalle.mensualidad_id
+        ? await PagosMensualidadesModel.findByPk(detalle.mensualidad_id, { transaction })
+        : null;
+      const pago = detalle.pago_id
+        ? await PagosModel.findByPk(detalle.pago_id, { transaction })
+        : null;
+      if (!mensualidad || !pago) {
+        agregarBloqueo(
+          "DEUDA_INCOMPLETA",
+          "El cobro no conserva todos los registros de la deuda.",
+          detalle.nombre_snapshot || null,
+        );
+      } else if (pago.estado === "confirmado") {
+        agregarImpacto({
+          tipo: "deuda",
+          titulo: "Pago de deuda",
+          detalle: `Se reabrirá el saldo de la deuda #${mensualidad.id}.`,
+          monto: Number(pago.monto || detalle.total || 0),
+        });
+      } else if (pago.estado !== "anulado") {
+        agregarBloqueo(
+          "DEUDA_PAGO_INVALIDO",
+          "El pago asociado a una deuda no está confirmado.",
+          `Pago #${pago.id}: ${pago.estado}.`,
+        );
+      }
+      continue;
+    }
+
+    if (detalle.tipo === "plan") {
+      const membresia = detalle.membresia_id
+        ? await AlumnosMembresiasModel.findByPk(detalle.membresia_id, { transaction })
+        : null;
+      const mensualidad = detalle.mensualidad_id
+        ? await PagosMensualidadesModel.findByPk(detalle.mensualidad_id, { transaction })
+        : null;
+      const pagoOriginal = detalle.pago_id
+        ? await PagosModel.findByPk(detalle.pago_id, { transaction })
+        : null;
+
+      if (!membresia || !mensualidad) {
+        agregarBloqueo(
+          "PLAN_INCOMPLETO",
+          "El cobro no conserva todos los registros del plan.",
+          detalle.nombre_snapshot || null,
+        );
+        continue;
+      }
+
+      if (Number(membresia.clases_usadas || 0) > 0) {
+        agregarBloqueo(
+          "MEMBRESIA_CON_USO",
+          "La membresía ya tiene clases consumidas.",
+          `Membresía #${membresia.id}: ${Number(membresia.clases_usadas || 0)} clases usadas.`,
+        );
+      }
+      const asistencias = await db.query(
+        "SELECT COUNT(*) AS cantidad FROM alumnos_asistencias WHERE membresia_id = :membresiaId",
+        {
+          replacements: { membresiaId: Number(membresia.id) },
+          type: QueryTypes.SELECT,
+          transaction,
+        },
+      );
+      if (Number(asistencias[0]?.cantidad || 0) > 0) {
+        agregarBloqueo(
+          "MEMBRESIA_CON_ASISTENCIAS",
+          "La membresía tiene asistencias registradas.",
+          `Membresía #${membresia.id}: ${Number(asistencias[0]?.cantidad || 0)} asistencias.`,
+        );
+      }
+
+      const pagosMensualidad = await PagosModel.findAll({
+        where: {
+          mensualidad_id: Number(mensualidad.id),
+          estado: { [Op.in]: ["confirmado", "pendiente_validacion"] },
+        },
+        transaction,
+      });
+      const pagosPosteriores = pagosMensualidad.filter(
+        (pago) => !idValido(detalle.pago_id) || Number(pago.id) !== Number(detalle.pago_id),
+      );
+      if (pagosPosteriores.length > 0) {
+        const cobrosPagadores = await db.query(
+          `SELECT
+             cd.cobro_id,
+             c.total AS total_cobro,
+             c.estado,
+             c.fecha_cobro,
+             SUM(cd.total) AS monto_aplicado
+           FROM cobros_detalles cd
+           INNER JOIN cobros_cobros c ON c.id = cd.cobro_id
+           WHERE cd.pago_id IN (:pagosIds)
+           GROUP BY cd.cobro_id, c.total, c.estado, c.fecha_cobro
+           ORDER BY cd.cobro_id ASC`,
+          {
+            replacements: { pagosIds: pagosPosteriores.map((pago) => Number(pago.id)) },
+            type: QueryTypes.SELECT,
+            transaction,
+          },
+        );
+        agregarBloqueo(
+          "PLAN_CON_PAGOS_POSTERIORES",
+          "La cuota del plan recibió pagos posteriores a este cobro.",
+          cobrosPagadores.length
+            ? `Para anular este plan, anulá primero ${cobrosPagadores.map((item) => `#${item.cobro_id}`).join(", ")}.`
+            : `Mensualidad #${mensualidad.id} tiene pagos adicionales.`,
+          {
+            dependencias: cobrosPagadores.map((item) => ({
+              cobro_id: Number(item.cobro_id),
+              total: Number(item.total_cobro || 0),
+              monto_aplicado: Number(item.monto_aplicado || 0),
+              estado: item.estado,
+              fecha_cobro: item.fecha_cobro,
+              motivo: `Pago posterior de la cuota #${mensualidad.id}`,
+            })),
+          },
+        );
+      }
+      if (!pagoOriginal && Number(mensualidad.monto_pagado || 0) > 0.009) {
+        agregarBloqueo(
+          "PLAN_PAGO_INCONSISTENTE",
+          "La mensualidad registra pagos que no pertenecen al cobro original.",
+          `Mensualidad #${mensualidad.id}: pagado ${Number(mensualidad.monto_pagado || 0).toFixed(2)}.`,
+        );
+      }
+
+      agregarImpacto({
+        tipo: "plan",
+        titulo: detalle.nombre_snapshot || "Plan",
+        detalle: `Se cancelará la membresía #${membresia.id} y se anulará la cuota #${mensualidad.id}.`,
+        monto: Number(mensualidad.saldo || 0),
+      });
+      if (String(membresia.observaciones || "").includes("NUEVO_CICLO_RENOVACION_EXPLICITA")) {
+        agregarImpacto({
+          tipo: "plan_restauracion",
+          titulo: "Ciclo anterior",
+          detalle: "Si corresponde por vigencia, se restaurará la membresía anterior que fue reemplazada por esta renovación.",
+        });
+      }
+    }
+  }
+
+  const tienePlan = (detalles || []).some((detalle) => detalle.tipo === "plan");
+  if ((pagosCobro || []).length === 0 && !deudaFiada && !tienePlan) {
+    agregarBloqueo(
+      "PAGOS_COBRO_INCONSISTENTES",
+      "El cobro no conserva pagos ni una deuda vinculada que permita reconstruir la anulación.",
+    );
+  }
+
+  agregarImpacto({
+    tipo: "cobro",
+    titulo: `Cobro #${cobro.id}`,
+    detalle: "La cabecera quedará marcada como anulada con usuario, fecha y motivo.",
+    monto: Number(cobro.total || 0),
+  });
+
+  return {
+    cobro: {
+      id: Number(cobro.id),
+      sede_id: Number(cobro.sede_id),
+      caja_sesion_id: Number(cobro.caja_sesion_id),
+      alumno_id: cobro.alumno_id ? Number(cobro.alumno_id) : null,
+      cliente_tipo: cobro.cliente_tipo,
+      cliente_nombre: clienteRow?.cliente_nombre || "Cobro sin cliente",
+      fecha_cobro: cobro.fecha_cobro,
+      total: Number(cobro.total || 0),
+      estado: cobro.estado,
+      total_pagado: totalPagado,
+      saldo_pendiente: redondear(Math.max(Number(cobro.total || 0) - totalPagado, 0)),
+    },
+    impactos,
+    bloqueos,
+    advertencias,
+    no_se_modifica: noSeModifica,
+    requiere_caja: movimientosCajaARevertir.length > 0,
+    caja_abierta: sesionAbierta
+      ? { id: Number(sesionAbierta.id), caja_id: Number(sesionAbierta.caja_id) }
+      : null,
+    total_reversion_caja: totalCaja,
+    total_reversion_finanzas:
+      movimientoOriginalFinanzas?.estado === "vigente" && !movimientoReversionExistente
+        ? totalPagado
+        : 0,
+    puede_anular: bloqueos.length === 0,
+  };
+};
+
+export const analizarAnulacionCobro = async ({ cobroId, sedeId }) => {
+  const transaction = await db.transaction();
+  try {
+    const cobro = await cargarCobroBloqueado({ cobroId, sedeId, transaction });
+    const [detalles, pagosCobro] = await Promise.all([
+      CobrosDetallesModel.findAll({
+        where: { cobro_id: Number(cobro.id) },
+        transaction,
+      }),
+      CobrosPagosModel.findAll({
+        where: { cobro_id: Number(cobro.id) },
+        transaction,
+      }),
+    ]);
+    const analisis = await construirAnalisisAnulacionCobro({
+      cobro,
+      detalles,
+      pagosCobro,
+      sedeId: Number(sedeId),
+      transaction,
+    });
+    await transaction.commit();
+    return analisis;
+  } catch (error) {
+    if (!transaction.finished) await transaction.rollback();
+    throw error;
+  }
 };
 
 // Benjamin Orellana - 2026/08/11 - Determina el estado de una mensualidad luego de imputar/revertir un pago.
@@ -2245,6 +3102,29 @@ export const confirmarCobroPendiente = async ({
       }
     }
 
+    const saldoPendienteCobro = redondear(
+      Math.max(Number(cobro.total || 0) - totalPagado, 0),
+    );
+    const distribucionPagoPendiente = distribuirPagoConceptos({
+      conceptos: detalles,
+      totalPagado,
+    });
+    if (
+      !esRevalidacionDeEdicion &&
+      saldoPendienteCobro > 0.009 &&
+      distribucionPagoPendiente.deudaNoPlan > 0.009 &&
+      idValido(cobro.alumno_id)
+    ) {
+      await crearDeudaFiadaCobro({
+        cobro,
+        conceptos: distribucionPagoPendiente.conceptosNoPlan,
+        totalPagado: distribucionPagoPendiente.pagadoNoPlan,
+        montoDeuda: distribucionPagoPendiente.deudaNoPlan,
+        usuarioId,
+        transaction,
+      });
+    }
+
     const pagoAlumno = detalles.length === 1 ? pagoPlan || pagoDeuda : null;
     const esCobroExclusivoDeAlumno = Boolean(pagoAlumno);
     const movimientoFinanciero = esRevalidacionDeEdicion
@@ -2591,11 +3471,36 @@ const validarYRevertirPlan = async ({
       })
     : null;
 
-  if (!membresia || !mensualidad || !pago) {
+  if (!membresia || !mensualidad) {
     throw new CobroOperacionError(
       "El cobro no conserva todos los registros del plan y no puede anularse automáticamente.",
       409,
       "PLAN_INCOMPLETO",
+    );
+  }
+  const pagosMensualidadVigentes = await PagosModel.findAll({
+    where: {
+      mensualidad_id: Number(mensualidad.id),
+      estado: { [Op.in]: ["confirmado", "pendiente_validacion"] },
+    },
+    transaction,
+    lock: transaction.LOCK.UPDATE,
+  });
+  const pagosPosteriores = pagosMensualidadVigentes.filter(
+    (item) => !idValido(detalle.pago_id) || Number(item.id) !== Number(detalle.pago_id),
+  );
+  if (pagosPosteriores.length > 0) {
+    throw new CobroOperacionError(
+      "La mensualidad del plan recibió pagos posteriores. Anulá o regularizá esos cobros antes de anular la venta original.",
+      409,
+      "PLAN_CON_PAGOS_POSTERIORES",
+    );
+  }
+  if (!pago && Number(mensualidad.monto_pagado || 0) > 0.009) {
+    throw new CobroOperacionError(
+      "La mensualidad registra pagos pero el cobro no conserva el pago asociado.",
+      409,
+      "PLAN_PAGO_INCONSISTENTE",
     );
   }
 
@@ -2647,14 +3552,16 @@ const validarYRevertirPlan = async ({
     },
     { transaction },
   );
-  await pago.update(
-    {
-      estado: "anulado",
-      observaciones: [pago.observaciones, nota].filter(Boolean).join(" | "),
-      updated_at: new Date(),
-    },
-    { transaction },
-  );
+  if (pago) {
+    await pago.update(
+      {
+        estado: "anulado",
+        observaciones: [pago.observaciones, nota].filter(Boolean).join(" | "),
+        updated_at: new Date(),
+      },
+      { transaction },
+    );
+  }
 
   const observacionesNueva = String(membresia.observaciones || "");
   if (observacionesNueva.includes("NUEVO_CICLO_RENOVACION_EXPLICITA")) {
@@ -2734,6 +3641,17 @@ const devolverStockCobro = async ({
     lock: transaction.LOCK.UPDATE,
   });
   if (!salidaOriginal) return;
+
+  const devolucionExistente = await ProductosStockMovimientosModel.findOne({
+    where: {
+      referencia_tipo: "cobro_anulacion",
+      referencia_id: Number(detalle.id),
+      tipo: "devolucion",
+    },
+    transaction,
+    lock: transaction.LOCK.UPDATE,
+  });
+  if (devolucionExistente) return;
 
   const stock = await ProductosStockSedesModel.findByPk(
     salidaOriginal.stock_sede_id,
@@ -3217,11 +4135,14 @@ export const editarCobroConfirmado = async ({
       );
     }
 
+    // Benjamin Orellana - 2026/08/18 - La sesión original conserva el
+    // contexto histórico del cobro, pero ya no debe permanecer abierta para
+    // permitir una corrección posterior. Si el turno cambió, la compensación
+    // se registra en la caja actualmente abierta de la misma sede.
     const sesionOriginal = await CajasSesionesModel.findOne({
       where: {
         id: Number(cobro.caja_sesion_id),
         sede_id: sedeId,
-        estado: "abierta",
       },
       transaction,
       lock: transaction.LOCK.UPDATE,
@@ -3229,11 +4150,39 @@ export const editarCobroConfirmado = async ({
 
     if (!sesionOriginal) {
       throw new CobroOperacionError(
-        "La caja original del cobro debe permanecer abierta para editarlo.",
+        "No se encontró la caja original asociada al cobro.",
         409,
-        "CAJA_ORIGINAL_CERRADA",
+        "CAJA_ORIGINAL_NO_ENCONTRADA",
       );
     }
+
+    const sesionOriginalAbierta = sesionOriginal.estado === "abierta";
+    const cajaSesionOperacionId = Number(payload?.caja_sesion_id || 0);
+    const sesionOperacion = sesionOriginalAbierta
+      ? sesionOriginal
+      : await CajasSesionesModel.findOne({
+          where: {
+            ...(idValido(cajaSesionOperacionId)
+              ? { id: cajaSesionOperacionId }
+              : {}),
+            sede_id: sedeId,
+            estado: "abierta",
+          },
+          order: [["fecha_apertura", "DESC"], ["id", "DESC"]],
+          transaction,
+          lock: transaction.LOCK.UPDATE,
+        });
+
+    if (!sesionOperacion) {
+      throw new CobroOperacionError(
+        "Debe existir una caja abierta en la sede para registrar la edición del cobro.",
+        409,
+        "CAJA_CERRADA",
+      );
+    }
+
+    const edicionEntreTurnos =
+      Number(sesionOperacion.id) !== Number(sesionOriginal.id);
 
     const detallesAnteriores = await CobrosDetallesModel.findAll({
       where: { cobro_id: Number(cobro.id) },
@@ -3443,11 +4392,45 @@ export const editarCobroConfirmado = async ({
           .filter(Boolean)
           .join(" | ")
           .slice(0, 500);
-        await movimiento.update(
+
+        if (!edicionEntreTurnos) {
+          // Mismo turno: el movimiento todavía pertenece a una caja abierta,
+          // por lo que puede reemplazarse dentro de la misma sesión.
+          await movimiento.update(
+            {
+              estado: "anulado",
+              observaciones: observacionesMovimiento,
+              updated_at: new Date(),
+            },
+            { transaction },
+          );
+          continue;
+        }
+
+        // Cambio de turno: NO se reescribe la caja ya cerrada. El movimiento
+        // original permanece como evidencia histórica y se crea un egreso
+        // compensatorio en la caja actualmente abierta.
+        await CajasMovimientosModel.create(
           {
-            estado: "anulado",
-            observaciones: observacionesMovimiento,
-            updated_at: new Date(),
+            caja_sesion_id: Number(sesionOperacion.id),
+            caja_id: Number(sesionOperacion.caja_id),
+            sede_id: sedeId,
+            cobro_pago_id: Number(pagoAnterior.id),
+            medio_pago_id: Number(movimiento.medio_pago_id),
+            usuario_registro_id: usuarioId,
+            tipo: "egreso",
+            origen: "reversion",
+            fecha_movimiento: new Date(),
+            monto: Number(movimiento.monto).toFixed(2),
+            descripcion: `Corrección de cobro #${cobro.id} · reversión de turno anterior`,
+            estado: "vigente",
+            referencia: `EDICION-COBRO-${cobro.id}`,
+            observaciones: [
+              `[EDICIÓN ENTRE TURNOS] Reversa movimiento #${movimiento.id} de la sesión #${sesionOriginal.id}.`,
+              `Motivo: ${motivoLimpio}`,
+            ]
+              .join(" | ")
+              .slice(0, 500),
           },
           { transaction },
         );
@@ -3573,8 +4556,8 @@ export const editarCobroConfirmado = async ({
       if (!pagoResuelto.impacta_caja) continue;
       await CajasMovimientosModel.create(
         {
-          caja_sesion_id: Number(sesionOriginal.id),
-          caja_id: Number(sesionOriginal.caja_id),
+          caja_sesion_id: Number(sesionOperacion.id),
+          caja_id: Number(sesionOperacion.caja_id),
           sede_id: sedeId,
           cobro_pago_id: Number(pagosCreados[indice].id),
           medio_pago_id: Number(pagoResuelto.medio_pago_id),
@@ -3744,6 +4727,9 @@ export const editarCobroConfirmado = async ({
             referencia: item.referencia,
           })),
           motivo: motivoLimpio,
+          caja_sesion_original_id: Number(sesionOriginal.id),
+          caja_sesion_operacion_id: Number(sesionOperacion.id),
+          edicion_entre_turnos: edicionEntreTurnos,
         },
         ip,
         user_agent: userAgent,
@@ -3787,32 +4773,26 @@ export const anularCobroConfirmado = async ({
     const cobro = await cargarCobroBloqueado({ cobroId, sedeId, transaction });
     if (cobro.estado === "anulado") {
       await transaction.commit();
-      return { cobro, repetido: true };
-    }
-    if (cobro.estado !== "confirmado") {
-      throw new CobroOperacionError(
-        "Solo pueden anularse cobros confirmados.",
-        409,
-        "ESTADO_COBRO_INVALIDO",
-      );
-    }
-
-    const sesion = await CajasSesionesModel.findOne({
-      where: {
-        ...(idValido(cajaSesionId) ? { id: Number(cajaSesionId) } : {}),
-        sede_id: Number(sedeId),
-        estado: "abierta",
-      },
-      order: [["fecha_apertura", "DESC"], ["id", "DESC"]],
-      transaction,
-      lock: transaction.LOCK.UPDATE,
-    });
-    if (!sesion) {
-      throw new CobroOperacionError(
-        "Debe existir una caja abierta para registrar la reversión.",
-        409,
-        "CAJA_CERRADA",
-      );
+      return {
+        cobro,
+        repetido: true,
+        resumen_anulacion: {
+          aplicado: true,
+          repetido: true,
+          cobro: {
+            id: Number(cobro.id),
+            total: Number(cobro.total || 0),
+            estado: cobro.estado,
+          },
+          impactos: [],
+          advertencias: [
+            {
+              titulo: "El cobro ya estaba anulado.",
+              detalle: cobro.motivo_anulacion || null,
+            },
+          ],
+        },
+      };
     }
 
     const detalles = await CobrosDetallesModel.findAll({
@@ -3825,12 +4805,76 @@ export const anularCobroConfirmado = async ({
       transaction,
       lock: transaction.LOCK.UPDATE,
     });
+
+    const analisis = await construirAnalisisAnulacionCobro({
+      cobro,
+      detalles,
+      pagosCobro,
+      sedeId: Number(sedeId),
+      transaction,
+    });
+    if (!analisis.puede_anular) {
+      const bloqueo = analisis.bloqueos[0];
+      throw new CobroOperacionError(
+        bloqueo?.detalle
+          ? `${bloqueo.titulo} ${bloqueo.detalle}`
+          : bloqueo?.titulo || "El cobro no puede anularse automáticamente.",
+        409,
+        bloqueo?.code || "ANULACION_BLOQUEADA",
+      );
+    }
+
+    let sesion = null;
+    if (analisis.requiere_caja) {
+      if (idValido(cajaSesionId)) {
+        sesion = await CajasSesionesModel.findOne({
+          where: {
+            id: Number(cajaSesionId),
+            sede_id: Number(sedeId),
+            estado: "abierta",
+          },
+          transaction,
+          lock: transaction.LOCK.UPDATE,
+        });
+      }
+      if (!sesion) {
+        sesion = await CajasSesionesModel.findOne({
+          where: { sede_id: Number(sedeId), estado: "abierta" },
+          order: [["fecha_apertura", "DESC"], ["id", "DESC"]],
+          transaction,
+          lock: transaction.LOCK.UPDATE,
+        });
+      }
+      if (!sesion) {
+        throw new CobroOperacionError(
+          "Debe existir una caja abierta para registrar la reversión.",
+          409,
+          "CAJA_CERRADA",
+        );
+      }
+    }
+
     const medioSaldo = await PagosMediosPagoModel.findOne({
       where: { codigo: CODIGO_SALDO_FAVOR },
       transaction,
     });
+    const deudaFiada = idValido(cobro.alumno_id)
+      ? await obtenerDeudaFiadaCobro({
+          cobroId: cobro.id,
+          alumnoId: cobro.alumno_id,
+          sedeId,
+          transaction,
+          bloquear: true,
+        })
+      : null;
+
+    // Benjamin Orellana - 2026/08/19 - Un plan 100% fiado puede no tener
+    // cobros_pagos ni deuda administrativa: su deuda vive en la mensualidad.
+    const tienePlanVinculado = detalles.some(
+      (detalle) => detalle.tipo === "plan" && idValido(detalle.mensualidad_id),
+    );
     if (
-      pagosCobro.length === 0 ||
+      (pagosCobro.length === 0 && !deudaFiada && !tienePlanVinculado) ||
       pagosCobro.some(
         (pago) => !["confirmado", "anulado"].includes(String(pago.estado)),
       )
@@ -3841,8 +4885,23 @@ export const anularCobroConfirmado = async ({
         "PAGOS_COBRO_INCONSISTENTES",
       );
     }
+
+    if (deudaFiada) {
+      await revertirDeudaFiadaCobro({
+        cobro,
+        motivo: motivoLimpio,
+        usuarioId,
+        transaction,
+      });
+    }
+
+    // Solo se revierte dinero que todavía está confirmado. Los pagos históricos
+    // anulados por una edición previa no forman parte del importe vigente.
+    const pagosConfirmados = pagosCobro.filter(
+      (pagoCobro) => String(pagoCobro.estado) === "confirmado",
+    );
     const totalPagadoCobro = redondear(
-      pagosCobro.reduce(
+      pagosConfirmados.reduce(
         (acumulado, pagoCobro) =>
           acumulado + Number(pagoCobro.monto || 0),
         0,
@@ -3873,8 +4932,7 @@ export const anularCobroConfirmado = async ({
 
     // Una anulación iniciada desde Pagos podía haber marcado previamente como
     // anulado el movimiento financiero original sin actualizar cobros_cobros.
-    // En ese caso NO generamos un segundo egreso: solo completamos la reversión
-    // faltante de membresía/caja/cobro.
+    // En ese caso no generamos un segundo egreso.
     const movimientoOriginalFinanzas = cobro.finanzas_movimiento_id
       ? await FinanzasMovimientosModel.findByPk(cobro.finanzas_movimiento_id, {
           transaction,
@@ -3895,7 +4953,11 @@ export const anularCobroConfirmado = async ({
       lock: transaction.LOCK.UPDATE,
     });
 
-    if (!movimientoReversion && movimientoOriginalFinanzas?.estado === "vigente") {
+    if (
+      !movimientoReversion &&
+      movimientoOriginalFinanzas?.estado === "vigente" &&
+      totalPagadoCobro > 0.009
+    ) {
       movimientoReversion = await FinanzasMovimientosModel.create(
         {
           sede_id: Number(sedeId),
@@ -3934,8 +4996,10 @@ export const anularCobroConfirmado = async ({
           where: {
             cobro_pago_id: Number(pagoCobro.id),
             origen: "cobro",
+            estado: "vigente",
           },
           transaction,
+          lock: transaction.LOCK.UPDATE,
         });
         if (!movimientoOriginal) {
           await pagoCobro.update(
@@ -3955,6 +5019,13 @@ export const anularCobroConfirmado = async ({
           lock: transaction.LOCK.UPDATE,
         });
         if (!reversionCajaExistente) {
+          if (!sesion) {
+            throw new CobroOperacionError(
+              "Debe existir una caja abierta para registrar la reversión.",
+              409,
+              "CAJA_CERRADA",
+            );
+          }
           await CajasMovimientosModel.create(
             {
               caja_sesion_id: Number(sesion.id),
@@ -4000,15 +5071,59 @@ export const anularCobroConfirmado = async ({
       { transaction },
     );
 
+    const fechaAnulacion = new Date();
+    await SistemaAuditoriaLogsModel.create(
+      {
+        usuario_id: usuarioId,
+        sede_id: Number(sedeId),
+        modulo: "COBROS",
+        accion: "ANULAR_COBRO_CENTRALIZADO",
+        entidad: "cobros_cobros",
+        entidad_id: Number(cobro.id),
+        descripcion: `Cobro #${cobro.id} anulado de forma centralizada. Motivo: ${motivoLimpio}`,
+        valores_anteriores: {
+          estado: "confirmado",
+          total: Number(cobro.total || 0),
+          pagos_confirmados: totalPagadoCobro,
+          caja_sesion_original_id: Number(cobro.caja_sesion_id),
+          finanzas_movimiento_id: cobro.finanzas_movimiento_id || null,
+        },
+        valores_nuevos: {
+          estado: "anulado",
+          motivo: motivoLimpio,
+          caja_sesion_reversion_id: sesion ? Number(sesion.id) : null,
+          finanzas_reversion_id: movimientoReversion
+            ? Number(movimientoReversion.id)
+            : null,
+          impactos: analisis.impactos,
+        },
+        ip: null,
+        user_agent: null,
+      },
+      { transaction },
+    );
+
     await transaction.commit();
     return {
       cobro: await CobrosModel.findByPk(cobro.id, {
         include: incluirCobroCompleto,
       }),
       repetido: false,
+      resumen_anulacion: {
+        ...analisis,
+        aplicado: true,
+        motivo: motivoLimpio,
+        usuario_id: usuarioId,
+        fecha_anulacion: fechaAnulacion,
+        caja_reversion_id: sesion ? Number(sesion.id) : null,
+        finanzas_reversion_id: movimientoReversion
+          ? Number(movimientoReversion.id)
+          : null,
+      },
     };
   } catch (error) {
     if (!transaction.finished) await transaction.rollback();
     throw error;
   }
 };
+

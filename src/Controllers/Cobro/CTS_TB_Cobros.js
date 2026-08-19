@@ -14,6 +14,7 @@ import {
   validarFechaConsultaOperativa
 } from '../../Security/operationalDayScope.js';
 import {
+  analizarAnulacionCobro,
   anularCobroConfirmado,
   corregirMedioPagoCobroConfirmado,
   editarCobroConfirmado,
@@ -192,6 +193,7 @@ export const OBR_DeudasAlumnoCobro_CTS = async (req, res) => {
          pm.monto_total,
          pm.monto_pagado,
          pm.saldo,
+         pm.observaciones,
          COALESCE((
            SELECT SUM(ppv.monto)
            FROM pagos_pagos ppv
@@ -420,6 +422,160 @@ export const OBR_Cobros_CTS = async (req, res) => {
       ok: false,
       message: 'Error al consultar el historial de cobros.'
     });
+  }
+};
+
+
+// Benjamin Orellana - 2026/08/19 - Buscador dedicado para la anulación
+// centralizada. Pagina sobre TODO el histórico confirmado de la sede habilitada;
+// la búsqueda no queda limitada a los primeros resultados ni al día actual.
+export const OBR_CobrosAnulacionCandidatos_CTS = async (req, res) => {
+  try {
+    const sedeId = Number(req.query.sede_id);
+    if (!Number.isInteger(sedeId) || sedeId <= 0) {
+      return res.status(400).json({ ok: false, message: 'Debe indicar una sede válida.' });
+    }
+
+    const qTexto = String(req.query.q || '')
+      .trim()
+      .replace(/^#\s*/, '')
+      .slice(0, 120);
+    const pageSolicitada = Math.max(Number.parseInt(req.query.page, 10) || 1, 1);
+    // El page_size limita solamente cuánto se transporta por página; no limita
+    // el universo de cobros que puede recorrerse/buscarse.
+    const pageSize = Math.min(
+      Math.max(Number.parseInt(req.query.page_size, 10) || 20, 5),
+      100
+    );
+    const q = `%${qTexto}%`;
+
+    const baseWhere = `
+      FROM cobros_cobros c
+      LEFT JOIN alumnos_alumnos a ON a.id = c.alumno_id
+      LEFT JOIN usuarios_usuarios uc ON uc.id = c.cliente_usuario_id
+      WHERE c.sede_id = :sedeId
+        AND c.estado = 'confirmado'
+        AND (
+          :q = '%%'
+          OR CAST(c.id AS CHAR) LIKE :q
+          OR CONCAT_WS(' ', a.nombre, a.apellido) LIKE :q
+          OR CONCAT_WS(' ', uc.nombre, uc.apellido) LIKE :q
+          OR EXISTS (
+            SELECT 1
+            FROM cobros_detalles cd_busqueda
+            WHERE cd_busqueda.cobro_id = c.id
+              AND cd_busqueda.nombre_snapshot LIKE :q
+          )
+        )`;
+
+    const countRows = await db.query(
+      `SELECT COUNT(*) AS total ${baseWhere}`,
+      {
+        replacements: { sedeId, q },
+        type: QueryTypes.SELECT
+      }
+    );
+
+    const total = Number(countRows?.[0]?.total || 0);
+    const totalPages = Math.max(Math.ceil(total / pageSize), 1);
+    const page = Math.min(pageSolicitada, totalPages);
+    const offset = (page - 1) * pageSize;
+
+    const rows = await db.query(
+      `SELECT
+         c.id,
+         c.fecha_cobro,
+         c.cliente_tipo,
+         c.alumno_id,
+         c.cliente_usuario_id,
+         c.total,
+         c.estado,
+         c.caja_sesion_id,
+         CASE
+           WHEN c.cliente_tipo = 'alumno' THEN CONCAT_WS(' ', a.nombre, a.apellido)
+           WHEN c.cliente_tipo = 'empleado' THEN CONCAT_WS(' ', uc.nombre, uc.apellido)
+           ELSE 'Cobro sin cliente'
+         END AS cliente_nombre,
+         GROUP_CONCAT(DISTINCT cd.nombre_snapshot ORDER BY cd.id SEPARATOR ' · ') AS conceptos,
+         GROUP_CONCAT(DISTINCT mp.nombre ORDER BY mp.nombre SEPARATOR ', ') AS medios_pago,
+         COALESCE((
+           SELECT SUM(cp2.monto)
+           FROM cobros_pagos cp2
+           WHERE cp2.cobro_id = c.id
+             AND cp2.estado = 'confirmado'
+         ), 0) AS total_pagado
+       FROM cobros_cobros c
+       LEFT JOIN alumnos_alumnos a ON a.id = c.alumno_id
+       LEFT JOIN usuarios_usuarios uc ON uc.id = c.cliente_usuario_id
+       LEFT JOIN cobros_detalles cd ON cd.cobro_id = c.id
+       LEFT JOIN cobros_pagos cp ON cp.cobro_id = c.id AND cp.estado = 'confirmado'
+       LEFT JOIN pagos_medios_pago mp ON mp.id = cp.medio_pago_id
+       WHERE c.sede_id = :sedeId
+         AND c.estado = 'confirmado'
+         AND (
+           :q = '%%'
+           OR CAST(c.id AS CHAR) LIKE :q
+           OR CONCAT_WS(' ', a.nombre, a.apellido) LIKE :q
+           OR CONCAT_WS(' ', uc.nombre, uc.apellido) LIKE :q
+           OR EXISTS (
+             SELECT 1
+             FROM cobros_detalles cd_busqueda
+             WHERE cd_busqueda.cobro_id = c.id
+               AND cd_busqueda.nombre_snapshot LIKE :q
+           )
+         )
+       GROUP BY c.id
+       ORDER BY c.fecha_cobro DESC, c.id DESC
+       LIMIT :pageSize OFFSET :offset`,
+      {
+        replacements: { sedeId, q, pageSize, offset },
+        type: QueryTypes.SELECT
+      }
+    );
+
+    const items = rows.map((row) => ({
+      ...row,
+      id: Number(row.id),
+      total: Number(row.total || 0),
+      total_pagado: Number(row.total_pagado || 0),
+      saldo_pendiente: Math.max(
+        Number(row.total || 0) - Number(row.total_pagado || 0),
+        0
+      )
+    }));
+
+    return res.status(200).json({
+      ok: true,
+      data: {
+        items,
+        pagination: {
+          page,
+          page_size: pageSize,
+          total,
+          total_pages: totalPages,
+          has_previous: page > 1,
+          has_next: page < totalPages
+        }
+      }
+    });
+  } catch (error) {
+    console.error('Error OBR_CobrosAnulacionCandidatos_CTS:', error);
+    return res.status(500).json({
+      ok: false,
+      message: 'Error al buscar cobros para anular.'
+    });
+  }
+};
+
+export const OBR_CobroAnulacionPreview_CTS = async (req, res) => {
+  try {
+    const resultado = await analizarAnulacionCobro({
+      cobroId: req.params.id,
+      sedeId: req.query.sede_id
+    });
+    return res.status(200).json({ ok: true, data: resultado });
+  } catch (error) {
+    return manejarErrorCobro(error, res, 'OBR_CobroAnulacionPreview_CTS');
   }
 };
 
@@ -669,7 +825,8 @@ export const UR_AnularCobro_CTS = async (req, res) => {
       message: resultado.repetido
         ? 'El cobro ya estaba anulado.'
         : 'Cobro anulado y operaciones revertidas correctamente.',
-      data: resultado.cobro
+      data: resultado.cobro,
+      resumen_anulacion: resultado.resumen_anulacion || null
     });
   } catch (error) {
     return manejarErrorCobro(error, res, 'UR_AnularCobro_CTS');

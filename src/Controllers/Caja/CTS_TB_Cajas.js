@@ -226,6 +226,7 @@ const listarMovimientosSesion = async (sesionId, transaction = null) =>
        mp.tipo AS medio_pago_tipo,
        CONCAT_WS(' ', ur.nombre, ur.apellido) AS usuario_nombre,
        c.id AS cobro_id,
+       c.estado AS cobro_estado,
        c.cliente_tipo,
        c.total AS cobro_total,
        COALESCE(cd.total_planes, 0) AS total_planes,
@@ -284,8 +285,16 @@ const calcularResumen = ({ sesion, movimientos }) => {
     if (item.tipo === 'ingreso') ingresos += monto;
     else egresos += monto;
 
-    if (item.origen === 'cobro' && item.tipo === 'ingreso') cobros += monto;
-    else resto += signo * monto;
+    if (item.origen === 'cobro' && item.tipo === 'ingreso') {
+      // Benjamin Orellana - 2026/08/19 - Una venta anulada conserva su
+      // movimiento original por auditoría, pero deja de contar como venta
+      // vigente. La compensación continúa formando parte del flujo de caja.
+      if (String(item.cobro_estado || '').toLowerCase() !== 'anulado') {
+        cobros += monto;
+      }
+    } else {
+      resto += signo * monto;
+    }
 
     const codigo = String(item.medio_pago_codigo || 'SIN_MEDIO').toUpperCase();
     const nombre = item.medio_pago_nombre || 'Sin medio';

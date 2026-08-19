@@ -20,6 +20,8 @@ import {
   CR_Cobros_CTS,
   OBR_CobroDetalle_CTS,
   OBR_CobrosPendientesCount_CTS,
+  OBR_CobrosAnulacionCandidatos_CTS,
+  OBR_CobroAnulacionPreview_CTS,
   OBR_Cobros_CTS,
   OBR_DeudasAlumnoCobro_CTS,
   OBR_MediosPagoCobro_CTS,
@@ -96,6 +98,20 @@ router.get(
   ...seguridadSede,
   requirePermission('cobros.validar'),
   OBR_CobrosPendientesCount_CTS
+);
+
+router.get(
+  '/cobros/anulacion/candidatos',
+  ...seguridadSede,
+  requirePermission('cobros.anular'),
+  OBR_CobrosAnulacionCandidatos_CTS
+);
+
+router.get(
+  '/cobros/:id/anulacion-preview',
+  ...seguridadSede,
+  requirePermission('cobros.anular'),
+  OBR_CobroAnulacionPreview_CTS
 );
 
 router.get(
@@ -176,7 +192,6 @@ router.patch(
   '/cobros/:id/anular',
   ...seguridadSede,
   requirePermission('cobros.anular'),
-  requireCobroDelDiaActual,
   UR_AnularCobro_CTS
 );
 

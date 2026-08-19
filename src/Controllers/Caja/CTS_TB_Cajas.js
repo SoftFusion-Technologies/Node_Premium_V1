@@ -268,6 +268,98 @@ const listarMovimientosSesion = async (sesionId, transaction = null) =>
     }
   );
 
+// Benjamin Orellana - 2026/08/19 - Las tarjetas de Cuotas/Productos deben
+// representar ventas confirmadas, no solamente dinero ingresado. Un cobro 100%
+// fiado no genera cajas_movimientos, pero sigue siendo una venta real y debe
+// visualizarse sin alterar efectivo esperado, cierre ni conciliación de Caja.
+const listarVentasSesion = async (sesionId, transaction = null) =>
+  db.query(
+    `SELECT
+       c.id AS cobro_id,
+       c.caja_sesion_id,
+       c.sede_id,
+       c.cobrador_usuario_id,
+       c.usuario_registro_id,
+       c.fecha_cobro,
+       c.total AS cobro_total,
+       c.estado AS cobro_estado,
+       c.observaciones AS cobro_observaciones,
+       COALESCE(cd.total_planes, 0) AS total_planes,
+       COALESCE(cd.total_productos, 0) AS total_productos,
+       COALESCE(cd.total_servicios, 0) AS total_servicios,
+       cd.conceptos_planes_nombres,
+       cd.conceptos_productos_nombres,
+       cd.conceptos_servicios_nombres,
+       cd.conceptos_nombres,
+       COALESCE(pg.total_pagado, 0) AS total_pagado,
+       pg.medios_pago,
+       COALESCE(
+         NULLIF(CONCAT_WS(' ', aa.nombre, aa.apellido), ''),
+         NULLIF(CONCAT_WS(' ', uc.nombre, uc.apellido), ''),
+         'Sin cliente'
+       ) AS cliente_nombre,
+       COALESCE(
+         NULLIF(CONCAT_WS(' ', cobrador.nombre, cobrador.apellido), ''),
+         NULLIF(CONCAT_WS(' ', ur.nombre, ur.apellido), ''),
+         'Sin usuario'
+       ) AS usuario_nombre
+     FROM cobros_cobros c
+     LEFT JOIN (
+       SELECT
+         cobro_id,
+         SUM(CASE WHEN tipo = 'plan' THEN total ELSE 0 END) AS total_planes,
+         SUM(CASE WHEN tipo = 'producto' THEN total ELSE 0 END) AS total_productos,
+         SUM(CASE WHEN tipo = 'servicio' THEN total ELSE 0 END) AS total_servicios,
+         GROUP_CONCAT(
+           DISTINCT CASE WHEN tipo = 'plan' THEN nombre_snapshot END
+           ORDER BY nombre_snapshot SEPARATOR ' · '
+         ) AS conceptos_planes_nombres,
+         GROUP_CONCAT(
+           DISTINCT CASE WHEN tipo = 'producto' THEN nombre_snapshot END
+           ORDER BY nombre_snapshot SEPARATOR ' · '
+         ) AS conceptos_productos_nombres,
+         GROUP_CONCAT(
+           DISTINCT CASE WHEN tipo = 'servicio' THEN nombre_snapshot END
+           ORDER BY nombre_snapshot SEPARATOR ' · '
+         ) AS conceptos_servicios_nombres,
+         GROUP_CONCAT(
+           DISTINCT nombre_snapshot
+           ORDER BY nombre_snapshot SEPARATOR ' · '
+         ) AS conceptos_nombres
+       FROM cobros_detalles
+       GROUP BY cobro_id
+     ) cd ON cd.cobro_id = c.id
+     LEFT JOIN (
+       SELECT
+         cp.cobro_id,
+         SUM(CASE WHEN cp.estado = 'confirmado' THEN cp.monto ELSE 0 END) AS total_pagado,
+         GROUP_CONCAT(
+           DISTINCT CASE WHEN cp.estado = 'confirmado' THEN mp.nombre END
+           ORDER BY mp.nombre SEPARATOR ', '
+         ) AS medios_pago
+       FROM cobros_pagos cp
+       LEFT JOIN pagos_medios_pago mp ON mp.id = cp.medio_pago_id
+       GROUP BY cp.cobro_id
+     ) pg ON pg.cobro_id = c.id
+     LEFT JOIN alumnos_alumnos aa ON aa.id = c.alumno_id
+     LEFT JOIN usuarios_usuarios uc ON uc.id = c.cliente_usuario_id
+     LEFT JOIN usuarios_usuarios cobrador ON cobrador.id = c.cobrador_usuario_id
+     LEFT JOIN usuarios_usuarios ur ON ur.id = c.usuario_registro_id
+     WHERE c.caja_sesion_id = :sesion_id
+       AND c.estado = 'confirmado'
+       AND (
+         COALESCE(cd.total_planes, 0) > 0
+         OR COALESCE(cd.total_productos, 0) > 0
+         OR COALESCE(cd.total_servicios, 0) > 0
+       )
+     ORDER BY c.fecha_cobro DESC, c.id DESC`,
+    {
+      replacements: { sesion_id: Number(sesionId) },
+      type: QueryTypes.SELECT,
+      transaction
+    }
+  );
+
 const calcularResumen = ({ sesion, movimientos }) => {
   const montoInicial = redondear(sesion?.monto_inicial);
   const vigentes = movimientos.filter((item) => item.estado === 'vigente');
@@ -389,6 +481,7 @@ const cargarResumenSesion = async (sesion, transaction = null) => {
   if (!sesion) return null;
   const plano = typeof sesion.toJSON === 'function' ? sesion.toJSON() : sesion;
   const movimientos = await listarMovimientosSesion(plano.id, transaction);
+  const ventas = await listarVentasSesion(plano.id, transaction);
   const caja = await CajasModel.findByPk(plano.caja_id, { transaction });
 
   return {
@@ -401,7 +494,8 @@ const cargarResumenSesion = async (sesion, transaction = null) => {
         : null
     },
     resumen: calcularResumen({ sesion: plano, movimientos }),
-    movimientos
+    movimientos,
+    ventas
   };
 };
 

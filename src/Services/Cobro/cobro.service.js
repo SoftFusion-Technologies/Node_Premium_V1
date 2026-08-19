@@ -79,6 +79,22 @@ const fechaArgentina = () => {
   return `${valores.year}-${valores.month}-${valores.day}`;
 };
 
+const horaArgentina = () => {
+  const partes = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "America/Argentina/Buenos_Aires",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).formatToParts(new Date());
+  const valores = Object.fromEntries(
+    partes
+      .filter((item) => item.type !== "literal")
+      .map((item) => [item.type, item.value]),
+  );
+  return `${valores.hour}:${valores.minute}:${valores.second}`;
+};
+
 const sumarDias = (fechaDateOnly, dias) => {
   const fecha = new Date(`${fechaDateOnly}T00:00:00Z`);
   fecha.setUTCDate(fecha.getUTCDate() + Number(dias));
@@ -127,6 +143,133 @@ const validarSinReservasFuturasParaCambioPlan = async ({
       "RESERVAS_FUTURAS_PENDIENTES",
     );
   }
+};
+
+// Benjamin Orellana - 2026/08/19 - MIGRACION_RESERVAS_CAMBIO_PLAN_AUTOMATICA
+// Un cambio de plan no debe obligar a cancelar/reprogramar reservas futuras.
+// Las reservas realmente futuras del ciclo reemplazado se conservan dentro de
+// la misma transacción. Si el nuevo plan tiene crédito, se reasignan y consumen
+// un crédito nuevo; si no alcanza, la reserva permanece ocupando el turno como
+// pendiente_credito para que pueda regularizarse después sin perder el lugar.
+const migrarReservasFuturasCambioPlan = async ({
+  membresiaAnterior,
+  membresiaNueva,
+  cobroId,
+  transaction,
+}) => {
+  if (!membresiaAnterior || !membresiaNueva) {
+    return { migradas: 0, pendientes: 0 };
+  }
+
+  const hoy = fechaArgentina();
+  const ahora = horaArgentina();
+  const reservas = await db.query(
+    `SELECT r.id, r.estado_credito, r.tipo_reserva,
+            t.fecha, t.hora_inicio
+       FROM agenda_turnos_reservas r
+       INNER JOIN agenda_turnos t ON t.id = r.turno_id
+      WHERE r.alumno_id = :alumnoId
+        AND r.membresia_id = :membresiaAnteriorId
+        AND r.estado = 'reservada'
+        AND t.estado NOT IN ('cancelado', 'bloqueado')
+        AND (
+          t.fecha > :hoy
+          OR (t.fecha = :hoy AND t.hora_inicio > :ahora)
+        )
+      ORDER BY t.fecha ASC, t.hora_inicio ASC, r.id ASC`,
+    {
+      replacements: {
+        alumnoId: Number(membresiaNueva.alumno_id),
+        membresiaAnteriorId: Number(membresiaAnterior.id),
+        hoy,
+        ahora,
+      },
+      type: QueryTypes.SELECT,
+      transaction,
+    },
+  );
+
+  if (reservas.length === 0) {
+    return { migradas: 0, pendientes: 0 };
+  }
+
+  let disponibles = Math.max(Number(membresiaNueva.clases_disponibles || 0), 0);
+  let usadasNuevas = Math.max(Number(membresiaNueva.clases_usadas || 0), 0);
+  let creditosRetiradosAnterior = 0;
+  let migradas = 0;
+  let pendientes = 0;
+
+  for (const reserva of reservas) {
+    const consumiaCreditoAnterior = String(reserva.estado_credito || '') === 'consumido';
+    if (consumiaCreditoAnterior) creditosRetiradosAnterior += 1;
+
+    const marca = `Reasignada automáticamente por cambio de plan del cobro #${cobroId} desde membresía #${membresiaAnterior.id} a #${membresiaNueva.id}`;
+
+    if (disponibles > 0) {
+      await db.query(
+        `UPDATE agenda_turnos_reservas
+            SET membresia_id = :membresiaNuevaId,
+                tipo_reserva = 'normal',
+                estado_credito = 'consumido',
+                observaciones = CONCAT_WS(' | ', NULLIF(TRIM(COALESCE(observaciones, '')), ''), :marca),
+                updated_at = NOW()
+          WHERE id = :reservaId`,
+        {
+          replacements: {
+            membresiaNuevaId: Number(membresiaNueva.id),
+            reservaId: Number(reserva.id),
+            marca,
+          },
+          transaction,
+        },
+      );
+      disponibles -= 1;
+      usadasNuevas += 1;
+      migradas += 1;
+    } else {
+      await db.query(
+        `UPDATE agenda_turnos_reservas
+            SET membresia_id = NULL,
+                tipo_reserva = 'pendiente_credito',
+                estado_credito = 'pendiente',
+                observaciones = CONCAT_WS(' | ', NULLIF(TRIM(COALESCE(observaciones, '')), ''), :marca),
+                updated_at = NOW()
+          WHERE id = :reservaId`,
+        {
+          replacements: {
+            reservaId: Number(reserva.id),
+            marca: `${marca} | Sin crédito disponible en el nuevo plan: queda pendiente de imputación`,
+          },
+          transaction,
+        },
+      );
+      pendientes += 1;
+    }
+  }
+
+  await membresiaNueva.update(
+    {
+      clases_usadas: usadasNuevas,
+      clases_disponibles: disponibles,
+      updated_at: new Date(),
+    },
+    { transaction },
+  );
+
+  if (creditosRetiradosAnterior > 0) {
+    await membresiaAnterior.update(
+      {
+        clases_usadas: Math.max(
+          0,
+          Number(membresiaAnterior.clases_usadas || 0) - creditosRetiradosAnterior,
+        ),
+        updated_at: new Date(),
+      },
+      { transaction },
+    );
+  }
+
+  return { migradas, pendientes };
 };
 
 const consultaCatalogo = async ({
@@ -993,12 +1136,8 @@ const crearMembresiaPlan = async ({
   const iniciarCicloAhora =
     renovacionExplicita || renovarAhoraPorCuposAgotados || cambiarPlanAhora;
 
-  if (cambiarPlanAhora) {
-    await validarSinReservasFuturasParaCambioPlan({
-      alumnoId: alumno.id,
-      transaction,
-    });
-  }
+  // Las reservas futuras ya no bloquean el cambio de plan: se conservan y
+  // reasignan automáticamente dentro de esta misma transacción.
 
   const renovacionFuturaExistente = await AlumnosMembresiasModel.findOne({
     where: {
@@ -1120,6 +1259,14 @@ const crearMembresiaPlan = async ({
   );
 
   if (confirmado) {
+    if (cambiarPlanAhora && membresiaVigente) {
+      await migrarReservasFuturasCambioPlan({
+        membresiaAnterior: membresiaVigente,
+        membresiaNueva: membresia,
+        cobroId,
+        transaction,
+      });
+    }
     await imputarReservasPendientesMembresia({ membresia, transaction });
   }
 
@@ -2798,12 +2945,8 @@ const aplicarPlanPendiente = async ({ detalle, usuarioId, transaction }) => {
     "NUEVO_CICLO_CAMBIO_PLAN",
   );
 
-  if (esNuevoCicloPorCambioPlan) {
-    await validarSinReservasFuturasParaCambioPlan({
-      alumnoId: membresia.alumno_id,
-      transaction,
-    });
-  }
+  // Si el pago requería validación, las reservas tampoco bloquean al confirmar:
+  // se migran al nuevo ciclo antes de cerrar la membresía anterior.
 
   if (
     esNuevoCicloPorRenovacionExplicita ||
@@ -2830,6 +2973,14 @@ const aplicarPlanPendiente = async ({ detalle, usuarioId, transaction }) => {
     });
 
     for (const membresiaAnterior of membresiasAnteriores) {
+      if (esNuevoCicloPorCambioPlan) {
+        await migrarReservasFuturasCambioPlan({
+          membresiaAnterior,
+          membresiaNueva: membresia,
+          cobroId: detalle.cobro_id,
+          transaction,
+        });
+      }
       const observacionesAnteriores = String(
         membresiaAnterior.observaciones || "",
       ).trim();

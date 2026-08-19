@@ -16,6 +16,8 @@ import AlumnosMembresiasModel from "../../Models/Alumno/MD_TB_AlumnosMembresias.
 import AlumnosSaldosModel from "../../Models/Alumno/MD_TB_AlumnosSaldos.js";
 import AlumnosSaldosMovimientosModel from "../../Models/Alumno/MD_TB_AlumnosSaldosMovimientos.js";
 import UsuariosModel from "../../Models/Usuario/MD_TB_Usuarios.js";
+import UsuariosSaldosModel from "../../Models/Usuario/MD_TB_UsuariosSaldos.js";
+import UsuariosSaldosMovimientosModel from "../../Models/Usuario/MD_TB_UsuariosSaldosMovimientos.js";
 import PagosMensualidadesModel from "../../Models/Pago/MD_TB_PagosMensualidades.js";
 import PagosModel from "../../Models/Pago/MD_TB_Pagos.js";
 import PagosMediosPagoModel from "../../Models/Pago/MD_TB_PagosMediosPago.js";
@@ -34,6 +36,14 @@ import { imputarReservasPendientesMembresia } from "../Agenda/reservasPendientes
 const TIPOS_CONCEPTO = ["producto", "servicio", "plan", "deuda"];
 const TIPOS_CLIENTE = ["alumno", "empleado", "sin_cliente"];
 const CODIGO_SALDO_FAVOR = "SALDO_FAVOR";
+const REFERENCIA_VUELTO_SALDO = "VUELTO-SALDO-COBRO";
+
+const esMedioEfectivoCobro = (medio) => {
+  const codigo = String(medio?.codigo || "").trim().toUpperCase();
+  const tipo = String(medio?.tipo || "").trim().toLowerCase();
+  const nombre = String(medio?.nombre || "").trim().toLowerCase();
+  return codigo === "EFECTIVO" || tipo === "efectivo" || nombre === "efectivo";
+};
 
 const incluirCobroCompleto = [
   { model: CobrosDetallesModel, as: "detalles" },
@@ -346,6 +356,8 @@ const resolverConceptos = async ({
   conceptos,
   sedeId,
   alumnoId = null,
+  clienteTipo = "alumno",
+  clienteUsuarioId = null,
   transaction,
 }) => {
   if (!Array.isArray(conceptos) || conceptos.length === 0) {
@@ -386,6 +398,160 @@ const resolverConceptos = async ({
     }
 
     if (item.tipo === "deuda") {
+      // Benjamin Orellana - 2026/08/19 - Para empleados, la propia venta
+      // fiada/parcial es la fuente de verdad de la deuda. Los cobros posteriores
+      // de tipo deuda referencian el cobro original, sin inventar mensualidades.
+      if (clienteTipo === "empleado") {
+        if (!idValido(clienteUsuarioId)) {
+          throw new CobroOperacionError(
+            "Para saldar una deuda debe seleccionar un empleado.",
+            409,
+            "DEUDA_REQUIERE_EMPLEADO",
+          );
+        }
+        if (
+          Number(item.descuento_porcentaje || 0) !== 0 ||
+          Number(item.impuesto_porcentaje || 0) !== 0
+        ) {
+          throw new CobroOperacionError(
+            "Una deuda existente no admite descuentos ni impuestos al saldarla.",
+            409,
+            "DEUDA_SIN_AJUSTES",
+          );
+        }
+
+        const rowsEmpleado = await db.query(
+          `SELECT
+             c.id AS cobro_origen_id,
+             c.total,
+             c.fecha_cobro,
+             c.observaciones,
+             COALESCE((
+               SELECT SUM(cp0.monto)
+               FROM cobros_pagos cp0
+               WHERE cp0.cobro_id = c.id
+                 AND cp0.estado = 'confirmado'
+             ), 0) AS pago_inicial,
+             COALESCE((
+               SELECT SUM(cd1.total)
+               FROM cobros_detalles cd1
+               INNER JOIN cobros_cobros c1 ON c1.id = cd1.cobro_id
+               WHERE cd1.tipo = 'deuda'
+                 AND cd1.referencia_id = c.id
+                 AND c1.cliente_tipo = 'empleado'
+                 AND c1.cliente_usuario_id = c.cliente_usuario_id
+                 AND c1.sede_id = c.sede_id
+                 AND c1.estado = 'confirmado'
+             ), 0) AS pagado_deuda,
+             COALESCE((
+               SELECT SUM(cd2.total)
+               FROM cobros_detalles cd2
+               INNER JOIN cobros_cobros c2 ON c2.id = cd2.cobro_id
+               WHERE cd2.tipo = 'deuda'
+                 AND cd2.referencia_id = c.id
+                 AND c2.cliente_tipo = 'empleado'
+                 AND c2.cliente_usuario_id = c.cliente_usuario_id
+                 AND c2.sede_id = c.sede_id
+                 AND c2.estado = 'pendiente_validacion'
+             ), 0) AS monto_en_validacion
+           FROM cobros_cobros c
+           WHERE c.id = :cobroOrigenId
+             AND c.sede_id = :sedeId
+             AND c.cliente_tipo = 'empleado'
+             AND c.cliente_usuario_id = :clienteUsuarioId
+             AND c.estado = 'confirmado'
+             AND EXISTS (
+               SELECT 1 FROM cobros_detalles cd0
+               WHERE cd0.cobro_id = c.id
+                 AND cd0.tipo IN ('producto','servicio')
+             )
+           LIMIT 1`,
+          {
+            replacements: {
+              cobroOrigenId: Number(item.referencia_id),
+              sedeId: Number(sedeId),
+              clienteUsuarioId: Number(clienteUsuarioId),
+            },
+            type: QueryTypes.SELECT,
+            transaction,
+          },
+        );
+
+        const deudaEmpleado = rowsEmpleado[0] || null;
+        if (!deudaEmpleado) {
+          throw new CobroOperacionError(
+            "La deuda seleccionada ya no está disponible o no pertenece al empleado/sede.",
+            409,
+            "DEUDA_NO_DISPONIBLE",
+          );
+        }
+        const saldoPendienteEmpleado = redondear(
+          Math.max(
+            Number(deudaEmpleado.total || 0) -
+              Number(deudaEmpleado.pago_inicial || 0) -
+              Number(deudaEmpleado.pagado_deuda || 0),
+            0,
+          ),
+        );
+        const montoEnValidacionEmpleado = redondear(
+          Number(deudaEmpleado.monto_en_validacion || 0),
+        );
+        const saldoDisponibleEmpleado = redondear(
+          Math.max(saldoPendienteEmpleado - montoEnValidacionEmpleado, 0),
+        );
+        if (saldoDisponibleEmpleado <= 0.009) {
+          throw new CobroOperacionError(
+            "La deuda seleccionada ya no tiene saldo disponible para cobrar.",
+            409,
+            "DEUDA_EN_VALIDACION",
+          );
+        }
+        const importeSaldarEmpleado =
+          item.precio_unitario === undefined || item.precio_unitario === null
+            ? saldoDisponibleEmpleado
+            : redondear(Number(item.precio_unitario));
+        if (!Number.isFinite(importeSaldarEmpleado) || importeSaldarEmpleado <= 0) {
+          throw new CobroOperacionError("El importe a saldar no es válido.");
+        }
+        if (importeSaldarEmpleado - saldoDisponibleEmpleado > 0.009) {
+          throw new CobroOperacionError(
+            "El importe a saldar no puede superar el saldo disponible de la deuda.",
+            409,
+            "DEUDA_IMPORTE_EXCEDIDO",
+          );
+        }
+
+        resueltos.push({
+          id: Number(deudaEmpleado.cobro_origen_id),
+          nombre: `Deuda · Compra #${Number(deudaEmpleado.cobro_origen_id)}`,
+          categoria_nombre: "Deuda de empleado",
+          tipo: "deuda",
+          referencia_id: Number(deudaEmpleado.cobro_origen_id),
+          cantidad: 1,
+          precio_catalogo: saldoDisponibleEmpleado,
+          precio_unitario: importeSaldarEmpleado,
+          descuento_porcentaje: 0,
+          descuento_importe: 0,
+          impuesto_porcentaje: 0,
+          impuesto_importe: 0,
+          importe: importeSaldarEmpleado,
+          total: importeSaldarEmpleado,
+          membresia_id: null,
+          mensualidad_id: null,
+          plan_id: null,
+          saldo_pendiente: saldoPendienteEmpleado,
+          monto_en_validacion: montoEnValidacionEmpleado,
+          saldo_disponible: saldoDisponibleEmpleado,
+          monto_pagado_actual: redondear(
+            Number(deudaEmpleado.pago_inicial || 0) +
+              Number(deudaEmpleado.pagado_deuda || 0),
+          ),
+          fecha_vencimiento: String(deudaEmpleado.fecha_cobro || "").slice(0, 10),
+          deuda_empleado: true,
+        });
+        continue;
+      }
+
       if (!idValido(alumnoId)) {
         throw new CobroOperacionError(
           "Para saldar una deuda debe seleccionar un alumno.",
@@ -573,7 +739,9 @@ const resolverConceptos = async ({
     );
   }
   if (deudas.length > 0) {
-    const idsDeuda = deudas.map((item) => Number(item.mensualidad_id));
+    const idsDeuda = deudas.map((item) =>
+      Number(item.mensualidad_id || item.referencia_id),
+    );
     if (new Set(idsDeuda).size !== idsDeuda.length) {
       throw new CobroOperacionError(
         "Una misma deuda no puede agregarse dos veces al mismo cobro.",
@@ -608,6 +776,7 @@ const validarCliente = async ({
     );
 
   let alumno = null;
+  let empleado = null;
   if (clienteTipo === "alumno") {
     if (!idValido(alumnoId))
       throw new CobroOperacionError("Debe seleccionar un alumno válido.");
@@ -620,7 +789,7 @@ const validarCliente = async ({
   }
 
   if (clienteTipo === "empleado") {
-    const empleado = await UsuariosModel.findOne({
+    empleado = await UsuariosModel.findOne({
       where: { id: Number(clienteUsuarioId), estado: "activo" },
       transaction,
     });
@@ -631,7 +800,7 @@ const validarCliente = async ({
       );
   }
 
-  return { alumno, cobrador };
+  return { alumno, empleado, cobrador };
 };
 
 const resolverPagos = async ({
@@ -697,7 +866,108 @@ const resolverPagos = async ({
   return { pagos: resueltos, totalPagado };
 };
 
-const prepararConsumoSaldo = async ({ pagos, alumnoId, transaction }) => {
+const obtenerCuentaSaldoCliente = async ({
+  clienteTipo,
+  alumnoId,
+  clienteUsuarioId,
+  crear = false,
+  transaction,
+}) => {
+  if (clienteTipo === "empleado") {
+    if (!idValido(clienteUsuarioId)) return null;
+    if (crear) {
+      await UsuariosSaldosModel.findOrCreate({
+        where: { usuario_id: Number(clienteUsuarioId) },
+        defaults: { saldo: "0.00", moneda: "ARS" },
+        transaction,
+      });
+    }
+    return UsuariosSaldosModel.findOne({
+      where: { usuario_id: Number(clienteUsuarioId) },
+      transaction,
+      lock: transaction.LOCK.UPDATE,
+    });
+  }
+
+  if (!idValido(alumnoId)) return null;
+  if (crear) {
+    await AlumnosSaldosModel.findOrCreate({
+      where: { alumno_id: Number(alumnoId) },
+      defaults: { saldo: "0.00", moneda: "ARS" },
+      transaction,
+    });
+  }
+  return AlumnosSaldosModel.findOne({
+    where: { alumno_id: Number(alumnoId) },
+    transaction,
+    lock: transaction.LOCK.UPDATE,
+  });
+};
+
+const crearMovimientoSaldoCliente = async ({
+  clienteTipo,
+  cuenta,
+  alumnoId,
+  clienteUsuarioId,
+  sedeId,
+  usuarioId,
+  tipo,
+  origen,
+  monto,
+  saldoAnterior,
+  saldoNuevo,
+  cobroId = null,
+  referencia = null,
+  motivo = null,
+  transaction,
+}) => {
+  if (clienteTipo === "empleado") {
+    return UsuariosSaldosMovimientosModel.create(
+      {
+        saldo_id: Number(cuenta.id),
+        usuario_cliente_id: Number(clienteUsuarioId),
+        sede_id: Number(sedeId),
+        usuario_registro_id: Number(usuarioId),
+        tipo,
+        origen,
+        monto: Number(monto).toFixed(2),
+        saldo_anterior: Number(saldoAnterior).toFixed(2),
+        saldo_nuevo: Number(saldoNuevo).toFixed(2),
+        cobro_id: idValido(cobroId) ? Number(cobroId) : null,
+        referencia,
+        motivo,
+      },
+      { transaction },
+    );
+  }
+
+  return AlumnosSaldosMovimientosModel.create(
+    {
+      saldo_id: Number(cuenta.id),
+      alumno_id: Number(alumnoId),
+      sede_id: Number(sedeId),
+      usuario_id: Number(usuarioId),
+      tipo,
+      origen,
+      monto: Number(monto).toFixed(2),
+      saldo_anterior: Number(saldoAnterior).toFixed(2),
+      saldo_nuevo: Number(saldoNuevo).toFixed(2),
+      cobro_id: idValido(cobroId) ? Number(cobroId) : null,
+      bonificacion_id: null,
+      referencia,
+      motivo,
+    },
+    { transaction },
+  );
+};
+
+const prepararConsumoSaldo = async ({
+  pagos,
+  clienteTipo,
+  alumnoId,
+  clienteUsuarioId,
+  transaction,
+}) => {
   const pagosSaldo = pagos.filter((item) => item.es_saldo_favor);
   if (pagosSaldo.length === 0) return null;
   if (pagosSaldo.length > 1) {
@@ -705,9 +975,9 @@ const prepararConsumoSaldo = async ({ pagos, alumnoId, transaction }) => {
       "El saldo a favor solo puede aplicarse una vez por cobro.",
     );
   }
-  if (!idValido(alumnoId)) {
+  if (!["alumno", "empleado"].includes(String(clienteTipo))) {
     throw new CobroOperacionError(
-      "Para utilizar saldo a favor debe seleccionar un alumno.",
+      "Para utilizar saldo a favor debe seleccionar un alumno o empleado.",
     );
   }
   if (
@@ -721,16 +991,17 @@ const prepararConsumoSaldo = async ({ pagos, alumnoId, transaction }) => {
     );
   }
 
-  const cuenta = await AlumnosSaldosModel.findOne({
-    where: { alumno_id: Number(alumnoId) },
+  const cuenta = await obtenerCuentaSaldoCliente({
+    clienteTipo,
+    alumnoId,
+    clienteUsuarioId,
     transaction,
-    lock: transaction.LOCK.UPDATE,
   });
   const saldoAnterior = Number(cuenta?.saldo || 0);
   const monto = Number(pagosSaldo[0].monto);
   if (!cuenta || saldoAnterior + 0.009 < monto) {
     throw new CobroOperacionError(
-      "El alumno no dispone de saldo suficiente para completar el cobro.",
+      "El cliente no dispone de saldo suficiente para completar el cobro.",
       409,
       "SALDO_INSUFICIENTE",
     );
@@ -739,6 +1010,9 @@ const prepararConsumoSaldo = async ({ pagos, alumnoId, transaction }) => {
   return {
     cuenta,
     pago: pagosSaldo[0],
+    clienteTipo,
+    alumnoId,
+    clienteUsuarioId,
     saldoAnterior,
     saldoNuevo: redondear(saldoAnterior - monto),
   };
@@ -746,7 +1020,6 @@ const prepararConsumoSaldo = async ({ pagos, alumnoId, transaction }) => {
 
 const aplicarConsumoSaldo = async ({
   consumo,
-  alumnoId,
   sedeId,
   usuarioId,
   cobroId,
@@ -757,24 +1030,154 @@ const aplicarConsumoSaldo = async ({
     { saldo: consumo.saldoNuevo.toFixed(2), updated_at: new Date() },
     { transaction },
   );
-  await AlumnosSaldosMovimientosModel.create(
+  await crearMovimientoSaldoCliente({
+    clienteTipo: consumo.clienteTipo,
+    cuenta: consumo.cuenta,
+    alumnoId: consumo.alumnoId,
+    clienteUsuarioId: consumo.clienteUsuarioId,
+    sedeId,
+    usuarioId,
+    tipo: "debito",
+    origen: "uso_cobro",
+    monto: Number(consumo.pago.monto),
+    saldoAnterior: consumo.saldoAnterior,
+    saldoNuevo: consumo.saldoNuevo,
+    cobroId,
+    referencia: `COBRO-${cobroId}`,
+    motivo: `Saldo aplicado al cobro #${cobroId}`,
+    transaction,
+  });
+};
+
+const prepararVueltoSaldo = ({
+  config,
+  pagos,
+  clienteTipo,
+  alumnoId,
+  clienteUsuarioId,
+  solicitaPagoParcial,
+}) => {
+  if (!config) return null;
+  if (!["alumno", "empleado"].includes(String(clienteTipo))) {
+    throw new CobroOperacionError(
+      "Para dejar el vuelto a favor debe seleccionar un alumno o empleado.",
+      409,
+      "VUELTO_SALDO_REQUIERE_CLIENTE",
+    );
+  }
+  if (solicitaPagoParcial) {
+    throw new CobroOperacionError(
+      "No se puede dejar vuelto a favor mientras el cobro genera deuda.",
+      409,
+      "VUELTO_SALDO_CON_DEUDA",
+    );
+  }
+  if (clienteTipo === "alumno" && !idValido(alumnoId)) {
+    throw new CobroOperacionError("El alumno seleccionado no es válido.");
+  }
+  if (clienteTipo === "empleado" && !idValido(clienteUsuarioId)) {
+    throw new CobroOperacionError("El empleado seleccionado no es válido.");
+  }
+
+  const medioPagoId = Number(config.medio_pago_id);
+  const efectivoRecibido = redondear(Number(config.efectivo_recibido || 0));
+  const monto = redondear(Number(config.monto || 0));
+  const pagoEfectivo = pagos.find(
+    (item) => Number(item.medio_pago_id) === medioPagoId,
+  );
+  if (!pagoEfectivo || !esMedioEfectivoCobro(pagoEfectivo.medio)) {
+    throw new CobroOperacionError(
+      "El vuelto a favor solo puede generarse desde un pago en efectivo.",
+      409,
+      "VUELTO_SALDO_REQUIERE_EFECTIVO",
+    );
+  }
+  if (pagos.some((item) => Number(item.medio.requiere_validacion) === 1)) {
+    throw new CobroOperacionError(
+      "El vuelto a favor no puede combinarse con medios pendientes de validación.",
+      409,
+      "VUELTO_SALDO_CON_VALIDACION",
+    );
+  }
+  const esperado = redondear(efectivoRecibido - Number(pagoEfectivo.monto || 0));
+  if (efectivoRecibido <= Number(pagoEfectivo.monto || 0) + 0.009 || monto <= 0) {
+    throw new CobroOperacionError("No hay vuelto positivo para dejar a favor.");
+  }
+  if (Math.abs(esperado - monto) > 0.009) {
+    throw new CobroOperacionError(
+      "El vuelto informado no coincide con el efectivo recibido.",
+      409,
+      "VUELTO_SALDO_INCONSISTENTE",
+    );
+  }
+  return { medioPagoId, efectivoRecibido, monto };
+};
+
+const aplicarVueltoSaldo = async ({
+  vuelto,
+  cobro,
+  clienteTipo,
+  alumnoId,
+  clienteUsuarioId,
+  clienteNombre,
+  sedeId,
+  usuarioId,
+  sesion,
+  transaction,
+}) => {
+  if (!vuelto) return null;
+  const cuenta = await obtenerCuentaSaldoCliente({
+    clienteTipo,
+    alumnoId,
+    clienteUsuarioId,
+    crear: true,
+    transaction,
+  });
+  const saldoAnterior = Number(cuenta.saldo || 0);
+  const saldoNuevo = redondear(saldoAnterior + Number(vuelto.monto || 0));
+  await cuenta.update(
+    { saldo: saldoNuevo.toFixed(2), updated_at: new Date() },
+    { transaction },
+  );
+  const referencia = `${REFERENCIA_VUELTO_SALDO}-${cobro.id}`;
+  await crearMovimientoSaldoCliente({
+    clienteTipo,
+    cuenta,
+    alumnoId,
+    clienteUsuarioId,
+    sedeId,
+    usuarioId,
+    tipo: "credito",
+    origen: "carga_saldo",
+    monto: vuelto.monto,
+    saldoAnterior,
+    saldoNuevo,
+    cobroId: cobro.id,
+    referencia,
+    motivo: `Vuelto del cobro #${cobro.id} dejado como saldo a favor`,
+    transaction,
+  });
+  await CajasMovimientosModel.create(
     {
-      saldo_id: Number(consumo.cuenta.id),
-      alumno_id: Number(alumnoId),
+      caja_sesion_id: Number(sesion.id),
+      caja_id: Number(sesion.caja_id),
       sede_id: Number(sedeId),
-      usuario_id: Number(usuarioId),
-      tipo: "debito",
-      origen: "uso_cobro",
-      monto: Number(consumo.pago.monto).toFixed(2),
-      saldo_anterior: consumo.saldoAnterior.toFixed(2),
-      saldo_nuevo: consumo.saldoNuevo.toFixed(2),
-      cobro_id: Number(cobroId),
-      bonificacion_id: null,
-      referencia: `COBRO-${cobroId}`,
-      motivo: `Saldo aplicado al cobro #${cobroId}`,
+      cobro_pago_id: null,
+      gasto_id: null,
+      medio_pago_id: Number(vuelto.medioPagoId),
+      usuario_registro_id: Number(usuarioId),
+      tipo: "ingreso",
+      origen: "manual",
+      fecha_movimiento: new Date(),
+      monto: Number(vuelto.monto).toFixed(2),
+      descripcion: `Vuelto a saldo · ${clienteNombre || "Cliente"}`.slice(0, 255),
+      estado: "vigente",
+      referencia,
+      observaciones: `Efectivo recibido ${Number(vuelto.efectivoRecibido).toFixed(2)} · Cobro ${Number(cobro.total).toFixed(2)}`,
     },
     { transaction },
   );
+  return { saldoAnterior, saldoNuevo, referencia };
 };
 
 // Benjamin Orellana - 2026/08/01 - Valida la configuración manual enviada
@@ -1773,7 +2176,7 @@ export const registrarCobro = async ({ payload, usuario }) => {
         "CAJA_CERRADA",
       );
 
-    const { alumno } = await validarCliente({
+    const { alumno, empleado } = await validarCliente({
       clienteTipo,
       alumnoId: payload.alumno_id,
       clienteUsuarioId: payload.cliente_usuario_id,
@@ -1785,6 +2188,8 @@ export const registrarCobro = async ({ payload, usuario }) => {
       conceptos: payload.conceptos,
       sedeId,
       alumnoId: alumno?.id,
+      clienteTipo,
+      clienteUsuarioId: payload.cliente_usuario_id,
       transaction,
     });
     const lineaPlan = conceptos.find((item) => item.tipo === "plan");
@@ -1818,11 +2223,14 @@ export const registrarCobro = async ({ payload, usuario }) => {
 
     const solicitaPagoParcial =
       payload.pago_parcial === true || Number(payload.pago_parcial) === 1;
-    if (solicitaPagoParcial && clienteTipo !== "alumno") {
+    if (
+      solicitaPagoParcial &&
+      !["alumno", "empleado"].includes(String(clienteTipo))
+    ) {
       throw new CobroOperacionError(
-        "Solo se puede dejar deuda a un alumno identificado.",
+        "Solo se puede dejar deuda a un alumno o empleado identificado.",
         409,
-        "FIADO_REQUIERE_ALUMNO",
+        "FIADO_REQUIERE_CLIENTE",
       );
     }
 
@@ -1857,8 +2265,18 @@ export const registrarCobro = async ({ payload, usuario }) => {
 
     const consumoSaldo = await prepararConsumoSaldo({
       pagos,
+      clienteTipo,
       alumnoId: alumno?.id,
+      clienteUsuarioId: payload.cliente_usuario_id,
       transaction,
+    });
+    const vueltoSaldo = prepararVueltoSaldo({
+      config: payload.vuelto_saldo,
+      pagos,
+      clienteTipo,
+      alumnoId: alumno?.id,
+      clienteUsuarioId: payload.cliente_usuario_id,
+      solicitaPagoParcial: esPagoParcial,
     });
     const estadoCobro = pagos.some(
       (item) => Number(item.medio.requiere_validacion) === 1,
@@ -1923,7 +2341,6 @@ export const registrarCobro = async ({ payload, usuario }) => {
 
     await aplicarConsumoSaldo({
       consumo: consumoSaldo,
-      alumnoId: alumno?.id,
       sedeId,
       usuarioId,
       cobroId: cobro.id,
@@ -1995,25 +2412,38 @@ export const registrarCobro = async ({ payload, usuario }) => {
       }
 
       if (linea.tipo === "deuda") {
-        const resultadoDeuda = await crearPagoDeudaCobro({
-          alumno,
-          sedeId,
-          linea,
-          estadoCobro,
-          medioPagoId: medioPagoPlan.medio_pago_id,
-          usuarioId,
-          cobroId: cobro.id,
-          transaction,
-        });
-        pagoDeuda = resultadoDeuda.pago;
-        await detalle.update(
-          {
-            membresia_id: resultadoDeuda.membresiaId,
-            mensualidad_id: Number(resultadoDeuda.mensualidad.id),
-            pago_id: Number(resultadoDeuda.pago.id),
-          },
-          { transaction },
-        );
+        if (clienteTipo === "empleado") {
+          // La aplicación a deuda del empleado queda trazada por este mismo
+          // cobro/detalle. El saldo se deriva del cobro original y de todos
+          // los cobros de deuda confirmados, evitando una segunda contabilidad.
+          if (!idValido(payload.cliente_usuario_id)) {
+            throw new CobroOperacionError(
+              "Debe seleccionar un empleado válido para saldar la deuda.",
+              409,
+              "DEUDA_REQUIERE_EMPLEADO",
+            );
+          }
+        } else {
+          const resultadoDeuda = await crearPagoDeudaCobro({
+            alumno,
+            sedeId,
+            linea,
+            estadoCobro,
+            medioPagoId: medioPagoPlan.medio_pago_id,
+            usuarioId,
+            cobroId: cobro.id,
+            transaction,
+          });
+          pagoDeuda = resultadoDeuda.pago;
+          await detalle.update(
+            {
+              membresia_id: resultadoDeuda.membresiaId,
+              mensualidad_id: Number(resultadoDeuda.mensualidad.id),
+              pago_id: Number(resultadoDeuda.pago.id),
+            },
+            { transaction },
+          );
+        }
       }
 
       if (estadoCobro === "confirmado") {
@@ -2083,6 +2513,35 @@ export const registrarCobro = async ({ payload, usuario }) => {
             descripcion: `Cobro #${cobro.id}`,
             estado: "vigente",
             referencia: `COBRO-${cobro.id}`,
+          },
+          { transaction },
+        );
+      }
+
+      if (vueltoSaldo) {
+        const nombreClienteSaldo =
+          clienteTipo === "alumno"
+            ? [alumno?.nombre, alumno?.apellido].filter(Boolean).join(" ").trim()
+            : [empleado?.nombre, empleado?.apellido].filter(Boolean).join(" ").trim();
+        await aplicarVueltoSaldo({
+          vuelto: vueltoSaldo,
+          cobro,
+          clienteTipo,
+          alumnoId: alumno?.id,
+          clienteUsuarioId: payload.cliente_usuario_id,
+          clienteNombre: nombreClienteSaldo,
+          sedeId,
+          usuarioId,
+          sesion,
+          transaction,
+        });
+        const obsVuelto = `[VUELTO A SALDO ${Number(vueltoSaldo.monto).toFixed(2)}]`;
+        await cobro.update(
+          {
+            observaciones: [cobro.observaciones, obsVuelto]
+              .filter(Boolean)
+              .join(" | ")
+              .slice(0, 500),
           },
           { transaction },
         );
@@ -2256,8 +2715,33 @@ const construirAnalisisAnulacionCobro = async ({
     agregarImpacto({
       tipo: "saldo_favor",
       titulo: "Saldo a favor",
-      detalle: "El importe consumido vuelve a acreditarse en la cuenta del alumno.",
+      detalle: "El importe consumido vuelve a acreditarse en la cuenta del cliente.",
       monto: totalSaldoFavor,
+    });
+  }
+
+  const vueltoSaldoAnalisis = await obtenerVueltoSaldoCobro({ cobro, transaction });
+  let movimientoCajaVuelto = null;
+  if (vueltoSaldoAnalisis) {
+    const montoVuelto = Number(vueltoSaldoAnalisis.movimiento.monto || 0);
+    const saldoActualVuelto = Number(vueltoSaldoAnalisis.cuenta?.saldo || 0);
+    if (!vueltoSaldoAnalisis.cuenta || saldoActualVuelto + 0.009 < montoVuelto) {
+      agregarBloqueo(
+        "VUELTO_SALDO_CONSUMIDO",
+        "El vuelto dejado a favor ya fue utilizado.",
+        `Se necesitan ${montoVuelto.toFixed(2)} disponibles para revertir ese saldo antes de anular.`,
+      );
+    } else {
+      agregarImpacto({
+        tipo: "vuelto_saldo",
+        titulo: "Vuelto dejado a favor",
+        detalle: "Se descontará de la cuenta del cliente y se compensará el efectivo adicional en Caja.",
+        monto: montoVuelto,
+      });
+    }
+    movimientoCajaVuelto = await CajasMovimientosModel.findOne({
+      where: { referencia: vueltoSaldoAnalisis.referencia, estado: "vigente" },
+      transaction,
     });
   }
 
@@ -2298,11 +2782,13 @@ const construirAnalisisAnulacionCobro = async ({
   const totalCaja = redondear(
     movimientosCajaARevertir.reduce(
       (suma, movimiento) => suma + Number(movimiento.monto || 0),
-      0,
+      Number(movimientoCajaVuelto?.monto || 0),
     ),
   );
+  const cantidadMovimientosCajaARevertir =
+    movimientosCajaARevertir.length + (movimientoCajaVuelto ? 1 : 0);
   let sesionAbierta = null;
-  if (movimientosCajaARevertir.length > 0) {
+  if (cantidadMovimientosCajaARevertir > 0) {
     sesionAbierta = await CajasSesionesModel.findOne({
       where: { sede_id: Number(sedeId), estado: "abierta" },
       order: [["fecha_apertura", "DESC"], ["id", "DESC"]],
@@ -2313,13 +2799,13 @@ const construirAnalisisAnulacionCobro = async ({
       agregarBloqueo(
         "CAJA_CERRADA",
         "Debe existir una caja abierta para registrar la reversión.",
-        `Hay ${movimientosCajaARevertir.length} movimiento${movimientosCajaARevertir.length === 1 ? "" : "s"} de caja por compensar.`,
+        `Hay ${cantidadMovimientosCajaARevertir} movimiento${cantidadMovimientosCajaARevertir === 1 ? "" : "s"} de caja por compensar.`,
       );
     } else {
       agregarImpacto({
         tipo: "caja",
         titulo: "Caja",
-        detalle: `Se registrará ${movimientosCajaARevertir.length === 1 ? "un movimiento compensatorio" : `${movimientosCajaARevertir.length} movimientos compensatorios`} en la caja abierta #${sesionAbierta.id}.`,
+        detalle: `Se registrará ${cantidadMovimientosCajaARevertir === 1 ? "un movimiento compensatorio" : `${cantidadMovimientosCajaARevertir} movimientos compensatorios`} en la caja abierta #${sesionAbierta.id}.`,
         monto: totalCaja,
       });
 
@@ -2371,6 +2857,74 @@ const construirAnalisisAnulacionCobro = async ({
       "No se encontró un movimiento financiero original.",
       "La anulación continuará con los demás impactos y no inventará una reversión financiera.",
     );
+  }
+
+  // Deuda de empleado: la venta original es la cuenta de origen y los
+  // cobros posteriores con detalle tipo deuda son sus aplicaciones.
+  if (cobro.cliente_tipo === "empleado") {
+    const dependenciasEmpleado = await db.query(
+      `SELECT
+         c2.id AS cobro_id,
+         c2.total AS total_cobro,
+         c2.estado,
+         c2.fecha_cobro,
+         SUM(cd2.total) AS monto_aplicado
+       FROM cobros_detalles cd2
+       INNER JOIN cobros_cobros c2 ON c2.id = cd2.cobro_id
+       WHERE cd2.tipo = 'deuda'
+         AND cd2.referencia_id = :cobroOrigenId
+         AND c2.cliente_tipo = 'empleado'
+         AND c2.cliente_usuario_id = :clienteUsuarioId
+         AND c2.sede_id = :sedeId
+         AND c2.estado IN ('confirmado','pendiente_validacion')
+       GROUP BY c2.id, c2.total, c2.estado, c2.fecha_cobro
+       ORDER BY c2.id ASC`,
+      {
+        replacements: {
+          cobroOrigenId: Number(cobro.id),
+          clienteUsuarioId: Number(cobro.cliente_usuario_id || 0),
+          sedeId: Number(sedeId),
+        },
+        type: QueryTypes.SELECT,
+        transaction,
+      },
+    );
+    if (dependenciasEmpleado.length > 0) {
+      agregarBloqueo(
+        "DEUDA_EMPLEADO_CON_PAGOS",
+        "La deuda generada por esta venta ya recibió pagos.",
+        `Para anular este cobro, anulá primero ${dependenciasEmpleado
+          .map((item) => `#${item.cobro_id}`)
+          .join(", ")}.`,
+        {
+          dependencias: dependenciasEmpleado.map((item) => ({
+            cobro_id: Number(item.cobro_id),
+            total: Number(item.total_cobro || 0),
+            monto_aplicado: Number(item.monto_aplicado || 0),
+            estado: item.estado,
+            fecha_cobro: item.fecha_cobro,
+            motivo: "Pago posterior de deuda de empleado",
+          })),
+        },
+      );
+    } else {
+      const pagoInicialEmpleado = redondear(
+        (pagosCobro || [])
+          .filter((pago) => String(pago.estado) === "confirmado")
+          .reduce((suma, pago) => suma + Number(pago.monto || 0), 0),
+      );
+      const saldoEmpleado = redondear(
+        Math.max(Number(cobro.total || 0) - pagoInicialEmpleado, 0),
+      );
+      if (saldoEmpleado > 0.009) {
+        agregarImpacto({
+          tipo: "deuda_empleado",
+          titulo: "Saldo deudor del empleado",
+          detalle: "La deuda desaparecerá junto con la venta anulada.",
+          monto: saldoEmpleado,
+        });
+      }
+    }
   }
 
   const deudaFiada = idValido(cobro.alumno_id)
@@ -2472,6 +3026,15 @@ const construirAnalisisAnulacionCobro = async ({
     }
 
     if (detalle.tipo === "deuda") {
+      if (cobro.cliente_tipo === "empleado") {
+        agregarImpacto({
+          tipo: "deuda_empleado",
+          titulo: "Pago de deuda del empleado",
+          detalle: `Se reabrirá ${Number(detalle.total || 0).toFixed(2)} del saldo de la compra #${detalle.referencia_id}.`,
+          monto: Number(detalle.total || 0),
+        });
+        continue;
+      }
       const mensualidad = detalle.mensualidad_id
         ? await PagosMensualidadesModel.findByPk(detalle.mensualidad_id, { transaction })
         : null;
@@ -2648,7 +3211,7 @@ const construirAnalisisAnulacionCobro = async ({
     bloqueos,
     advertencias,
     no_se_modifica: noSeModifica,
-    requiere_caja: movimientosCajaARevertir.length > 0,
+    requiere_caja: cantidadMovimientosCajaARevertir > 0,
     caja_abierta: sesionAbierta
       ? { id: Number(sesionAbierta.id), caja_id: Number(sesionAbierta.caja_id) }
       : null,
@@ -3073,8 +3636,11 @@ const aplicarPlanPendiente = async ({ detalle, usuarioId, transaction }) => {
   return pago;
 };
 
-const aplicarDeudaPendiente = async ({ detalle, usuarioId, transaction }) => {
+const aplicarDeudaPendiente = async ({ detalle, cobro, usuarioId, transaction }) => {
   if (detalle.tipo !== "deuda") return null;
+  // Para empleados no existe una mensualidad artificial: al confirmar el
+  // cobro, el detalle pasa automáticamente a computar como pago de la deuda.
+  if (cobro?.cliente_tipo === "empleado") return null;
 
   const mensualidad = detalle.mensualidad_id
     ? await PagosMensualidadesModel.findByPk(detalle.mensualidad_id, {
@@ -3240,6 +3806,7 @@ export const confirmarCobroPendiente = async ({
         if (pagoAplicado) pagoPlan = pagoAplicado;
         const pagoDeudaAplicado = await aplicarDeudaPendiente({
           detalle,
+          cobro,
           usuarioId,
           transaction,
         });
@@ -3526,11 +4093,16 @@ export const rechazarCobroPendiente = async ({
 
 const revertirDeudaConfirmada = async ({
   detalle,
+  cobro,
   motivo,
   usuarioId,
   transaction,
 }) => {
   if (detalle.tipo !== "deuda") return;
+  // Para empleados el pago de deuda se deriva del estado de este cobro. Al
+  // anularlo deja de computar automáticamente, por lo que no hay otra fila que
+  // revertir.
+  if (cobro?.cliente_tipo === "empleado") return;
 
   const mensualidad = detalle.mensualidad_id
     ? await PagosMensualidadesModel.findByPk(detalle.mensualidad_id, {
@@ -3852,17 +4424,12 @@ const devolverSaldoCobro = async ({
   motivo,
   transaction,
 }) => {
-  if (!idValido(cobro.alumno_id)) {
-    throw new CobroOperacionError(
-      "El cobro no conserva el alumno necesario para devolver el saldo.",
-      409,
-      "SALDO_SIN_ALUMNO",
-    );
-  }
-  const cuenta = await AlumnosSaldosModel.findOne({
-    where: { alumno_id: Number(cobro.alumno_id) },
+  const clienteTipo = String(cobro.cliente_tipo || "");
+  const cuenta = await obtenerCuentaSaldoCliente({
+    clienteTipo,
+    alumnoId: cobro.alumno_id,
+    clienteUsuarioId: cobro.cliente_usuario_id,
     transaction,
-    lock: transaction.LOCK.UPDATE,
   });
   if (!cuenta) {
     throw new CobroOperacionError(
@@ -3878,24 +4445,151 @@ const devolverSaldoCobro = async ({
     { saldo: saldoNuevo.toFixed(2), updated_at: new Date() },
     { transaction },
   );
-  await AlumnosSaldosMovimientosModel.create(
-    {
-      saldo_id: Number(cuenta.id),
-      alumno_id: Number(cobro.alumno_id),
-      sede_id: Number(sedeId),
-      usuario_id: Number(usuarioId),
-      tipo: "credito",
-      origen: "reversion",
-      monto: monto.toFixed(2),
-      saldo_anterior: saldoAnterior.toFixed(2),
-      saldo_nuevo: saldoNuevo.toFixed(2),
-      cobro_id: Number(cobro.id),
-      bonificacion_id: null,
-      referencia: `ANULACION-COBRO-${cobro.id}`,
-      motivo: `Devolución de saldo por anulación: ${motivo}`,
-    },
+  await crearMovimientoSaldoCliente({
+    clienteTipo,
+    cuenta,
+    alumnoId: cobro.alumno_id,
+    clienteUsuarioId: cobro.cliente_usuario_id,
+    sedeId,
+    usuarioId,
+    tipo: "credito",
+    origen: "reversion",
+    monto,
+    saldoAnterior,
+    saldoNuevo,
+    cobroId: cobro.id,
+    referencia: `ANULACION-COBRO-${cobro.id}`,
+    motivo: `Devolución de saldo por anulación: ${motivo}`,
+    transaction,
+  });
+};
+
+const obtenerVueltoSaldoCobro = async ({ cobro, transaction }) => {
+  const referencia = `${REFERENCIA_VUELTO_SALDO}-${cobro.id}`;
+  if (cobro.cliente_tipo === "empleado") {
+    const movimiento = await UsuariosSaldosMovimientosModel.findOne({
+      where: {
+        cobro_id: Number(cobro.id),
+        tipo: "credito",
+        origen: "carga_saldo",
+        referencia,
+      },
+      transaction,
+    });
+    if (!movimiento) return null;
+    const cuenta = await UsuariosSaldosModel.findOne({
+      where: { usuario_id: Number(cobro.cliente_usuario_id) },
+      transaction,
+      lock: transaction.LOCK.UPDATE,
+    });
+    return { movimiento, cuenta, referencia };
+  }
+  if (cobro.cliente_tipo === "alumno") {
+    const movimiento = await AlumnosSaldosMovimientosModel.findOne({
+      where: {
+        cobro_id: Number(cobro.id),
+        tipo: "credito",
+        origen: "carga_saldo",
+        referencia,
+      },
+      transaction,
+    });
+    if (!movimiento) return null;
+    const cuenta = await AlumnosSaldosModel.findOne({
+      where: { alumno_id: Number(cobro.alumno_id) },
+      transaction,
+      lock: transaction.LOCK.UPDATE,
+    });
+    return { movimiento, cuenta, referencia };
+  }
+  return null;
+};
+
+const revertirVueltoSaldoCobro = async ({
+  cobro,
+  sedeId,
+  usuarioId,
+  motivo,
+  sesion,
+  transaction,
+}) => {
+  const vuelto = await obtenerVueltoSaldoCobro({ cobro, transaction });
+  if (!vuelto) return;
+  const monto = Number(vuelto.movimiento.monto || 0);
+  const saldoAnterior = Number(vuelto.cuenta?.saldo || 0);
+  if (!vuelto.cuenta || saldoAnterior + 0.009 < monto) {
+    throw new CobroOperacionError(
+      "El saldo originado por el vuelto ya fue utilizado. Regularizá ese saldo antes de anular el cobro.",
+      409,
+      "VUELTO_SALDO_CONSUMIDO",
+    );
+  }
+  const saldoNuevo = redondear(saldoAnterior - monto);
+  await vuelto.cuenta.update(
+    { saldo: saldoNuevo.toFixed(2), updated_at: new Date() },
     { transaction },
   );
+  await crearMovimientoSaldoCliente({
+    clienteTipo: cobro.cliente_tipo,
+    cuenta: vuelto.cuenta,
+    alumnoId: cobro.alumno_id,
+    clienteUsuarioId: cobro.cliente_usuario_id,
+    sedeId,
+    usuarioId,
+    tipo: "debito",
+    origen: "reversion",
+    monto,
+    saldoAnterior,
+    saldoNuevo,
+    cobroId: cobro.id,
+    referencia: `ANULACION-${vuelto.referencia}`,
+    motivo: `Reversión del vuelto dejado a favor: ${motivo}`,
+    transaction,
+  });
+
+  const movimientoCaja = await CajasMovimientosModel.findOne({
+    where: { referencia: vuelto.referencia, estado: "vigente" },
+    transaction,
+    lock: transaction.LOCK.UPDATE,
+  });
+  if (movimientoCaja) {
+    const reversionExistente = await CajasMovimientosModel.findOne({
+      where: {
+        referencia: `ANULACION-${vuelto.referencia}`,
+        estado: "vigente",
+      },
+      transaction,
+    });
+    if (!reversionExistente) {
+      if (!sesion) {
+        throw new CobroOperacionError(
+          "Debe existir una caja abierta para revertir el vuelto dejado a favor.",
+          409,
+          "CAJA_CERRADA",
+        );
+      }
+      await CajasMovimientosModel.create(
+        {
+          caja_sesion_id: Number(sesion.id),
+          caja_id: Number(sesion.caja_id),
+          sede_id: Number(sedeId),
+          cobro_pago_id: null,
+          gasto_id: null,
+          medio_pago_id: Number(movimientoCaja.medio_pago_id),
+          usuario_registro_id: Number(usuarioId),
+          tipo: "egreso",
+          origen: "reversion",
+          fecha_movimiento: new Date(),
+          monto: monto.toFixed(2),
+          descripcion: `Anulación de vuelto a saldo · Cobro #${cobro.id}`,
+          estado: "vigente",
+          referencia: `ANULACION-${vuelto.referencia}`,
+          observaciones: motivo,
+        },
+        { transaction },
+      );
+    }
+  }
 };
 
 const actualizarEstadoAlumnoTrasAnulacion = async ({
@@ -4400,6 +5094,8 @@ export const editarCobroConfirmado = async ({
       conceptos: payload?.conceptos,
       sedeId,
       alumnoId: alumno?.id,
+      clienteTipo,
+      clienteUsuarioId: payload?.cliente_usuario_id || cobro.cliente_usuario_id,
       transaction,
     });
     const planAnterior = detallesAnteriores.find(
@@ -5024,8 +5720,14 @@ export const anularCobroConfirmado = async ({
     const tienePlanVinculado = detalles.some(
       (detalle) => detalle.tipo === "plan" && idValido(detalle.mensualidad_id),
     );
+    const esVentaFiadaEmpleado =
+      cobro.cliente_tipo === "empleado" &&
+      detalles.some((detalle) => ["producto", "servicio"].includes(detalle.tipo));
     if (
-      (pagosCobro.length === 0 && !deudaFiada && !tienePlanVinculado) ||
+      (pagosCobro.length === 0 &&
+        !deudaFiada &&
+        !tienePlanVinculado &&
+        !esVentaFiadaEmpleado) ||
       pagosCobro.some(
         (pago) => !["confirmado", "anulado"].includes(String(pago.estado)),
       )
@@ -5068,6 +5770,7 @@ export const anularCobroConfirmado = async ({
       });
       await revertirDeudaConfirmada({
         detalle,
+        cobro,
         motivo: motivoLimpio,
         usuarioId,
         transaction,
@@ -5127,6 +5830,15 @@ export const anularCobroConfirmado = async ({
         { transaction },
       );
     }
+
+    await revertirVueltoSaldoCobro({
+      cobro,
+      sedeId: Number(sedeId),
+      usuarioId,
+      motivo: motivoLimpio,
+      sesion,
+      transaction,
+    });
 
     for (const pagoCobro of pagosCobro) {
       if (pagoCobro.estado === "anulado") continue;

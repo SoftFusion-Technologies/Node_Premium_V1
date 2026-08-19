@@ -11,6 +11,9 @@ import AlumnosSaldosModel from "../../Models/Alumno/MD_TB_AlumnosSaldos.js";
 import AlumnosSaldosMovimientosModel from "../../Models/Alumno/MD_TB_AlumnosSaldosMovimientos.js";
 import AlumnosBonificacionesModel from "../../Models/Alumno/MD_TB_AlumnosBonificaciones.js";
 import PagosMensualidadesModel from "../../Models/Pago/MD_TB_PagosMensualidades.js";
+import PagosMediosPagoModel from "../../Models/Pago/MD_TB_PagosMediosPago.js";
+import CajasSesionesModel from "../../Models/Caja/MD_TB_CajasSesiones.js";
+import CajasMovimientosModel from "../../Models/Caja/MD_TB_CajasMovimientos.js";
 
 const error = (res, status, message) =>
   res.status(status).json({ ok: false, message, data: null });
@@ -138,6 +141,197 @@ export const OBR_SaldoAlumno_CTS = async (req, res) => {
   } catch (requestError) {
     console.error("Error OBR_SaldoAlumno_CTS:", requestError);
     return error(res, 500, "Error interno al consultar el saldo.");
+  }
+};
+
+/*
+ * Benjamin Orellana - 2026/08/19 - Carga PREPAGA de saldo a favor.
+ * A diferencia de una bonificación administrativa, esta operación representa
+ * dinero efectivamente recibido y por eso registra un ingreso en la caja
+ * abierta usando el medio seleccionado. No crea un ingreso en Finanzas:
+ * la venta/ingreso se reconoce cuando el saldo se consume en un cobro.
+ */
+export const CR_CargarSaldoAlumno_CTS = async (req, res) => {
+  const transaction = await db.transaction();
+
+  try {
+    const { alumno_id } = req.params;
+    const usuarioId = Number(req.user?.id || req.user?.usuario_id);
+    const {
+      sede_id,
+      monto,
+      medio_pago_id,
+      motivo,
+      observaciones,
+    } = req.body || {};
+
+    if (!idValido(alumno_id) || !idValido(usuarioId)) {
+      throw Object.assign(new Error("Alumno o usuario inválido."), { status: 400 });
+    }
+
+    const montoNumerico = redondear(Number(monto || 0));
+    if (!Number.isFinite(montoNumerico) || montoNumerico <= 0) {
+      throw Object.assign(new Error("El monto a cargar debe ser mayor a 0."), {
+        status: 400,
+      });
+    }
+    if (!idValido(medio_pago_id)) {
+      throw Object.assign(new Error("Seleccioná el medio por el que ingresó el dinero."), {
+        status: 400,
+      });
+    }
+
+    const alumno = await AlumnosModel.findByPk(Number(alumno_id), {
+      transaction,
+      lock: transaction.LOCK.UPDATE,
+    });
+    if (!alumno) {
+      throw Object.assign(new Error("No se encontró el alumno."), { status: 404 });
+    }
+
+    const sedeAlumnoId = Number(alumno.sede_id || 0);
+    if (!idValido(sedeAlumnoId)) {
+      throw Object.assign(
+        new Error("El alumno no tiene una sede válida para registrar la carga."),
+        { status: 409 },
+      );
+    }
+    if (idValido(sede_id) && Number(sede_id) !== sedeAlumnoId) {
+      throw Object.assign(
+        new Error("La sede indicada no coincide con la sede actual del alumno."),
+        { status: 409 },
+      );
+    }
+
+    const medioPago = await PagosMediosPagoModel.findOne({
+      where: { id: Number(medio_pago_id), activo: 1 },
+      transaction,
+      lock: transaction.LOCK.UPDATE,
+    });
+    if (!medioPago) {
+      throw Object.assign(new Error("El medio de ingreso no existe o está inactivo."), {
+        status: 404,
+      });
+    }
+    if (String(medioPago.codigo || "").trim().toUpperCase() === "SALDO_FAVOR") {
+      throw Object.assign(
+        new Error("Saldo a favor no puede utilizarse para cargar más saldo."),
+        { status: 409 },
+      );
+    }
+    if (Number(medioPago.impacta_caja) !== 1) {
+      throw Object.assign(
+        new Error(`El medio ${medioPago.nombre} no está configurado para impactar Caja.`),
+        { status: 409 },
+      );
+    }
+
+    const sesion = await CajasSesionesModel.findOne({
+      where: { sede_id: sedeAlumnoId, estado: "abierta" },
+      order: [["id", "DESC"]],
+      transaction,
+      lock: transaction.LOCK.UPDATE,
+    });
+    if (!sesion) {
+      throw Object.assign(
+        new Error("Abrí la caja de la sede antes de cargar saldo a favor."),
+        { status: 409, code: "CAJA_NO_DISPONIBLE" },
+      );
+    }
+
+    const cuenta = await obtenerCuentaBloqueada({
+      alumnoId: Number(alumno.id),
+      transaction,
+    });
+    const saldoAnterior = Number(cuenta.saldo || 0);
+    const saldoNuevo = redondear(saldoAnterior + montoNumerico);
+    const motivoLimpio = String(motivo || "Carga de saldo a favor").trim().slice(0, 255);
+    const observacionesLimpias = String(observaciones || "").trim().slice(0, 500) || null;
+
+    await cuenta.update(
+      { saldo: saldoNuevo.toFixed(2), updated_at: new Date() },
+      { transaction },
+    );
+
+    const movimientoSaldo = await AlumnosSaldosMovimientosModel.create(
+      {
+        saldo_id: Number(cuenta.id),
+        alumno_id: Number(alumno.id),
+        sede_id: sedeAlumnoId,
+        usuario_id: usuarioId,
+        tipo: "credito",
+        origen: "carga_saldo",
+        monto: montoNumerico.toFixed(2),
+        saldo_anterior: saldoAnterior.toFixed(2),
+        saldo_nuevo: saldoNuevo.toFixed(2),
+        cobro_id: null,
+        bonificacion_id: null,
+        referencia: null,
+        motivo: motivoLimpio,
+      },
+      { transaction },
+    );
+
+    const referencia = `CARGA-SALDO-${movimientoSaldo.id}`;
+    await movimientoSaldo.update({ referencia }, { transaction });
+
+    const nombreAlumno = [alumno.nombre, alumno.apellido]
+      .filter(Boolean)
+      .join(" ")
+      .trim() || `Alumno #${alumno.id}`;
+
+    const movimientoCaja = await CajasMovimientosModel.create(
+      {
+        caja_sesion_id: Number(sesion.id),
+        caja_id: Number(sesion.caja_id),
+        sede_id: sedeAlumnoId,
+        cobro_pago_id: null,
+        gasto_id: null,
+        medio_pago_id: Number(medioPago.id),
+        usuario_registro_id: usuarioId,
+        tipo: "ingreso",
+        origen: "manual",
+        fecha_movimiento: new Date(),
+        monto: montoNumerico.toFixed(2),
+        descripcion: `Carga de saldo a favor · ${nombreAlumno}`.slice(0, 255),
+        estado: "vigente",
+        referencia,
+        observaciones: [motivoLimpio, observacionesLimpias]
+          .filter(Boolean)
+          .join(" | ")
+          .slice(0, 500) || null,
+      },
+      { transaction },
+    );
+
+    await transaction.commit();
+
+    return res.status(201).json({
+      ok: true,
+      message: "Saldo cargado y dinero registrado en Caja correctamente.",
+      data: {
+        alumno_id: Number(alumno.id),
+        sede_id: sedeAlumnoId,
+        monto_cargado: montoNumerico,
+        saldo_anterior: saldoAnterior,
+        saldo_nuevo: saldoNuevo,
+        saldo_movimiento_id: Number(movimientoSaldo.id),
+        caja_sesion_id: Number(sesion.id),
+        caja_movimiento_id: Number(movimientoCaja.id),
+        medio_pago_id: Number(medioPago.id),
+        medio_pago_nombre: medioPago.nombre,
+        medio_pago_tipo: medioPago.tipo,
+        referencia,
+      },
+    });
+  } catch (requestError) {
+    if (!transaction.finished) await transaction.rollback();
+    console.error("Error CR_CargarSaldoAlumno_CTS:", requestError);
+    return error(
+      res,
+      Number(requestError?.status || 500),
+      requestError?.message || "Error interno al cargar saldo a favor.",
+    );
   }
 };
 

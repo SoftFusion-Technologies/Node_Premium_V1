@@ -137,6 +137,7 @@ import {
 import {
   OBR_SaldoAlumno_CTS,
   CR_BonificacionAlumno_CTS,
+  CR_CargarSaldoAlumno_CTS,
 } from "../Controllers/Alumno/CTS_TB_AlumnosSaldos.js";
 
 import {
@@ -1056,6 +1057,21 @@ router.post(
     requireFinanzas: false,
   }),
   CR_BonificacionAlumno_CTS,
+);
+
+// Benjamin Orellana - 2026/08/19 - Carga prepaga de saldo con ingreso real en Caja.
+router.post(
+  "/alumnos/:alumno_id/cargar-saldo",
+  authenticateToken,
+  requireOperacionFinancieraAlumno("saldos.gestionar"),
+  requireFinancialScope({
+    sources: [
+      sourceParam("alumno", "alumno_id"),
+      sourceBody("sede", "sede_id"),
+    ],
+    requireFinanzas: false,
+  }),
+  CR_CargarSaldoAlumno_CTS,
 );
 
 // Benjamin Orellana - 2026/07/15 - Consulta saldo y auditoría comercial del alumno.

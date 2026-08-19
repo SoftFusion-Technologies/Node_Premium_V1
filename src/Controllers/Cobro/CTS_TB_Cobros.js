@@ -8,6 +8,11 @@ import db from '../../DataBase/db.js';
 import PagosMediosPagoModel from '../../Models/Pago/MD_TB_PagosMediosPago.js';
 import AlumnosModel from '../../Models/Alumno/MD_TB_Alumnos.js';
 import AlumnosSaldosModel from '../../Models/Alumno/MD_TB_AlumnosSaldos.js';
+import UsuariosModel from '../../Models/Usuario/MD_TB_Usuarios.js';
+import UsuariosSaldosModel from '../../Models/Usuario/MD_TB_UsuariosSaldos.js';
+import UsuariosSaldosMovimientosModel from '../../Models/Usuario/MD_TB_UsuariosSaldosMovimientos.js';
+import CajasSesionesModel from '../../Models/Caja/MD_TB_CajasSesiones.js';
+import CajasMovimientosModel from '../../Models/Caja/MD_TB_CajasMovimientos.js';
 import {
   fechaArgentina,
   usuarioTieneAlcanceOperativoDiario,
@@ -23,6 +28,32 @@ import {
   rechazarCobroPendiente,
   registrarCobro
 } from '../../Services/Cobro/cobro.service.js';
+
+const redondearImporte = (valor) =>
+  Math.round((Number(valor || 0) + Number.EPSILON) * 100) / 100;
+
+const empleadoDisponibleEnSede = async ({ usuarioId, sedeId, transaction = null }) => {
+  const rows = await db.query(
+    `SELECT u.id, u.nombre, u.apellido
+       FROM usuarios_usuarios u
+      WHERE u.id = :usuarioId
+        AND u.estado = 'activo'
+        AND (
+          u.acceso_todas_sedes = 1
+          OR u.sede_principal_id = :sedeId
+          OR EXISTS (
+            SELECT 1
+              FROM usuarios_sedes us
+             WHERE us.usuario_id = u.id
+               AND us.sede_id = :sedeId
+               AND us.activo = 1
+          )
+        )
+      LIMIT 1`,
+    { replacements: { usuarioId, sedeId }, type: QueryTypes.SELECT, transaction },
+  );
+  return rows[0] || null;
+};
 
 const manejarErrorCobro = (error, res, contexto) => {
   if (error instanceof CobroOperacionError) {
@@ -250,6 +281,365 @@ export const OBR_DeudasAlumnoCobro_CTS = async (req, res) => {
     return res.status(500).json({
       ok: false,
       message: 'Error al consultar las deudas disponibles para cobrar.'
+    });
+  }
+};
+
+// Benjamin Orellana - 2026/08/19 - Deudas de empleados derivadas de ventas
+// fiadas/parciales. La venta original conserva el total y los cobros posteriores
+// con detalle tipo deuda representan los pagos aplicados.
+export const OBR_DeudasEmpleadoCobro_CTS = async (req, res) => {
+  try {
+    const usuarioId = Number(req.params.usuario_id);
+    const sedeId = Number(req.query.sede_id);
+    if (!Number.isInteger(usuarioId) || usuarioId <= 0) {
+      return res.status(400).json({ ok: false, message: 'Debe indicar un empleado válido.' });
+    }
+    if (!Number.isInteger(sedeId) || sedeId <= 0) {
+      return res.status(400).json({ ok: false, message: 'Debe indicar una sede válida.' });
+    }
+
+    const rows = await db.query(
+      `SELECT
+         c.id AS cobro_origen_id,
+         c.cliente_usuario_id,
+         c.sede_id,
+         DATE(c.fecha_cobro) AS fecha_emision,
+         DATE(c.fecha_cobro) AS fecha_vencimiento,
+         c.total AS monto_total,
+         c.observaciones,
+         COALESCE((
+           SELECT SUM(cp0.monto)
+           FROM cobros_pagos cp0
+           WHERE cp0.cobro_id = c.id
+             AND cp0.estado = 'confirmado'
+         ), 0) AS pago_inicial,
+         COALESCE((
+           SELECT SUM(cd1.total)
+           FROM cobros_detalles cd1
+           INNER JOIN cobros_cobros c1 ON c1.id = cd1.cobro_id
+           WHERE cd1.tipo = 'deuda'
+             AND cd1.referencia_id = c.id
+             AND c1.cliente_tipo = 'empleado'
+             AND c1.cliente_usuario_id = c.cliente_usuario_id
+             AND c1.sede_id = c.sede_id
+             AND c1.estado = 'confirmado'
+         ), 0) AS pagos_deuda,
+         COALESCE((
+           SELECT SUM(cd2.total)
+           FROM cobros_detalles cd2
+           INNER JOIN cobros_cobros c2 ON c2.id = cd2.cobro_id
+           WHERE cd2.tipo = 'deuda'
+             AND cd2.referencia_id = c.id
+             AND c2.cliente_tipo = 'empleado'
+             AND c2.cliente_usuario_id = c.cliente_usuario_id
+             AND c2.sede_id = c.sede_id
+             AND c2.estado = 'pendiente_validacion'
+         ), 0) AS monto_en_validacion,
+         (
+           SELECT GROUP_CONCAT(cd0.nombre_snapshot ORDER BY cd0.id SEPARATOR ', ')
+           FROM cobros_detalles cd0
+           WHERE cd0.cobro_id = c.id
+             AND cd0.tipo IN ('producto','servicio')
+         ) AS conceptos
+       FROM cobros_cobros c
+       WHERE c.cliente_tipo = 'empleado'
+         AND c.cliente_usuario_id = :usuarioId
+         AND c.sede_id = :sedeId
+         AND c.estado = 'confirmado'
+         AND EXISTS (
+           SELECT 1 FROM cobros_detalles cdv
+           WHERE cdv.cobro_id = c.id
+             AND cdv.tipo IN ('producto','servicio')
+         )
+       ORDER BY c.fecha_cobro ASC, c.id ASC`,
+      { replacements: { usuarioId, sedeId }, type: QueryTypes.SELECT }
+    );
+
+    const deudas = rows
+      .map((item) => {
+        const montoTotal = Number(item.monto_total || 0);
+        const montoPagado = Number(item.pago_inicial || 0) + Number(item.pagos_deuda || 0);
+        const saldo = Math.max(montoTotal - montoPagado, 0);
+        const enValidacion = Number(item.monto_en_validacion || 0);
+        return {
+          mensualidad_id: Number(item.cobro_origen_id),
+          cobro_origen_id: Number(item.cobro_origen_id),
+          cliente_usuario_id: Number(item.cliente_usuario_id),
+          sede_id: Number(item.sede_id),
+          membresia_id: null,
+          periodo_desde: item.fecha_emision,
+          periodo_hasta: item.fecha_emision,
+          fecha_vencimiento: item.fecha_vencimiento,
+          monto_total: montoTotal,
+          monto_pagado: montoPagado,
+          saldo,
+          monto_en_validacion: enValidacion,
+          saldo_disponible: Math.max(saldo - enValidacion, 0),
+          estado: saldo <= 0.009 ? 'pagada' : montoPagado > 0.009 ? 'parcial' : 'pendiente',
+          plan_id: null,
+          plan_nombre: null,
+          observaciones: item.observaciones,
+          etiqueta: `Compra #${Number(item.cobro_origen_id)}${item.conceptos ? ` · ${item.conceptos}` : ''}`
+        };
+      })
+      .filter((item) => item.saldo > 0.009);
+
+    return res.status(200).json({ ok: true, data: deudas });
+  } catch (error) {
+    console.error('Error OBR_DeudasEmpleadoCobro_CTS:', error);
+    return res.status(500).json({
+      ok: false,
+      message: 'Error al consultar las deudas del empleado.'
+    });
+  }
+};
+
+// Benjamin Orellana - 2026/08/19 - Resumen financiero liviano para el
+// selector de empleados de Nuevo Cobro. Devuelve saldo a favor y deuda total
+// pendiente en una sola consulta, manteniendo el alcance de sede.
+export const OBR_SituacionFinancieraEmpleadosCobro_CTS = async (req, res) => {
+  try {
+    const sedeId = Number(req.query.sede_id);
+    const usuarioIds = Array.from(
+      new Set(
+        String(req.query.usuario_ids || '')
+          .split(',')
+          .map((item) => Number(item))
+          .filter((id) => Number.isInteger(id) && id > 0),
+      ),
+    ).slice(0, 100);
+
+    if (!Number.isInteger(sedeId) || sedeId <= 0) {
+      return res.status(400).json({ ok: false, message: 'Debe indicar una sede válida.' });
+    }
+    if (usuarioIds.length === 0) {
+      return res.status(200).json({ ok: true, data: [] });
+    }
+
+    const rows = await db.query(
+      `SELECT
+         u.id AS usuario_id,
+         COALESCE(us.saldo, 0) AS saldo_favor,
+         COALESCE((
+           SELECT SUM(
+             GREATEST(
+               c.total
+               - COALESCE((
+                   SELECT SUM(cp0.monto)
+                   FROM cobros_pagos cp0
+                   WHERE cp0.cobro_id = c.id
+                     AND cp0.estado = 'confirmado'
+                 ), 0)
+               - COALESCE((
+                   SELECT SUM(cd1.total)
+                   FROM cobros_detalles cd1
+                   INNER JOIN cobros_cobros c1 ON c1.id = cd1.cobro_id
+                   WHERE cd1.tipo = 'deuda'
+                     AND cd1.referencia_id = c.id
+                     AND c1.cliente_tipo = 'empleado'
+                     AND c1.cliente_usuario_id = c.cliente_usuario_id
+                     AND c1.sede_id = c.sede_id
+                     AND c1.estado = 'confirmado'
+                 ), 0),
+               0
+             )
+           )
+           FROM cobros_cobros c
+           WHERE c.cliente_tipo = 'empleado'
+             AND c.cliente_usuario_id = u.id
+             AND c.sede_id = :sedeId
+             AND c.estado = 'confirmado'
+             AND EXISTS (
+               SELECT 1
+               FROM cobros_detalles cdv
+               WHERE cdv.cobro_id = c.id
+                 AND cdv.tipo IN ('producto', 'servicio')
+             )
+         ), 0) AS saldo_deudor
+       FROM usuarios_usuarios u
+       LEFT JOIN usuarios_saldos us ON us.usuario_id = u.id
+       WHERE u.id IN (:usuarioIds)
+         AND u.estado = 'activo'
+         AND (
+           u.acceso_todas_sedes = 1
+           OR u.sede_principal_id = :sedeId
+           OR EXISTS (
+             SELECT 1
+             FROM usuarios_sedes usem
+             WHERE usem.usuario_id = u.id
+               AND usem.sede_id = :sedeId
+               AND usem.activo = 1
+           )
+         )
+       ORDER BY u.id ASC`,
+      {
+        replacements: { sedeId, usuarioIds },
+        type: QueryTypes.SELECT,
+      },
+    );
+
+    return res.status(200).json({
+      ok: true,
+      data: rows.map((item) => ({
+        usuario_id: Number(item.usuario_id),
+        saldo_favor: redondearImporte(item.saldo_favor),
+        saldo_deudor: redondearImporte(item.saldo_deudor),
+      })),
+    });
+  } catch (error) {
+    console.error('Error OBR_SituacionFinancieraEmpleadosCobro_CTS:', error);
+    return res.status(500).json({
+      ok: false,
+      message: 'Error al consultar la situación financiera de los empleados.',
+    });
+  }
+};
+
+// Benjamin Orellana - 2026/08/19 - Saldo operativo de empleados.
+export const OBR_SaldoDisponibleEmpleadoCobro_CTS = async (req, res) => {
+  try {
+    const usuarioId = Number(req.params.usuario_id);
+    const sedeId = Number(req.query.sede_id);
+    if (!Number.isInteger(usuarioId) || usuarioId <= 0) {
+      return res.status(400).json({ ok: false, message: 'Debe indicar un empleado válido.' });
+    }
+    if (!Number.isInteger(sedeId) || sedeId <= 0) {
+      return res.status(400).json({ ok: false, message: 'Debe indicar una sede válida.' });
+    }
+    const empleado = await empleadoDisponibleEnSede({ usuarioId, sedeId });
+    if (!empleado) {
+      return res.status(404).json({ ok: false, message: 'El empleado no está disponible en la sede indicada.' });
+    }
+    const cuenta = await UsuariosSaldosModel.findOne({
+      where: { usuario_id: usuarioId },
+      attributes: ['saldo', 'moneda']
+    });
+    return res.status(200).json({
+      ok: true,
+      data: { saldo: Number(cuenta?.saldo || 0), moneda: cuenta?.moneda || 'ARS' }
+    });
+  } catch (error) {
+    console.error('Error OBR_SaldoDisponibleEmpleadoCobro_CTS:', error);
+    return res.status(500).json({ ok: false, message: 'Error al consultar el saldo del empleado.' });
+  }
+};
+
+export const CR_CargarSaldoEmpleadoCobro_CTS = async (req, res) => {
+  const transaction = await db.transaction();
+  try {
+    const usuarioClienteId = Number(req.params.usuario_id);
+    const usuarioRegistroId = Number(req.user?.id || req.user?.usuario_id);
+    const sedeId = Number(req.body?.sede_id);
+    const medioPagoId = Number(req.body?.medio_pago_id);
+    const monto = redondearImporte(req.body?.monto);
+    const motivo = String(req.body?.motivo || 'Carga de saldo a favor').trim().slice(0, 255);
+    const observaciones = String(req.body?.observaciones || '').trim().slice(0, 500) || null;
+
+    if (!Number.isInteger(usuarioClienteId) || usuarioClienteId <= 0 || !Number.isInteger(usuarioRegistroId) || usuarioRegistroId <= 0) {
+      throw Object.assign(new Error('Empleado o usuario inválido.'), { status: 400 });
+    }
+    if (!Number.isInteger(sedeId) || sedeId <= 0 || !Number.isInteger(medioPagoId) || medioPagoId <= 0) {
+      throw Object.assign(new Error('Sede o medio de ingreso inválido.'), { status: 400 });
+    }
+    if (!Number.isFinite(monto) || monto <= 0) {
+      throw Object.assign(new Error('El monto a cargar debe ser mayor a 0.'), { status: 400 });
+    }
+
+    const empleado = await empleadoDisponibleEnSede({ usuarioId: usuarioClienteId, sedeId, transaction });
+    if (!empleado) {
+      throw Object.assign(new Error('El empleado no está disponible en la sede indicada.'), { status: 404 });
+    }
+    const medio = await PagosMediosPagoModel.findOne({
+      where: { id: medioPagoId, activo: 1 },
+      transaction,
+      lock: transaction.LOCK.UPDATE,
+    });
+    if (!medio || Number(medio.impacta_caja) !== 1 || String(medio.codigo || '').toUpperCase() === 'SALDO_FAVOR') {
+      throw Object.assign(new Error('Seleccioná un medio válido que impacte Caja.'), { status: 409 });
+    }
+    const sesion = await CajasSesionesModel.findOne({
+      where: { sede_id: sedeId, estado: 'abierta' },
+      order: [['id', 'DESC']],
+      transaction,
+      lock: transaction.LOCK.UPDATE,
+    });
+    if (!sesion) {
+      throw Object.assign(new Error('Abrí la caja de la sede antes de cargar saldo a favor.'), { status: 409 });
+    }
+
+    await UsuariosSaldosModel.findOrCreate({
+      where: { usuario_id: usuarioClienteId },
+      defaults: { saldo: '0.00', moneda: 'ARS' },
+      transaction,
+    });
+    const cuenta = await UsuariosSaldosModel.findOne({
+      where: { usuario_id: usuarioClienteId },
+      transaction,
+      lock: transaction.LOCK.UPDATE,
+    });
+    const saldoAnterior = Number(cuenta.saldo || 0);
+    const saldoNuevo = redondearImporte(saldoAnterior + monto);
+    await cuenta.update({ saldo: saldoNuevo.toFixed(2), updated_at: new Date() }, { transaction });
+
+    const movimientoSaldo = await UsuariosSaldosMovimientosModel.create({
+      saldo_id: Number(cuenta.id),
+      usuario_cliente_id: usuarioClienteId,
+      sede_id: sedeId,
+      usuario_registro_id: usuarioRegistroId,
+      tipo: 'credito',
+      origen: 'carga_saldo',
+      monto: monto.toFixed(2),
+      saldo_anterior: saldoAnterior.toFixed(2),
+      saldo_nuevo: saldoNuevo.toFixed(2),
+      cobro_id: null,
+      referencia: null,
+      motivo,
+    }, { transaction });
+    const referencia = `CARGA-SALDO-EMPLEADO-${movimientoSaldo.id}`;
+    await movimientoSaldo.update({ referencia }, { transaction });
+    const nombre = [empleado.nombre, empleado.apellido].filter(Boolean).join(' ').trim() || `Empleado #${usuarioClienteId}`;
+    const movimientoCaja = await CajasMovimientosModel.create({
+      caja_sesion_id: Number(sesion.id),
+      caja_id: Number(sesion.caja_id),
+      sede_id: sedeId,
+      cobro_pago_id: null,
+      gasto_id: null,
+      medio_pago_id: medioPagoId,
+      usuario_registro_id: usuarioRegistroId,
+      tipo: 'ingreso',
+      origen: 'manual',
+      fecha_movimiento: new Date(),
+      monto: monto.toFixed(2),
+      descripcion: `Carga de saldo a favor · ${nombre}`.slice(0, 255),
+      estado: 'vigente',
+      referencia,
+      observaciones: [motivo, observaciones].filter(Boolean).join(' | ').slice(0, 500) || null,
+    }, { transaction });
+
+    await transaction.commit();
+    return res.status(201).json({
+      ok: true,
+      message: 'Saldo del empleado cargado y registrado en Caja correctamente.',
+      data: {
+        usuario_id: usuarioClienteId,
+        sede_id: sedeId,
+        monto_cargado: monto,
+        saldo_anterior: saldoAnterior,
+        saldo_nuevo: saldoNuevo,
+        saldo_movimiento_id: Number(movimientoSaldo.id),
+        caja_movimiento_id: Number(movimientoCaja.id),
+        medio_pago_id: Number(medio.id),
+        medio_pago_nombre: medio.nombre,
+        referencia,
+      },
+    });
+  } catch (error) {
+    if (!transaction.finished) await transaction.rollback();
+    console.error('Error CR_CargarSaldoEmpleadoCobro_CTS:', error);
+    return res.status(Number(error?.status || 500)).json({
+      ok: false,
+      message: error?.message || 'Error interno al cargar saldo al empleado.'
     });
   }
 };

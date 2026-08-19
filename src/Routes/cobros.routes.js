@@ -18,12 +18,16 @@ import {
 } from '../Controllers/Caja/CTS_TB_Cajas.js';
 import {
   CR_Cobros_CTS,
+  CR_CargarSaldoEmpleadoCobro_CTS,
   OBR_CobroDetalle_CTS,
   OBR_CobrosPendientesCount_CTS,
   OBR_CobrosAnulacionCandidatos_CTS,
   OBR_CobroAnulacionPreview_CTS,
   OBR_Cobros_CTS,
   OBR_DeudasAlumnoCobro_CTS,
+  OBR_DeudasEmpleadoCobro_CTS,
+  OBR_SaldoDisponibleEmpleadoCobro_CTS,
+  OBR_SituacionFinancieraEmpleadosCobro_CTS,
   OBR_MediosPagoCobro_CTS,
   OBR_SaldoDisponibleCobro_CTS,
   UR_AnularCobro_CTS,
@@ -57,6 +61,34 @@ router.get(
   ...seguridadSede,
   requirePermission('cobros.registrar'),
   OBR_DeudasAlumnoCobro_CTS
+);
+
+router.get(
+  '/cobros/empleados/situacion-financiera',
+  ...seguridadSede,
+  requirePermission('cobros.registrar'),
+  OBR_SituacionFinancieraEmpleadosCobro_CTS
+);
+
+router.get(
+  '/cobros/empleados/:usuario_id/deudas',
+  ...seguridadSede,
+  requirePermission('cobros.registrar'),
+  OBR_DeudasEmpleadoCobro_CTS
+);
+
+router.get(
+  '/cobros/empleados/:usuario_id/saldo-disponible',
+  ...seguridadSede,
+  requirePermission('cobros.registrar'),
+  OBR_SaldoDisponibleEmpleadoCobro_CTS
+);
+
+router.post(
+  '/cobros/empleados/:usuario_id/cargar-saldo',
+  ...seguridadSede,
+  requirePermission('cobros.registrar'),
+  CR_CargarSaldoEmpleadoCobro_CTS
 );
 
 router.get(

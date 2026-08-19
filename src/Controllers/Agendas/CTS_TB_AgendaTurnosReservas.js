@@ -22,6 +22,7 @@ import AgendaTurnosModel              from '../../Models/Agenda/MD_TB_AgendaTurn
 import AgendaTurnosReservasModel      from '../../Models/Agenda/MD_TB_AgendaTurnosReservas.js';
 import AgendaTurnosListaEsperaModel   from '../../Models/Agenda/MD_TB_AgendaTurnosListaEspera.js';
 import AlumnosModel                   from '../../Models/Alumno/MD_TB_Alumnos.js';
+import AlumnosAnamnesisModel          from '../../Models/Alumno/MD_TB_AlumnosAnamnesis.js';
 import AlumnosMembresiasModel         from '../../Models/Alumno/MD_TB_AlumnosMembresias.js';
 import AlumnosAsistenciasModel        from '../../Models/Alumno/MD_TB_AlumnosAsistencias.js';
 import SistemaConfiguracionModel      from '../../Models/Sistema/MD_TB_SistemaConfiguracion.js';
@@ -602,7 +603,22 @@ export const OBRS_ClientesDisponiblesTurno_CTS = async (req, res) => {
     const puedePendiente = usuarioPuedeReservaPendiente(req);
     const puedePrueba = usuarioPuedeReservaPrueba(req);
 
+    // Sergio Manrique - Un alumno sin anamnesis cargada no puede anotarse a
+    // una clase (regla del gimnasio: no puede iniciar entrenamiento sin ese
+    // dato). Se resuelve en una sola consulta batch para no penalizar el
+    // buscador con N queries.
+    const anamnesisRegistradas = await AlumnosAnamnesisModel.findAll({
+      where: { alumno_id: { [Op.in]: alumnos.map((alumno) => alumno.id) } },
+      attributes: ['alumno_id'],
+      raw: true
+    });
+    const idsConAnamnesis = new Set(
+      anamnesisRegistradas.map((item) => Number(item.alumno_id))
+    );
+
     const data = await Promise.all(alumnos.map(async (alumno) => {
+      const tieneAnamnesis = idsConAnamnesis.has(Number(alumno.id));
+
       const base = {
         id: alumno.id,
         nombre: alumno.nombre,
@@ -618,11 +634,16 @@ export const OBRS_ClientesDisponiblesTurno_CTS = async (req, res) => {
         tipo_reserva_sugerido: 'normal',
         permite_reserva_pendiente: false,
         inscribible: false,
-        motivo_no_inscribible: null
+        motivo_no_inscribible: null,
+        tiene_anamnesis: tieneAnamnesis
       };
 
       if (turnoVencido) {
         return { ...base, motivo_no_inscribible: 'La clase ya finalizó' };
+      }
+
+      if (!tieneAnamnesis) {
+        return { ...base, motivo_no_inscribible: 'Falta anamnesis' };
       }
 
       if (esAlumnoPruebaInicial(alumno)) {
@@ -760,6 +781,21 @@ export const CR_ReservaAdmin_CTS = async (req, res) => {
       await transaccion.rollback();
       return res.status(403).json({
         message: 'El estado actual del alumno no permite reservar clases.'
+      });
+    }
+
+    // Sergio Manrique - Bloqueo real (no solo visual): un alumno sin
+    // anamnesis cargada no puede iniciar una clase. Se valida acá también
+    // para que no se pueda esquivar el bloqueo del buscador llamando este
+    // endpoint directo.
+    const tieneAnamnesis = await AlumnosAnamnesisModel.findOne({
+      where: { alumno_id },
+      transaction: transaccion
+    });
+    if (!tieneAnamnesis) {
+      await transaccion.rollback();
+      return res.status(403).json({
+        message: 'El alumno no tiene anamnesis cargada. Debe completarla antes de anotarse a una clase.'
       });
     }
 

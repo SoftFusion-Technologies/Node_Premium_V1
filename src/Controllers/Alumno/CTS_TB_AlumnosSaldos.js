@@ -116,11 +116,27 @@ export const OBR_SaldoAlumno_CTS = async (req, res) => {
       AlumnosSaldosModel.findOne({
         where: { alumno_id: Number(alumno_id), moneda: "ARS" },
       }),
-      AlumnosSaldosMovimientosModel.findAll({
-        where: { alumno_id: Number(alumno_id) },
-        order: [["id", "DESC"]],
-        limit: 50,
-      }),
+      db.query(
+        `SELECT
+           sm.*,
+           CONCAT_WS(' ', u.nombre, u.apellido) AS usuario_nombre,
+           cm.medio_pago_id,
+           mp.nombre AS medio_pago_nombre,
+           cm.estado AS caja_estado
+         FROM alumnos_saldos_movimientos sm
+         LEFT JOIN usuarios_usuarios u ON u.id = sm.usuario_id
+         LEFT JOIN cajas_movimientos cm
+           ON cm.referencia = sm.referencia
+          AND cm.estado = 'vigente'
+         LEFT JOIN pagos_medios_pago mp ON mp.id = cm.medio_pago_id
+         WHERE sm.alumno_id = :alumnoId
+         ORDER BY sm.id DESC
+         LIMIT 50`,
+        {
+          replacements: { alumnoId: Number(alumno_id) },
+          type: QueryTypes.SELECT,
+        },
+      ),
       AlumnosBonificacionesModel.findAll({
         where: { alumno_id: Number(alumno_id) },
         order: [["id", "DESC"]],
@@ -580,3 +596,361 @@ export const CR_BonificacionAlumno_CTS = async (req, res) => {
     );
   }
 };
+
+/*
+ * Benjamin Orellana - 2026/08/20 - Corrige una carga de saldo ingresada por
+ * error. Puede eliminarse cualquier crédito de bonificación/carga prepaga que
+ * no deje saldos históricos negativos. Si existen movimientos posteriores,
+ * sus saldos anterior/nuevo se recalculan dentro de la misma transacción. Las
+ * cargas que impactaron Caja se anulan/compensan también de forma atómica.
+ */
+export const DR_MovimientoSaldoAlumno_CTS = async (req, res) => {
+  const transaction = await db.transaction();
+
+  try {
+    const { alumno_id, movimiento_id } = req.params;
+    const usuarioId = Number(req.user?.id || req.user?.usuario_id);
+    const motivoEliminacion = String(
+      req.body?.motivo || "Corrección de saldo cargado por error",
+    )
+      .trim()
+      .slice(0, 255);
+
+    if (
+      !idValido(alumno_id) ||
+      !idValido(movimiento_id) ||
+      !idValido(usuarioId)
+    ) {
+      throw Object.assign(new Error("Alumno, movimiento o usuario inválido."), {
+        status: 400,
+      });
+    }
+
+    const alumno = await AlumnosModel.findByPk(Number(alumno_id), {
+      transaction,
+      lock: transaction.LOCK.UPDATE,
+    });
+    if (!alumno) {
+      throw Object.assign(new Error("No se encontró el alumno."), {
+        status: 404,
+      });
+    }
+
+    const cuenta = await AlumnosSaldosModel.findOne({
+      where: { alumno_id: Number(alumno_id), moneda: "ARS" },
+      transaction,
+      lock: transaction.LOCK.UPDATE,
+    });
+    if (!cuenta) {
+      throw Object.assign(new Error("El alumno no tiene una cuenta de saldo."), {
+        status: 404,
+      });
+    }
+
+    const movimiento = await AlumnosSaldosMovimientosModel.findOne({
+      where: {
+        id: Number(movimiento_id),
+        alumno_id: Number(alumno_id),
+        saldo_id: Number(cuenta.id),
+      },
+      transaction,
+      lock: transaction.LOCK.UPDATE,
+    });
+    if (!movimiento) {
+      throw Object.assign(new Error("No se encontró el movimiento de saldo."), {
+        status: 404,
+      });
+    }
+
+    const origen = String(movimiento.origen || "").toLowerCase();
+    const tipo = String(movimiento.tipo || "").toLowerCase();
+    if (
+      tipo !== "credito" ||
+      !["bonificacion", "carga_saldo"].includes(origen)
+    ) {
+      throw Object.assign(
+        new Error(
+          "Este movimiento no puede eliminarse. Sólo se pueden corregir cargas o bonificaciones acreditadas por error.",
+        ),
+        { status: 409 },
+      );
+    }
+
+    const movimientosCuenta = await AlumnosSaldosMovimientosModel.findAll({
+      where: { saldo_id: Number(cuenta.id) },
+      order: [["id", "ASC"]],
+      transaction,
+      lock: transaction.LOCK.UPDATE,
+    });
+
+    const indiceMovimiento = movimientosCuenta.findIndex(
+      (item) => Number(item.id) === Number(movimiento.id),
+    );
+    if (indiceMovimiento < 0) {
+      throw Object.assign(
+        new Error("No se pudo reconstruir el historial de saldo."),
+        { status: 409 },
+      );
+    }
+
+    const monto = redondear(Number(movimiento.monto || 0));
+    const saldoActual = redondear(Number(cuenta.saldo || 0));
+    if (monto <= 0) {
+      throw Object.assign(
+        new Error("El movimiento tiene un importe inválido y no puede eliminarse."),
+        { status: 409 },
+      );
+    }
+
+    // Simula el historial sin el crédito que se desea eliminar. Esto permite
+    // corregir, por ejemplo, la primera de dos cargas duplicadas, pero bloquea
+    // la operación si algún consumo posterior quedaría sin respaldo.
+    let saldoSimulado = redondear(Number(movimiento.saldo_anterior || 0));
+    const recalculosPosteriores = [];
+
+    for (const item of movimientosCuenta.slice(indiceMovimiento + 1)) {
+      const montoItem = redondear(Number(item.monto || 0));
+      const tipoItem = String(item.tipo || "").toLowerCase();
+      const saldoAnteriorRecalculado = saldoSimulado;
+
+      if (tipoItem === "credito") {
+        saldoSimulado = redondear(saldoSimulado + montoItem);
+      } else if (tipoItem === "debito") {
+        saldoSimulado = redondear(saldoSimulado - montoItem);
+      } else {
+        throw Object.assign(
+          new Error(
+            `El movimiento #${item.id} tiene un tipo no soportado para recalcular el historial.`,
+          ),
+          { status: 409 },
+        );
+      }
+
+      if (saldoSimulado < -0.009) {
+        throw Object.assign(
+          new Error(
+            "No puede eliminarse esta carga porque parte de ese saldo ya fue utilizada por movimientos posteriores.",
+          ),
+          { status: 409 },
+        );
+      }
+
+      recalculosPosteriores.push({
+        item,
+        saldo_anterior: redondear(saldoAnteriorRecalculado),
+        saldo_nuevo: redondear(saldoSimulado),
+      });
+    }
+
+    const saldoEsperado = redondear(saldoActual - monto);
+    if (saldoEsperado < -0.009) {
+      throw Object.assign(
+        new Error(
+          "No puede eliminarse esta carga porque el saldo disponible actual es insuficiente.",
+        ),
+        { status: 409 },
+      );
+    }
+
+    if (Math.abs(saldoSimulado - saldoEsperado) > 0.02) {
+      throw Object.assign(
+        new Error(
+          "El historial de saldo presenta una inconsistencia y no puede recalcularse automáticamente. Revisá la cuenta antes de eliminar la carga.",
+        ),
+        { status: 409 },
+      );
+    }
+
+    let cajaImpacto = null;
+
+    if (origen === "carga_saldo" && movimiento.referencia) {
+      const cajaOriginal = await CajasMovimientosModel.findOne({
+        where: {
+          referencia: String(movimiento.referencia),
+          estado: "vigente",
+        },
+        transaction,
+        lock: transaction.LOCK.UPDATE,
+      });
+
+      if (cajaOriginal) {
+        const sesionOriginal = await CajasSesionesModel.findByPk(
+          Number(cajaOriginal.caja_sesion_id),
+          {
+            transaction,
+            lock: transaction.LOCK.UPDATE,
+          },
+        );
+
+        if (String(sesionOriginal?.estado || "") === "abierta") {
+          await cajaOriginal.update(
+            {
+              estado: "anulado",
+              observaciones: [
+                cajaOriginal.observaciones,
+                `Corrección de saldo #${movimiento.id}: ${motivoEliminacion}`,
+              ]
+                .filter(Boolean)
+                .join(" | ")
+                .slice(0, 500),
+              updated_at: new Date(),
+            },
+            { transaction },
+          );
+
+          cajaImpacto = {
+            modo: "movimiento_original_anulado",
+            caja_movimiento_id: Number(cajaOriginal.id),
+            caja_sesion_id: Number(cajaOriginal.caja_sesion_id),
+          };
+        } else {
+          const sesionAbierta = await CajasSesionesModel.findOne({
+            where: {
+              sede_id: Number(cajaOriginal.sede_id),
+              estado: "abierta",
+            },
+            order: [["fecha_apertura", "DESC"], ["id", "DESC"]],
+            transaction,
+            lock: transaction.LOCK.UPDATE,
+          });
+
+          if (!sesionAbierta) {
+            throw Object.assign(
+              new Error(
+                "La carga pertenece a una caja cerrada. Abrí la caja de la sede para registrar la reversión.",
+              ),
+              { status: 409, code: "CAJA_NO_DISPONIBLE" },
+            );
+          }
+
+          const nombreAlumno = [alumno.nombre, alumno.apellido]
+            .filter(Boolean)
+            .join(" ")
+            .trim() || `Alumno #${alumno.id}`;
+          const referenciaReversion =
+            `REV-${String(movimiento.referencia)}`.slice(0, 120);
+
+          const reversionExistente = await CajasMovimientosModel.findOne({
+            where: {
+              referencia: referenciaReversion,
+              estado: "vigente",
+            },
+            transaction,
+          });
+
+          if (!reversionExistente) {
+            const reversionCaja = await CajasMovimientosModel.create(
+              {
+                caja_sesion_id: Number(sesionAbierta.id),
+                caja_id: Number(sesionAbierta.caja_id),
+                sede_id: Number(cajaOriginal.sede_id),
+                cobro_pago_id: null,
+                gasto_id: null,
+                medio_pago_id: cajaOriginal.medio_pago_id
+                  ? Number(cajaOriginal.medio_pago_id)
+                  : null,
+                usuario_registro_id: usuarioId,
+                tipo: "egreso",
+                origen: "reversion",
+                fecha_movimiento: new Date(),
+                monto: monto.toFixed(2),
+                descripcion:
+                  `Reversión carga de saldo · ${nombreAlumno}`.slice(0, 255),
+                estado: "vigente",
+                referencia: referenciaReversion,
+                observaciones: [
+                  `Movimiento de saldo eliminado #${movimiento.id}`,
+                  `Caja original #${cajaOriginal.id}`,
+                  motivoEliminacion,
+                ]
+                  .filter(Boolean)
+                  .join(" | ")
+                  .slice(0, 500),
+              },
+              { transaction },
+            );
+
+            cajaImpacto = {
+              modo: "reversion_en_caja_abierta",
+              caja_movimiento_id: Number(reversionCaja.id),
+              caja_sesion_id: Number(sesionAbierta.id),
+              caja_movimiento_original_id: Number(cajaOriginal.id),
+            };
+          } else {
+            cajaImpacto = {
+              modo: "reversion_existente",
+              caja_movimiento_id: Number(reversionExistente.id),
+              caja_sesion_id: Number(reversionExistente.caja_sesion_id),
+              caja_movimiento_original_id: Number(cajaOriginal.id),
+            };
+          }
+        }
+      }
+    }
+
+    const saldoNuevo = saldoSimulado;
+    const bonificacionId = movimiento.bonificacion_id
+      ? Number(movimiento.bonificacion_id)
+      : null;
+
+    // Mantiene coherente la auditoría de los movimientos que sobreviven a la
+    // corrección. Sólo se tocan saldo_anterior/saldo_nuevo; importe, origen,
+    // referencia y usuario permanecen intactos.
+    for (const recalculo of recalculosPosteriores) {
+      await recalculo.item.update(
+        {
+          saldo_anterior: recalculo.saldo_anterior.toFixed(2),
+          saldo_nuevo: recalculo.saldo_nuevo.toFixed(2),
+        },
+        { transaction },
+      );
+    }
+
+    await cuenta.update(
+      {
+        saldo: saldoNuevo.toFixed(2),
+        updated_at: new Date(),
+      },
+      { transaction },
+    );
+
+    await movimiento.destroy({ transaction });
+
+    if (bonificacionId) {
+      await AlumnosBonificacionesModel.destroy({
+        where: {
+          id: bonificacionId,
+          alumno_id: Number(alumno_id),
+        },
+        transaction,
+      });
+    }
+
+    await transaction.commit();
+
+    return res.json({
+      ok: true,
+      message: "La carga de saldo fue eliminada correctamente.",
+      data: {
+        alumno_id: Number(alumno_id),
+        movimiento_id: Number(movimiento_id),
+        monto_eliminado: monto,
+        saldo_anterior: saldoActual,
+        saldo_nuevo: saldoNuevo,
+        origen,
+        caja: cajaImpacto,
+        movimientos_recalculados: recalculosPosteriores.length,
+      },
+    });
+  } catch (requestError) {
+    if (!transaction.finished) await transaction.rollback();
+    console.error("Error DR_MovimientoSaldoAlumno_CTS:", requestError);
+    return error(
+      res,
+      Number(requestError?.status || 500),
+      requestError?.message ||
+        "Error interno al eliminar el movimiento de saldo.",
+    );
+  }
+};
+

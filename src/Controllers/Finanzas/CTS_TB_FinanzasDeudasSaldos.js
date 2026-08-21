@@ -363,7 +363,32 @@ WITH saldos_alumnos AS (
       FROM alumnos_saldos_movimientos sm
       WHERE sm.saldo_id = sa.id
       ORDER BY sm.id DESC LIMIT 1
-    ) AS ultimo_movimiento_monto
+    ) AS ultimo_movimiento_monto,
+    (
+      SELECT sm.origen
+      FROM alumnos_saldos_movimientos sm
+      WHERE sm.saldo_id = sa.id
+      ORDER BY sm.id DESC LIMIT 1
+    ) AS ultimo_movimiento_origen,
+    (
+      SELECT sm.motivo
+      FROM alumnos_saldos_movimientos sm
+      WHERE sm.saldo_id = sa.id
+      ORDER BY sm.id DESC LIMIT 1
+    ) AS ultimo_movimiento_motivo,
+    (
+      SELECT sm.referencia
+      FROM alumnos_saldos_movimientos sm
+      WHERE sm.saldo_id = sa.id
+      ORDER BY sm.id DESC LIMIT 1
+    ) AS ultimo_movimiento_referencia,
+    (
+      SELECT CONCAT_WS(' ', u2.nombre, u2.apellido)
+      FROM alumnos_saldos_movimientos sm
+      LEFT JOIN usuarios_usuarios u2 ON u2.id = sm.usuario_id
+      WHERE sm.saldo_id = sa.id
+      ORDER BY sm.id DESC LIMIT 1
+    ) AS ultimo_movimiento_usuario
   FROM alumnos_saldos sa
   INNER JOIN alumnos_alumnos a ON a.id = sa.alumno_id
   LEFT JOIN sedes_sedes s ON s.id = a.sede_id
@@ -408,7 +433,36 @@ saldos_empleados AS (
       WHERE um.saldo_id = us.id
         AND um.sede_id = s.id
       ORDER BY um.id DESC LIMIT 1
-    ) AS ultimo_movimiento_monto
+    ) AS ultimo_movimiento_monto,
+    (
+      SELECT um.origen
+      FROM usuarios_saldos_movimientos um
+      WHERE um.saldo_id = us.id
+        AND um.sede_id = s.id
+      ORDER BY um.id DESC LIMIT 1
+    ) AS ultimo_movimiento_origen,
+    (
+      SELECT um.motivo
+      FROM usuarios_saldos_movimientos um
+      WHERE um.saldo_id = us.id
+        AND um.sede_id = s.id
+      ORDER BY um.id DESC LIMIT 1
+    ) AS ultimo_movimiento_motivo,
+    (
+      SELECT um.referencia
+      FROM usuarios_saldos_movimientos um
+      WHERE um.saldo_id = us.id
+        AND um.sede_id = s.id
+      ORDER BY um.id DESC LIMIT 1
+    ) AS ultimo_movimiento_referencia,
+    (
+      SELECT CONCAT_WS(' ', u2.nombre, u2.apellido)
+      FROM usuarios_saldos_movimientos um
+      LEFT JOIN usuarios_usuarios u2 ON u2.id = um.usuario_registro_id
+      WHERE um.saldo_id = us.id
+        AND um.sede_id = s.id
+      ORDER BY um.id DESC LIMIT 1
+    ) AS ultimo_movimiento_usuario
   FROM usuarios_saldos us
   INNER JOIN usuarios_usuarios u ON u.id = us.usuario_id
   INNER JOIN sedes_sedes s ON (

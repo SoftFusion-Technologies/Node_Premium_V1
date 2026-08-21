@@ -138,6 +138,7 @@ import {
   OBR_SaldoAlumno_CTS,
   CR_BonificacionAlumno_CTS,
   CR_CargarSaldoAlumno_CTS,
+  DR_MovimientoSaldoAlumno_CTS,
 } from "../Controllers/Alumno/CTS_TB_AlumnosSaldos.js";
 
 import {
@@ -1084,6 +1085,19 @@ router.get(
     requireFinanzas: false,
   }),
   OBR_SaldoAlumno_CTS,
+);
+
+// Benjamin Orellana - 2026/08/20 - Corrige una carga/bonificación de saldo
+// ingresada por error. Permite corregir cualquier crédito elegible cuando el historial puede recalcularse sin saldos negativos.
+router.delete(
+  "/alumnos/:alumno_id/saldo/movimientos/:movimiento_id",
+  authenticateToken,
+  requireOperacionFinancieraAlumno("saldos.gestionar"),
+  requireFinancialScope({
+    sources: [sourceParam("alumno", "alumno_id")],
+    requireFinanzas: false,
+  }),
+  DR_MovimientoSaldoAlumno_CTS,
 );
 
 // Benjamin Orellana - 2026/06/15 - Congela membresía vigente del alumno.

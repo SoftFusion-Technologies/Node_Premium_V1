@@ -599,7 +599,6 @@ export const OBRS_ClientesDisponiblesTurno_CTS = async (req, res) => {
       limit: 30
     });
 
-    const turnoVencido = dayjs(`${turno.fecha} ${turno.hora_fin}`).isBefore(dayjs());
     const puedePendiente = usuarioPuedeReservaPendiente(req);
     const puedePrueba = usuarioPuedeReservaPrueba(req);
 
@@ -637,10 +636,6 @@ export const OBRS_ClientesDisponiblesTurno_CTS = async (req, res) => {
         motivo_no_inscribible: null,
         tiene_anamnesis: tieneAnamnesis
       };
-
-      if (turnoVencido) {
-        return { ...base, motivo_no_inscribible: 'La clase ya finalizó' };
-      }
 
       if (!tieneAnamnesis) {
         return { ...base, motivo_no_inscribible: 'Falta anamnesis' };
@@ -760,11 +755,6 @@ export const CR_ReservaAdmin_CTS = async (req, res) => {
       await transaccion.rollback();
       return res.status(400).json({ message: `No se puede inscribir en un turno ${turno.estado}.` });
     }
-    if (dayjs(`${turno.fecha} ${turno.hora_fin}`).isBefore(dayjs())) {
-      await transaccion.rollback();
-      return res.status(400).json({ message: 'No se puede inscribir en una clase que ya finalizó.' });
-    }
-
     const alumno = await AlumnosModel.findByPk(alumno_id, {
       transaction: transaccion,
       lock: transaccion.LOCK.UPDATE

@@ -466,12 +466,19 @@ export const OBR_DashboardVencimientosPorDia_CTS = async (req, res) => {
  * cotización vigente al cierre del mes, según finanzas_cotizaciones_usd).
  *
  * Ticket promedio = facturación bruta (TODO lo vendido: cuotas + productos
- * sueltos) / cantidad de cuotas cobradas en el período. El cliente confirmó
+ * sueltos) / cantidad de cuotas vendidas en el período. El cliente confirmó
  * (2026/07/17) que el divisor son las cuotas, no la cantidad total de
  * ventas/pagos: una venta suelta (agua, barrita, etc.) suma a la
- * facturación bruta pero NO cuenta como cuota. Por eso `cuotas_mensuales`
- * filtra `mensualidad_id IS NOT NULL` (los pagos sin mensualidad asociada
- * son ventas sueltas, no cuotas de socio).
+ * facturación bruta pero NO cuenta como cuota.
+ *
+ * `cuotas_mensuales` y `cuotas_vendidas` usan la MISMA fuente y regla desde
+ * 2026/08/24 (pedido del cliente): una mensualidad cuenta una única vez, en
+ * el mes en que se generó (`pagos_mensualidades.fecha_emision`), sin importar
+ * si se paga de una vez o en varias cuotas parciales. Antes `cuotas_mensuales`
+ * contaba pagos CONFIRMADOS (`pagos_pagos.fecha_pago`), lo que la hacía
+ * divergir de `cuotas_vendidas`: una misma venta pagada en 3 cuotas se
+ * contaba 3 veces, y una venta del mes que quedaba pendiente de cobro no se
+ * contaba ese mes. Se corrigió para que ambas coincidan.
  *
  * CAC Marketing = (gastos tipo Publicidad + Agencia) / altas del mes.
  * CAC Comercial = (gastos tipo Publicidad + Agencia + Front Comercial) /
@@ -533,10 +540,6 @@ export const OBR_DashboardCierreMensual_CTS = async (req, res) => {
           WHERE a.sede_id = s.id
             AND a.fecha_inicio < :desde
             AND (a.fecha_baja IS NULL OR a.fecha_baja >= :desde)) AS alumnos_inicio_mes,
-        (SELECT COUNT(*) FROM pagos_pagos p
-          WHERE p.sede_id = s.id AND p.estado = 'confirmado'
-            AND p.mensualidad_id IS NOT NULL
-            AND DATE(p.fecha_pago) BETWEEN :desde AND :hasta) AS cuotas_mensuales,
         (SELECT COUNT(*) FROM pagos_mensualidades pm
           WHERE pm.sede_id = s.id
             AND pm.fecha_emision BETWEEN :desde AND :hasta) AS cuotas_vendidas,
@@ -583,8 +586,10 @@ export const OBR_DashboardCierreMensual_CTS = async (req, res) => {
       const gastoMarketing = Number(fila.gasto_marketing) || 0;
       const gastoFrontComercial = Number(fila.gasto_front_comercial) || 0;
       const altasMensuales = Number(fila.altas_mensuales) || 0;
-      const cuotasMensuales = Number(fila.cuotas_mensuales) || 0;
       const cuotasVendidas = Number(fila.cuotas_vendidas) || 0;
+      // Misma cifra que cuotas_vendidas: una mensualidad cuenta una única vez,
+      // en el mes en que se generó, sin importar en cuántos pagos se cobre.
+      const cuotasMensuales = cuotasVendidas;
       const facturacionNeta = facturacionBruta - gastos;
 
       const churnMensual = alumnosInicioMes > 0

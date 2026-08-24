@@ -695,13 +695,13 @@ export const CR_PlanesPreciosMasivoPorSedes_CTS = async (req, res) => {
       const sede_id = item?.sede_id;
       const precio = item?.precio;
 
-      if (!esImporteValido(precio) || Number(precio) <= 0) {
+      if (!esImporteValido(precio) || Number(precio) < 0) {
         await transaction.rollback();
 
         return responderError(
           res,
           400,
-          'Todos los precios deben ser importes válidos mayores a 0.'
+          'Todos los precios deben ser importes válidos mayores o iguales a 0.'
         );
       }
 

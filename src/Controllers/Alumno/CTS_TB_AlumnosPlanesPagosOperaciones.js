@@ -1560,23 +1560,13 @@ export const UR_MembresiaMigracionAlumnoPlanesPagos_CTS = async (req, res) => {
     const cambiaFechaInicio = fechaInicioActual !== fechaInicio;
     const cambiaFechaVencimiento =
       fechaVencimientoActual !== fechaVencimiento;
-    const acortaFechaVencimiento =
-      fechaVencimiento < fechaVencimientoActual;
-
-    // Regalar créditos o extender el vencimiento no invalida reservas existentes.
-    // Se mantiene la protección cuando cambia plan/sede/inicio o se acorta la cobertura.
-    if (
-      cambiaPlan ||
-      cambiaSede ||
-      cambiaFechaInicio ||
-      acortaFechaVencimiento
-    ) {
-      await bloquearOperacionConReservas({
-        alumnoId,
-        transaction,
-        operacion: 'modificar el plan o reducir la cobertura de la membresía'
-      });
-    }
+    // 2026/08/24 - EDICION_MEMBRESIA_SIN_BLOQUEO_RESERVAS
+    // Una corrección administrativa de plan/fechas/créditos no se bloquea por
+    // reservas futuras del alumno. Las reservas existentes se conservan tal
+    // como están, incluyendo su membresia_id original, y no se cancelan,
+    // reprograman ni reasignan automáticamente. Esto permite corregir el nuevo
+    // ciclo aunque el alumno todavía tenga reservas correspondientes al ciclo
+    // anterior.
 
     // Los ajustes exclusivos de créditos u observaciones no deben quedar
     // bloqueados por superposiciones históricas que ya existían en los datos.

@@ -14,6 +14,7 @@ import {
 } from '../Controllers/Catalogo/CTS_TB_CatalogoCobros.js';
 import {
   OBR_CatalogosProductosGestion_CTS,
+  OBR_StockOperativo_CTS,
   OBR_ProductosGestion_CTS,
   OBR_ProductoGestionDetalle_CTS,
   CR_ProductoGestion_CTS,
@@ -66,6 +67,8 @@ router.get('/catalogo-cobros/productos/categorias', ...seguridadProductosCobro, 
 router.get('/catalogo-cobros/productos/filtros', ...seguridadProductosCobro, OBR_FiltrosProductosCobro_CTS);
 router.get('/catalogo-cobros/productos', ...seguridadProductosCobro, OBR_ProductosCobro_CTS);
 router.get('/catalogo-cobros/planes', ...seguridadCobros, OBR_PlanesCobro_CTS);
+
+router.get('/stock-operativo', ...seguridadProductosCobro, OBR_StockOperativo_CTS);
 
 router.get('/productos-gestion/catalogos', ...seguridadProductosVer, OBR_CatalogosProductosGestion_CTS);
 router.post('/productos-gestion/catalogos/:entidad', ...seguridadProductosConfigurar, CR_ClasificacionProductoGestion_CTS);

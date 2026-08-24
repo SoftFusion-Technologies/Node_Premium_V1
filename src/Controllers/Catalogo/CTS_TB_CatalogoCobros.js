@@ -253,6 +253,13 @@ export const OBR_CategoriasProductosCobro_CTS = async (req, res) => {
           ON pp.categoria_id = pc.id
           AND pp.activo = 1
         WHERE pc.activo = 1
+          AND NOT EXISTS (
+            SELECT 1
+            FROM productos_stock_sedes psx
+            WHERE psx.producto_id = pp.id
+              AND psx.sede_id = :sedeId
+              AND psx.activo = 0
+          )
           AND EXISTS (
             SELECT 1
             FROM productos_precios pr
@@ -438,8 +445,8 @@ export const OBR_ProductosCobro_CTS = async (req, res) => {
         LEFT JOIN productos_stock_sedes ps
           ON ps.producto_id = pp.id
           AND ps.sede_id = :sedeId
-          AND ps.activo = 1
-        WHERE ${condiciones.join(' AND ')}
+        WHERE (ps.id IS NULL OR ps.activo = 1)
+          AND ${condiciones.join(' AND ')}
         ORDER BY pc.orden ASC, pp.orden ASC, pp.nombre ASC
       `,
       { replacements, type: QueryTypes.SELECT }

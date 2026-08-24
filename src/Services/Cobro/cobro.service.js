@@ -3084,11 +3084,16 @@ const construirAnalisisAnulacionCobro = async ({
         continue;
       }
 
-      if (Number(membresia.clases_usadas || 0) > 0) {
-        agregarBloqueo(
-          "MEMBRESIA_CON_USO",
-          "La membresía ya tiene clases consumidas.",
-          `Membresía #${membresia.id}: ${Number(membresia.clases_usadas || 0)} clases usadas.`,
+      // Benjamin Orellana - 2026/08/24 - CORRECCION_ADMIN_SIN_BLOQUEO_POR_USO
+      // Las clases/asistencias históricas NO impiden corregir un cobro.
+      // Si la membresía ya tuvo uso, la reversión financiera continúa pero la
+      // membresía y sus créditos se conservan para no destruir el historial ni
+      // dejar al alumno sin el ciclo que efectivamente está utilizando.
+      const clasesUsadasMembresia = Number(membresia.clases_usadas || 0);
+      if (clasesUsadasMembresia > 0) {
+        agregarAdvertencia(
+          "La membresía ya tiene clases consumidas; no bloquea la anulación.",
+          `Membresía #${membresia.id}: ${clasesUsadasMembresia} clases usadas. Se conservarán la membresía y sus créditos.`,
         );
       }
       const asistencias = await db.query(
@@ -3099,11 +3104,11 @@ const construirAnalisisAnulacionCobro = async ({
           transaction,
         },
       );
-      if (Number(asistencias[0]?.cantidad || 0) > 0) {
-        agregarBloqueo(
-          "MEMBRESIA_CON_ASISTENCIAS",
-          "La membresía tiene asistencias registradas.",
-          `Membresía #${membresia.id}: ${Number(asistencias[0]?.cantidad || 0)} asistencias.`,
+      const cantidadAsistencias = Number(asistencias[0]?.cantidad || 0);
+      if (cantidadAsistencias > 0) {
+        agregarAdvertencia(
+          "La membresía tiene asistencias registradas; se conserva el historial.",
+          `Membresía #${membresia.id}: ${cantidadAsistencias} asistencia${cantidadAsistencias === 1 ? "" : "s"}. Esto no impide anular el cobro.`,
         );
       }
 
@@ -3162,13 +3167,20 @@ const construirAnalisisAnulacionCobro = async ({
         );
       }
 
+      const preservarMembresiaPorUso =
+        clasesUsadasMembresia > 0 || cantidadAsistencias > 0;
       agregarImpacto({
         tipo: "plan",
         titulo: detalle.nombre_snapshot || "Plan",
-        detalle: `Se cancelará la membresía #${membresia.id} y se anulará la cuota #${mensualidad.id}.`,
+        detalle: preservarMembresiaPorUso
+          ? `Se anularán la cuota #${mensualidad.id} y su pago, pero se conservará la membresía #${membresia.id} con sus créditos e historial.`
+          : `Se cancelará la membresía #${membresia.id} y se anulará la cuota #${mensualidad.id}.`,
         monto: Number(mensualidad.saldo || 0),
       });
-      if (String(membresia.observaciones || "").includes("NUEVO_CICLO_RENOVACION_EXPLICITA")) {
+      if (
+        !preservarMembresiaPorUso &&
+        String(membresia.observaciones || "").includes("NUEVO_CICLO_RENOVACION_EXPLICITA")
+      ) {
         agregarImpacto({
           tipo: "plan_restauracion",
           titulo: "Ciclo anterior",
@@ -4227,14 +4239,13 @@ const validarYRevertirPlan = async ({
     );
   }
 
-  if (Number(membresia.clases_usadas || 0) > 0) {
-    throw new CobroOperacionError(
-      "La membresía ya tiene clases consumidas. Regularizá esas asistencias antes de anular el cobro.",
-      409,
-      "MEMBRESIA_CON_USO",
-    );
-  }
-
+  // Benjamin Orellana - 2026/08/24 - CORRECCION_ADMIN_SIN_BLOQUEO_POR_USO
+  // La corrección financiera nunca se bloquea por clases usadas/asistencias.
+  // Cuando ya existe uso real, preservamos la membresía completa (estado,
+  // créditos y vínculos históricos) y anulamos únicamente la parte financiera
+  // originada por este cobro. De esta forma el administrador puede corregir una
+  // carga de pago/fecha sin perder clases que corresponden al alumno.
+  const clasesUsadasMembresia = Number(membresia.clases_usadas || 0);
   const asistencias = await db.query(
     "SELECT COUNT(*) AS cantidad FROM alumnos_asistencias WHERE membresia_id = :membresiaId",
     {
@@ -4243,26 +4254,38 @@ const validarYRevertirPlan = async ({
       transaction,
     },
   );
-  if (Number(asistencias[0]?.cantidad || 0) > 0) {
-    throw new CobroOperacionError(
-      "La membresía tiene asistencias registradas. Regularizalas antes de anular el cobro.",
-      409,
-      "MEMBRESIA_CON_ASISTENCIAS",
+  const cantidadAsistencias = Number(asistencias[0]?.cantidad || 0);
+  const preservarMembresiaPorUso =
+    clasesUsadasMembresia > 0 || cantidadAsistencias > 0;
+
+  const notaBase = `Anulado por usuario #${usuarioId}: ${motivo}`;
+  const nota = preservarMembresiaPorUso
+    ? `${notaBase} | Corrección administrativa: membresía #${membresia.id} preservada por registrar ${clasesUsadasMembresia} clases usadas y ${cantidadAsistencias} asistencias.`
+    : notaBase;
+
+  if (preservarMembresiaPorUso) {
+    await membresia.update(
+      {
+        observaciones: [membresia.observaciones, nota]
+          .filter(Boolean)
+          .join(" | "),
+        updated_at: new Date(),
+      },
+      { transaction },
+    );
+  } else {
+    await membresia.update(
+      {
+        estado: "cancelada",
+        clases_disponibles: 0,
+        observaciones: [membresia.observaciones, nota]
+          .filter(Boolean)
+          .join(" | "),
+        updated_at: new Date(),
+      },
+      { transaction },
     );
   }
-
-  const nota = `Anulado por usuario #${usuarioId}: ${motivo}`;
-  await membresia.update(
-    {
-      estado: "cancelada",
-      clases_disponibles: 0,
-      observaciones: [membresia.observaciones, nota]
-        .filter(Boolean)
-        .join(" | "),
-      updated_at: new Date(),
-    },
-    { transaction },
-  );
   await mensualidad.update(
     {
       estado: "anulada",
@@ -4287,7 +4310,10 @@ const validarYRevertirPlan = async ({
   }
 
   const observacionesNueva = String(membresia.observaciones || "");
-  if (observacionesNueva.includes("NUEVO_CICLO_RENOVACION_EXPLICITA")) {
+  if (
+    !preservarMembresiaPorUso &&
+    observacionesNueva.includes("NUEVO_CICLO_RENOVACION_EXPLICITA")
+  ) {
     const coincidenciaOrigen = observacionesNueva.match(
       /NUEVO_CICLO_RENOVACION_EXPLICITA desde membresía #(\d+)/,
     );

@@ -234,38 +234,25 @@ const recalcularEstadoAlumno = async ({
   });
 
   if (membresiaFutura) {
-    const actualizado = await actualizarAlumnoSiCorresponde({
-      alumno,
-      payload: {
-        estado: 'inactivo'
-      },
-      transaction
-    });
-
+    // 2026/08/25 - NO_INACTIVAR_ALUMNO_POR_FALTA_DE_COBERTURA_ACTUAL
+    // Una cobertura futura no modifica automáticamente el estado administrativo.
     return {
       alumno_id: Number(alumno.id),
-      accion: actualizado
-        ? 'actualizado_inactivo_con_cobertura_futura'
-        : 'sin_cambios_inactivo_con_cobertura_futura',
+      accion: 'sin_cambios_con_cobertura_futura',
       estado_anterior: estadoAnterior,
-      estado_nuevo: 'inactivo',
+      estado_nuevo: estadoAnterior,
       membresia_id: Number(membresiaFutura.id)
     };
   }
 
-  const actualizado = await actualizarAlumnoSiCorresponde({
-    alumno,
-    payload: {
-      estado: 'inactivo'
-    },
-    transaction
-  });
-
+  // 2026/08/25 - NO_INACTIVAR_ALUMNO_POR_FALTA_DE_COBERTURA_ACTUAL
+  // El vencimiento se expresa en alumnos_membresias. El estado del alumno
+  // se conserva y no se fuerza automáticamente a inactivo.
   return {
     alumno_id: Number(alumno.id),
-    accion: actualizado ? 'actualizado_inactivo' : 'sin_cambios_inactivo',
+    accion: 'sin_cambios_sin_cobertura_actual',
     estado_anterior: estadoAnterior,
-    estado_nuevo: 'inactivo'
+    estado_nuevo: estadoAnterior
   };
 };
 

@@ -136,6 +136,7 @@ import {
 
 import {
   OBR_SaldoAlumno_CTS,
+  OBR_HistorialFinancieroAlumno_CTS,
   CR_BonificacionAlumno_CTS,
   CR_CargarSaldoAlumno_CTS,
   DR_MovimientoSaldoAlumno_CTS,
@@ -1085,6 +1086,16 @@ router.get(
     requireFinanzas: false,
   }),
   OBR_SaldoAlumno_CTS,
+);
+
+// Benjamin Orellana - 2026/08/26 - Línea de tiempo financiera integral de la ficha del alumno.
+// Solo lectura: compras/cobros y libro mayor de saldo, con el mismo alcance financiero de pagos.
+router.get(
+  "/alumnos/:alumno_id/historial-financiero",
+  authenticateToken,
+  requirePermission("pagos.ver"),
+  alcanceAlumno("pagos.ver"),
+  OBR_HistorialFinancieroAlumno_CTS,
 );
 
 // Benjamin Orellana - 2026/08/20 - Corrige una carga/bonificación de saldo

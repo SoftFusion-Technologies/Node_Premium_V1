@@ -251,6 +251,7 @@ const construirSubconsultaFechaVencimientoMembresia = () => {
     FROM ${tablaMembresias} AS ${aliasMembresia}
     WHERE ${aliasMembresia}.alumno_id = ${aliasPrincipal}.${columnaIdAlumno}
       AND ${aliasMembresia}.estado IN ('activa', 'vencida', 'congelada')
+      AND ${aliasMembresia}.fecha_inicio <= CURDATE()
     ORDER BY ${aliasMembresia}.fecha_inicio DESC, ${aliasMembresia}.id DESC
     LIMIT 1
   )`;
@@ -506,11 +507,13 @@ const obtenerVencimientosComercialesPorAlumnos = async (alumnoIds) => {
       FROM alumnos_membresias m
       WHERE m.alumno_id IN (:alumnoIds)
         AND m.estado IN ('activa', 'vencida', 'congelada')
+        AND m.fecha_inicio <= CURDATE()
         AND NOT EXISTS (
           SELECT 1
           FROM alumnos_membresias posterior
           WHERE posterior.alumno_id = m.alumno_id
             AND posterior.estado IN ('activa', 'vencida', 'congelada')
+            AND posterior.fecha_inicio <= CURDATE()
             AND (
               posterior.fecha_inicio > m.fecha_inicio
               OR (
@@ -682,6 +685,7 @@ export const construirAlumnoRespuesta = async (alumno, transaction = null) => {
     usuarioValidacion,
     contactosEmergencia,
     membresiaVigente,
+    membresiaProxima,
     ultimaMembresia,
     anamnesis
   ] = await Promise.all([
@@ -749,6 +753,45 @@ export const construirAlumnoRespuesta = async (alumno, transaction = null) => {
       ],
       transaction
     }),
+    // Benjamin Orellana - 2026/08/26 - La proxima membresia se expone
+    // separada de la cobertura vigente para evitar mezclar fechas y creditos.
+    AlumnosMembresiasModel.findOne({
+      where: {
+        alumno_id: alumnoPlano.id,
+        estado: {
+          [Op.in]: ['activa', 'pendiente_pago', 'congelada']
+        },
+        fecha_inicio: {
+          [Op.gt]: obtenerFechaActualDateOnly()
+        }
+      },
+      include: [
+        {
+          model: PlanesModel,
+          as: 'plan',
+          attributes: [
+            'id',
+            'nombre',
+            'codigo',
+            'clases_por_mes',
+            'cantidad_clases_periodo',
+            'periodo',
+            'duracion_dias',
+            'activo'
+          ]
+        },
+        {
+          model: SedesModel,
+          as: 'sede',
+          attributes: ['id', 'nombre', 'codigo', 'activo']
+        }
+      ],
+      order: [
+        ['fecha_inicio', 'ASC'],
+        ['id', 'ASC']
+      ],
+      transaction
+    }),
     AlumnosMembresiasModel.findOne({
       where: {
         alumno_id: alumnoPlano.id
@@ -800,11 +843,13 @@ export const construirAlumnoRespuesta = async (alumno, transaction = null) => {
       ? eliminarPasswordHash(usuarioValidacion)
       : null,
     contactos_emergencia: contactosEmergencia,
-    // Conserva el contrato histórico de `membresias` y garantiza que
-    // `membresia_actual` priorice siempre la cobertura que incluye hoy. Una
-    // renovación futura solo se usa como respaldo si no existe una vigente.
+    // Benjamin Orellana - 2026/08/26 - Contrato explicito de cobertura:
+    // actual = incluye HOY, proxima = empieza despues de HOY, ultima = respaldo
+    // historico. Nunca se mezclan fechas de una con creditos de otra.
     membresias: membresiaVigente,
-    membresia_actual: membresiaVigente || ultimaMembresia,
+    membresia_actual: membresiaVigente || null,
+    membresia_proxima: membresiaProxima || null,
+    ultima_membresia: ultimaMembresia || null,
     anamnesis
   };
 };
@@ -2055,6 +2100,101 @@ export const OBR_AlumnoPorDni_CTS = async (req, res) => {
   }
 };
 
+
+/*
+ * Benjamin Orellana - 2026/08/26 - Resumen financiero visible en el portal
+ * alumno. Se mantiene separado del estado administrativo del alumno.
+ */
+const obtenerSituacionFinancieraAlumnoPortal = async (
+  alumnoId,
+  transaction = null
+) => {
+  const [fila] = await db.query(
+    `
+      SELECT
+        COALESCE((
+          SELECT MAX(s.saldo)
+          FROM alumnos_saldos s
+          WHERE s.alumno_id = :alumnoId
+        ), 0) AS saldo_favor,
+        COALESCE((
+          SELECT SUM(pm.saldo)
+          FROM pagos_mensualidades pm
+          WHERE pm.alumno_id = :alumnoId
+            AND pm.estado IN ('pendiente', 'parcial', 'vencida')
+            AND pm.saldo > 0
+        ), 0) AS saldo_deudor
+    `,
+    {
+      replacements: { alumnoId: Number(alumnoId) },
+      type: QueryTypes.SELECT,
+      transaction
+    }
+  );
+
+  return {
+    saldo_favor: Number(fila?.saldo_favor || 0),
+    saldo_deudor: Number(fila?.saldo_deudor || 0)
+  };
+};
+
+/*
+ * Benjamin Orellana - 2026/08/26 - Devuelve únicamente coordinadores activos
+ * asignados a la misma sede del alumno y con teléfono válido para contacto.
+ */
+const obtenerCoordinadoresSedeAlumno = async (
+  sedeId,
+  transaction = null
+) => {
+  const sedeNumero = Number(sedeId);
+  if (!Number.isInteger(sedeNumero) || sedeNumero <= 0) return [];
+
+  const filas = await db.query(
+    `
+      SELECT
+        u.id,
+        u.nombre,
+        u.apellido,
+        u.telefono,
+        s.id AS sede_id,
+        s.nombre AS sede_nombre
+      FROM usuarios_usuarios u
+      INNER JOIN usuarios_roles r
+        ON r.id = u.rol_id
+       AND r.codigo = 'COORD_SEDE'
+       AND r.activo = 1
+      INNER JOIN usuarios_sedes us
+        ON us.usuario_id = u.id
+       AND us.sede_id = :sedeId
+       AND us.activo = 1
+      INNER JOIN sedes_sedes s
+        ON s.id = us.sede_id
+      WHERE u.estado = 'activo'
+        AND u.telefono IS NOT NULL
+        AND TRIM(u.telefono) <> ''
+      ORDER BY
+        CASE WHEN u.sede_principal_id = :sedeId THEN 0 ELSE 1 END,
+        u.nombre ASC,
+        u.apellido ASC,
+        u.id ASC
+    `,
+    {
+      replacements: { sedeId: sedeNumero },
+      type: QueryTypes.SELECT,
+      transaction
+    }
+  );
+
+  return filas.map((fila) => ({
+    id: Number(fila.id),
+    nombre: fila.nombre || '',
+    apellido: fila.apellido || '',
+    telefono: fila.telefono || '',
+    sede_id: Number(fila.sede_id),
+    sede_nombre: fila.sede_nombre || ''
+  }));
+};
+
 /*
  * Benjamin Orellana - 2026/05/26 - Obtiene perfil del alumno autenticado desde el portal/app.
  */
@@ -2071,14 +2211,24 @@ export const OBR_AlumnoPerfil_CTS = async (req, res) => {
       });
     }
 
-    const [datosAlumno, resumenActividad] = await Promise.all([
+    const [
+      datosAlumno,
+      resumenActividad,
+      situacionFinanciera,
+      coordinadores
+    ] = await Promise.all([
       construirAlumnoRespuesta(alumno),
-      obtenerResumenActividadAlumno(alumno.id)
+      obtenerResumenActividadAlumno(alumno.id),
+      obtenerSituacionFinancieraAlumnoPortal(alumno.id),
+      obtenerCoordinadoresSedeAlumno(alumno.sede_id)
     ]);
 
     const data = {
       ...datosAlumno,
       ...resumenActividad,
+      saldo_favor: situacionFinanciera.saldo_favor,
+      saldo_deudor: situacionFinanciera.saldo_deudor,
+      coordinadores,
       ultima_asistencia:
         resumenActividad.ultima_asistencia ||
         datosAlumno.ultima_asistencia ||

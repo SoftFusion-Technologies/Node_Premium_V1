@@ -160,6 +160,229 @@ export const OBR_SaldoAlumno_CTS = async (req, res) => {
   }
 };
 
+
+/*
+ * Benjamin Orellana - 2026/08/26 - Historial financiero integral de la ficha
+ * del alumno. Complementa membresías/mensualidades/pagos con compras reales y
+ * libro mayor de saldo a favor, sin modificar Caja, Cobros ni cuentas.
+ */
+export const OBR_HistorialFinancieroAlumno_CTS = async (req, res) => {
+  try {
+    const { alumno_id } = req.params;
+    if (!idValido(alumno_id)) return error(res, 400, "Alumno inválido.");
+
+    const alumnoId = Number(alumno_id);
+    const alumno = await AlumnosModel.findByPk(alumnoId, {
+      attributes: ["id"],
+    });
+    if (!alumno) return error(res, 404, "No se encontró el alumno.");
+
+    const cobros = await db.query(
+      `SELECT
+         c.id,
+         c.sede_id,
+         s.nombre AS sede_nombre,
+         c.caja_sesion_id,
+         c.fecha_cobro,
+         c.importe,
+         c.descuentos,
+         c.impuestos,
+         c.total,
+         c.moneda,
+         c.estado,
+         c.observaciones,
+         c.fecha_anulacion,
+         c.motivo_anulacion,
+         CONCAT_WS(' ', ur.nombre, ur.apellido) AS registrado_por
+       FROM cobros_cobros c
+       LEFT JOIN sedes_sedes s ON s.id = c.sede_id
+       LEFT JOIN usuarios_usuarios ur ON ur.id = c.usuario_registro_id
+       WHERE c.cliente_tipo = 'alumno'
+         AND c.alumno_id = :alumnoId
+       ORDER BY c.fecha_cobro DESC, c.id DESC
+       LIMIT 200`,
+      {
+        replacements: { alumnoId },
+        type: QueryTypes.SELECT,
+      },
+    );
+
+    const cobroIds = cobros
+      .map((item) => Number(item.id))
+      .filter((id) => Number.isInteger(id) && id > 0);
+
+    let detalles = [];
+    let pagosCobro = [];
+
+    if (cobroIds.length > 0) {
+      [detalles, pagosCobro] = await Promise.all([
+        db.query(
+          `SELECT
+             cd.id,
+             cd.cobro_id,
+             cd.tipo,
+             cd.referencia_id,
+             cd.nombre_snapshot,
+             cd.categoria_snapshot,
+             cd.cantidad,
+             cd.precio_unitario,
+             cd.descuento_importe,
+             cd.importe,
+             cd.total,
+             cd.membresia_id,
+             cd.mensualidad_id,
+             cd.pago_id,
+             cd.created_at
+           FROM cobros_detalles cd
+           WHERE cd.cobro_id IN (:cobroIds)
+           ORDER BY cd.cobro_id DESC, cd.id ASC`,
+          {
+            replacements: { cobroIds },
+            type: QueryTypes.SELECT,
+          },
+        ),
+        db.query(
+          `SELECT
+             cp.id,
+             cp.cobro_id,
+             cp.medio_pago_id,
+             mp.nombre AS medio_pago_nombre,
+             mp.codigo AS medio_pago_codigo,
+             mp.impacta_caja,
+             cp.monto,
+             cp.estado,
+             cp.referencia,
+             cp.created_at,
+             cp.updated_at
+           FROM cobros_pagos cp
+           INNER JOIN pagos_medios_pago mp ON mp.id = cp.medio_pago_id
+           WHERE cp.cobro_id IN (:cobroIds)
+           ORDER BY cp.cobro_id DESC, cp.id ASC`,
+          {
+            replacements: { cobroIds },
+            type: QueryTypes.SELECT,
+          },
+        ),
+      ]);
+    }
+
+    const movimientosSaldo = await db.query(
+      `SELECT
+         sm.id,
+         sm.saldo_id,
+         sm.alumno_id,
+         sm.sede_id,
+         s.nombre AS sede_nombre,
+         sm.usuario_id,
+         CONCAT_WS(' ', u.nombre, u.apellido) AS usuario_nombre,
+         sm.tipo,
+         sm.origen,
+         sm.monto,
+         sm.saldo_anterior,
+         sm.saldo_nuevo,
+         sm.cobro_id,
+         sm.bonificacion_id,
+         sm.referencia,
+         sm.motivo,
+         sm.created_at,
+         cm.medio_pago_id,
+         mp.nombre AS medio_pago_nombre,
+         mp.codigo AS medio_pago_codigo,
+         cm.estado AS caja_estado
+       FROM alumnos_saldos_movimientos sm
+       LEFT JOIN sedes_sedes s ON s.id = sm.sede_id
+       LEFT JOIN usuarios_usuarios u ON u.id = sm.usuario_id
+       LEFT JOIN cajas_movimientos cm
+         ON cm.referencia = sm.referencia
+        AND cm.estado = 'vigente'
+       LEFT JOIN pagos_medios_pago mp ON mp.id = cm.medio_pago_id
+       WHERE sm.alumno_id = :alumnoId
+       ORDER BY sm.created_at DESC, sm.id DESC
+       LIMIT 250`,
+      {
+        replacements: { alumnoId },
+        type: QueryTypes.SELECT,
+      },
+    );
+
+    const detallesPorCobro = new Map();
+    detalles.forEach((detalle) => {
+      const cobroId = Number(detalle.cobro_id);
+      if (!detallesPorCobro.has(cobroId)) detallesPorCobro.set(cobroId, []);
+      detallesPorCobro.get(cobroId).push({
+        ...detalle,
+        id: Number(detalle.id),
+        cobro_id: cobroId,
+        referencia_id: Number(detalle.referencia_id),
+        cantidad: Number(detalle.cantidad || 0),
+        precio_unitario: Number(detalle.precio_unitario || 0),
+        descuento_importe: Number(detalle.descuento_importe || 0),
+        importe: Number(detalle.importe || 0),
+        total: Number(detalle.total || 0),
+        membresia_id: detalle.membresia_id ? Number(detalle.membresia_id) : null,
+        mensualidad_id: detalle.mensualidad_id
+          ? Number(detalle.mensualidad_id)
+          : null,
+        pago_id: detalle.pago_id ? Number(detalle.pago_id) : null,
+      });
+    });
+
+    const pagosPorCobro = new Map();
+    pagosCobro.forEach((pago) => {
+      const cobroId = Number(pago.cobro_id);
+      if (!pagosPorCobro.has(cobroId)) pagosPorCobro.set(cobroId, []);
+      pagosPorCobro.get(cobroId).push({
+        ...pago,
+        id: Number(pago.id),
+        cobro_id: cobroId,
+        medio_pago_id: Number(pago.medio_pago_id),
+        impacta_caja: Number(pago.impacta_caja || 0),
+        monto: Number(pago.monto || 0),
+      });
+    });
+
+    return res.json({
+      ok: true,
+      data: {
+        alumno_id: alumnoId,
+        cobros: cobros.map((cobro) => ({
+          ...cobro,
+          id: Number(cobro.id),
+          sede_id: Number(cobro.sede_id),
+          caja_sesion_id: Number(cobro.caja_sesion_id),
+          importe: Number(cobro.importe || 0),
+          descuentos: Number(cobro.descuentos || 0),
+          impuestos: Number(cobro.impuestos || 0),
+          total: Number(cobro.total || 0),
+          detalles: detallesPorCobro.get(Number(cobro.id)) || [],
+          pagos: pagosPorCobro.get(Number(cobro.id)) || [],
+        })),
+        movimientos_saldo: movimientosSaldo.map((movimiento) => ({
+          ...movimiento,
+          id: Number(movimiento.id),
+          saldo_id: Number(movimiento.saldo_id),
+          alumno_id: Number(movimiento.alumno_id),
+          sede_id: movimiento.sede_id ? Number(movimiento.sede_id) : null,
+          usuario_id: Number(movimiento.usuario_id),
+          monto: Number(movimiento.monto || 0),
+          saldo_anterior: Number(movimiento.saldo_anterior || 0),
+          saldo_nuevo: Number(movimiento.saldo_nuevo || 0),
+          cobro_id: movimiento.cobro_id ? Number(movimiento.cobro_id) : null,
+          bonificacion_id: movimiento.bonificacion_id
+            ? Number(movimiento.bonificacion_id)
+            : null,
+          medio_pago_id: movimiento.medio_pago_id
+            ? Number(movimiento.medio_pago_id)
+            : null,
+        })),
+      },
+    });
+  } catch (requestError) {
+    console.error("Error OBR_HistorialFinancieroAlumno_CTS:", requestError);
+    return error(res, 500, "Error interno al consultar el historial financiero.");
+  }
+};
+
 /*
  * Benjamin Orellana - 2026/08/19 - Carga PREPAGA de saldo a favor.
  * A diferencia de una bonificación administrativa, esta operación representa

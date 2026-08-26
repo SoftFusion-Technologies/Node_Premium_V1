@@ -268,9 +268,11 @@ export const OBR_DashboardCortesActividad_CTS = async (req, res) => {
             ) totales) AS facturacion_acumulada_promedio_anual,
             (SELECT COUNT(*) FROM pagos_mensualidades pm
               WHERE pm.sede_id = s.id
+                AND pm.estado <> 'anulada'
                 AND pm.fecha_emision BETWEEN :primerDiaMes AND :corte) AS cuotas_vendidas,
             (SELECT COUNT(*) FROM pagos_mensualidades pm
               WHERE pm.sede_id = s.id
+                AND pm.estado <> 'anulada'
                 AND pm.fecha_emision BETWEEN :primerDiaMesAnterior AND :corteAnterior) AS cuotas_vendidas_mes_anterior
           FROM sedes_sedes s
           WHERE s.activo = 1
@@ -473,12 +475,13 @@ export const OBR_DashboardVencimientosPorDia_CTS = async (req, res) => {
  *
  * `cuotas_mensuales` y `cuotas_vendidas` usan la MISMA fuente y regla desde
  * 2026/08/24 (pedido del cliente): una mensualidad cuenta una única vez, en
- * el mes en que se generó (`pagos_mensualidades.fecha_emision`), sin importar
- * si se paga de una vez o en varias cuotas parciales. Antes `cuotas_mensuales`
- * contaba pagos CONFIRMADOS (`pagos_pagos.fecha_pago`), lo que la hacía
- * divergir de `cuotas_vendidas`: una misma venta pagada en 3 cuotas se
- * contaba 3 veces, y una venta del mes que quedaba pendiente de cobro no se
- * contaba ese mes. Se corrigió para que ambas coincidan.
+ * el mes en que se generó (`pagos_mensualidades.fecha_emision`) y siempre que
+ * no haya sido anulada, sin importar si se paga de una vez o en varias cuotas
+ * parciales. Antes `cuotas_mensuales` contaba pagos CONFIRMADOS
+ * (`pagos_pagos.fecha_pago`), lo que la hacía divergir de `cuotas_vendidas`:
+ * una misma venta pagada en 3 cuotas se contaba 3 veces, y una venta del mes
+ * que quedaba pendiente de cobro no se contaba ese mes. Se corrigió para que
+ * ambas coincidan.
  *
  * CAC Marketing = (gastos tipo Publicidad + Agencia) / altas del mes.
  * CAC Comercial = (gastos tipo Publicidad + Agencia + Front Comercial) /
@@ -542,6 +545,7 @@ export const OBR_DashboardCierreMensual_CTS = async (req, res) => {
             AND (a.fecha_baja IS NULL OR a.fecha_baja >= :desde)) AS alumnos_inicio_mes,
         (SELECT COUNT(*) FROM pagos_mensualidades pm
           WHERE pm.sede_id = s.id
+            AND pm.estado <> 'anulada'
             AND pm.fecha_emision BETWEEN :desde AND :hasta) AS cuotas_vendidas,
         (SELECT COALESCE(SUM(p.monto), 0) FROM pagos_pagos p
           WHERE p.sede_id = s.id AND p.estado = 'confirmado'

@@ -594,7 +594,10 @@ export const OBR_Usuarios_CTS = async (req, res) => {
     }
 
     if (rol_id) {
-      where.rol_id = Number(rol_id);
+      // Benjamin Orellana - 2026/08/27 - Mantener el filtro de rol como
+      // operador Sequelize para que excluir_rol_codigo pueda combinarse sin
+      // sobrescribir el rol seleccionado en la UI.
+      where.rol_id = { [Op.eq]: Number(rol_id) };
     }
 
     if (rol_codigo) {
@@ -616,7 +619,7 @@ export const OBR_Usuarios_CTS = async (req, res) => {
         });
       }
 
-      where.rol_id = rol.id;
+      where.rol_id = { [Op.eq]: rol.id };
     }
 
     /*
@@ -649,22 +652,55 @@ export const OBR_Usuarios_CTS = async (req, res) => {
       }
     }
 
-    if (sede_id) {
+    /*
+     * Benjamin Orellana - 2026/08/27 - El listado de Usuarios respeta el
+     * alcance real de sedes del usuario autenticado y el selector global.
+     * - acceso global + sin sede_id => todas las sedes;
+     * - acceso global + sede_id => sólo esa sede;
+     * - acceso limitado + sin sede_id => todas SUS sedes;
+     * - acceso limitado + sede_id => sólo si la tiene autorizada.
+     */
+    const usuarioGlobal = usuarioTieneAccesoTodasSedes(req.user);
+    const sedesPermitidas = obtenerSedesPermitidasUsuario(req.user);
+    let sedesFiltro = [];
+
+    if (usuarioGlobal) {
+      if (sede_id) sedesFiltro = [Number(sede_id)];
+    } else {
+      if (!sedesPermitidas.length) {
+        return res.status(403).json({
+          ok: false,
+          message: 'El usuario no tiene sedes asignadas para consultar usuarios.'
+        });
+      }
+
+      if (sede_id && !sedesPermitidas.includes(Number(sede_id))) {
+        return res.status(403).json({
+          ok: false,
+          message: 'No tiene acceso a la sede indicada.'
+        });
+      }
+
+      sedesFiltro = sede_id ? [Number(sede_id)] : sedesPermitidas;
+    }
+
+    if (sedesFiltro.length > 0) {
       const asignaciones = await UsuariosSedesModel.findAll({
         where: {
-          sede_id: Number(sede_id),
+          sede_id: { [Op.in]: sedesFiltro },
           activo: 1
         },
         attributes: ['usuario_id']
       });
 
-      const usuarioIds = asignaciones.map((item) => item.usuario_id);
+      const usuarioIds = asignaciones.map((item) => Number(item.usuario_id));
 
       where[Op.and] = [
         ...(where[Op.and] || []),
         {
           [Op.or]: [
             { id: { [Op.in]: usuarioIds } },
+            { sede_principal_id: { [Op.in]: sedesFiltro } },
             { acceso_todas_sedes: 1 }
           ]
         }

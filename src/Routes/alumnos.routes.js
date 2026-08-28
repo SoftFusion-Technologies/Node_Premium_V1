@@ -24,10 +24,10 @@ import {
 } from "../Security/auth.js";
 import { authenticateAlumnoToken } from "../Security/authAlumno.js";
 import {
+  requireFinancialListScope,
   requireFinancialScope,
   sourceBody,
   sourceParam,
-  sourceQuery,
 } from "../Security/financialScope.js";
 
 // Benjamin Orellana - 2026/05/26 - Importa controlador principal de alumnos PREMIUM.
@@ -177,10 +177,7 @@ router.get(
   "/finanzas/deudas",
   authenticateToken,
   requirePermission("deudas.ver"),
-  requireFinancialScope({
-    sources: [sourceQuery("sede")],
-    permission: "deudas.ver",
-  }),
+  requireFinancialListScope(),
   OBR_DeudasFinanzas_CTS,
 );
 
@@ -188,10 +185,7 @@ router.get(
   "/finanzas/saldos",
   authenticateToken,
   requirePermission("saldos.ver"),
-  requireFinancialScope({
-    sources: [sourceQuery("sede")],
-    permission: "saldos.ver",
-  }),
+  requireFinancialListScope(),
   OBR_SaldosFinanzas_CTS,
 );
 

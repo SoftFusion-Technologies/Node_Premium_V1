@@ -158,15 +158,28 @@ export const requireFechaOperativaActual = (req, res, next) => {
     return next();
   }
 
+  // Benjamin Orellana - 2026/08/28 - En la vista global "Todas las sedes",
+  // un operador diario puede consultar el día actual sobre el conjunto de sus
+  // sedes autorizadas. El controlador de Gastos aplica el IN de sedes; este
+  // middleware sólo fuerza la fecha de hoy. Si se informa una sede concreta,
+  // continúa validándose como antes.
   if (!sedeId) {
-    return res.status(400).json({
-      ok: false,
-      code: 'OPERATIONAL_SEDE_REQUIRED',
-      message: 'Debe indicar la sede activa para consultar la operación del día.'
-    });
-  }
+    const tieneSedesOperativas = Array.isArray(req.user?.sedes)
+      ? req.user.sedes.some(
+          (sede) =>
+            sede?.asignacion?.activo !== false &&
+            sede?.asignacion?.puede_operar !== false
+        )
+      : false;
 
-  if (!usuarioTieneAlcanceOperativoDiario(req.user, sedeId)) {
+    if (!tieneSedesOperativas) {
+      return res.status(403).json({
+        ok: false,
+        code: 'OPERATIONAL_SEDES_EMPTY',
+        message: 'No tiene sedes operativas habilitadas.'
+      });
+    }
+  } else if (!usuarioTieneAlcanceOperativoDiario(req.user, sedeId)) {
     return res.status(403).json({
       ok: false,
       code: 'OPERATIONAL_SEDE_DENIED',

@@ -118,9 +118,12 @@ router.get(
   OBR_SesionesCaja_CTS
 );
 
+// Benjamin Orellana - 2026/08/28 - El listado puede operar sobre una sede
+// concreta o sobre todas las sedes autorizadas. OBR_Cobros_CTS construye el
+// scope desde req.user.sedes y valida también una sede explícita si se envía.
 router.get(
   '/cobros',
-  ...seguridadSede,
+  authenticateToken,
   requirePermission('cobros.ver'),
   OBR_Cobros_CTS
 );

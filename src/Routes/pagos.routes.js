@@ -23,10 +23,10 @@ import {
 } from '../Security/auth.js';
 import { authenticateAlumnoToken } from '../Security/authAlumno.js';
 import {
+  requireFinancialListScope,
   requireFinancialScope,
   sourceBody,
-  sourceParam,
-  sourceQuery
+  sourceParam
 } from '../Security/financialScope.js';
 
 import {
@@ -114,11 +114,8 @@ const seguridadMediosConfigurar = [
   requirePermission('medios_pago.configurar')
 ];
 
-const alcanceLista = (permission) =>
-  requireFinancialScope({
-    sources: [sourceQuery('sede')],
-    permission
-  });
+// Benjamin Orellana - 2026/08/28 - Listados: una sede o Todas autorizadas.
+const alcanceLista = () => requireFinancialListScope();
 const alcanceAlumno = (permission) =>
   requireFinancialScope({
     sources: [sourceParam('alumno', 'alumno_id')],
@@ -491,7 +488,10 @@ router.post(
   '/pagos-metodos-recurrentes',
   ...seguridadPagosGestionar,
   requireFinancialScope({
-    sources: [sourceBody('alumno', 'alumno_id')],
+    sources: [
+      sourceBody('sede'),
+      sourceBody('alumno', 'alumno_id')
+    ],
     permission: 'pagos.gestionar'
   }),
   CR_PagosMetodosRecurrentes_CTS
@@ -503,6 +503,7 @@ router.put(
   requireFinancialScope({
     sources: [
       sourceParam('metodo_recurrente'),
+      sourceBody('sede'),
       sourceBody('alumno', 'alumno_id')
     ],
     permission: 'pagos.gestionar'

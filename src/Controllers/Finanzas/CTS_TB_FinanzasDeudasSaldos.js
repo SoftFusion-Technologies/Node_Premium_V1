@@ -19,9 +19,6 @@ const enteroPositivo = (value, fallback, max = 100) => {
   return Math.min(parsed, max);
 };
 
-const idValido = (value) =>
-  Number.isInteger(Number(value)) && Number(value) > 0;
-
 const fechaArgentina = () => {
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone: "America/Argentina/Buenos_Aires",
@@ -50,15 +47,38 @@ const agregarBusquedaPersona = ({ where, replacements, q }) => {
   replacements.busqueda = `%${texto}%`;
 };
 
-const construirFiltroSede = ({ where, replacements, sedeId }) => {
-  if (!sedeId) return;
-  if (!idValido(sedeId)) {
-    const error = new Error("La sede indicada no es válida.");
-    error.status = 400;
+// Benjamin Orellana - 2026/08/28 - El middleware financiero de listados
+// entrega exactamente las sedes autorizadas. El controlador aplica ese scope
+// tanto al resumen como a las filas; nunca ejecuta una lectura financiera sin
+// restricción geográfica.
+const construirFiltroSedesScope = ({ where, replacements, req }) => {
+  const sedeIds = Array.isArray(req.financial_sede_ids)
+    ? req.financial_sede_ids
+        .map(Number)
+        .filter((id) => Number.isInteger(id) && id > 0)
+    : [];
+
+  if (!sedeIds.length) {
+    const error = new Error(
+      "No se pudo resolver el alcance de sedes para la consulta financiera."
+    );
+    error.status = 403;
     throw error;
   }
-  where.push("sede_id = :sedeId");
-  replacements.sedeId = Number(sedeId);
+
+  if (sedeIds.length === 1) {
+    where.push("sede_id = :sedeScope0");
+    replacements.sedeScope0 = sedeIds[0];
+    return;
+  }
+
+  const placeholders = sedeIds.map((id, index) => {
+    const key = `sedeScope${index}`;
+    replacements[key] = id;
+    return `:${key}`;
+  });
+
+  where.push(`sede_id IN (${placeholders.join(", ")})`);
 };
 
 const SQL_DEUDAS_UNIFICADAS = `
@@ -212,7 +232,7 @@ export const OBR_DeudasFinanzas_CTS = async (req, res) => {
     const replacements = { hoy, limite, offset };
 
     agregarBusquedaPersona({ where, replacements, q: req.query.q });
-    construirFiltroSede({ where, replacements, sedeId: req.query.sede_id });
+    construirFiltroSedesScope({ where, replacements, req });
 
     const estado = String(req.query.estado || "todas").toLowerCase();
     if (!["todas", "pendiente", "parcial", "vencida"].includes(estado)) {
@@ -494,7 +514,7 @@ export const OBR_SaldosFinanzas_CTS = async (req, res) => {
     const replacements = { limite, offset };
 
     agregarBusquedaPersona({ where, replacements, q: req.query.q });
-    construirFiltroSede({ where, replacements, sedeId: req.query.sede_id });
+    construirFiltroSedesScope({ where, replacements, req });
 
     const estado = String(req.query.estado || "con_saldo").toLowerCase();
     if (!["con_saldo", "sin_saldo", "todos"].includes(estado)) {

@@ -346,6 +346,25 @@ const validarPayloadMensualidad = (body, esCreacion = true) => {
 };
 
 // Benjamin Orellana - 2026/05/29 - Lista mensualidades con filtros y paginación.
+// Benjamin Orellana - 2026/08/28 - Scope seguro para listados de
+// mensualidades/deuda. El middleware siempre entrega al menos una sede.
+const aplicarScopeSedesListadoMensualidades = (where, req) => {
+  const sedeIds = Array.isArray(req.financial_sede_ids)
+    ? req.financial_sede_ids
+        .map(Number)
+        .filter((id) => Number.isInteger(id) && id > 0)
+    : [];
+
+  if (!sedeIds.length) {
+    throw new Error('FINANCIAL_LIST_SCOPE_MISSING');
+  }
+
+  where.sede_id =
+    sedeIds.length === 1
+      ? sedeIds[0]
+      : { [Op.in]: sedeIds };
+};
+
 export const OBR_PagosMensualidades_CTS = async (req, res) => {
   try {
     const { page, limit, offset } = obtenerPaginacion(req.query);
@@ -355,7 +374,6 @@ export const OBR_PagosMensualidades_CTS = async (req, res) => {
       alumno_id,
       alumno_q,
       membresia_id,
-      sede_id,
       periodo_anio,
       periodo_mes,
       estado,
@@ -369,6 +387,7 @@ export const OBR_PagosMensualidades_CTS = async (req, res) => {
     } = req.query;
 
     const where = {};
+    aplicarScopeSedesListadoMensualidades(where, req);
 
     const search = normalizarTextoBusqueda(q);
 
@@ -426,18 +445,6 @@ export const OBR_PagosMensualidades_CTS = async (req, res) => {
 
         where.membresia_id = Number(membresia_id);
       }
-    }
-
-    if (sede_id !== undefined) {
-      if (!esIdValido(sede_id)) {
-        return responderError(
-          res,
-          400,
-          'El filtro sede_id debe ser un ID válido.'
-        );
-      }
-
-      where.sede_id = Number(sede_id);
     }
 
     if (periodo_anio !== undefined) {
@@ -697,7 +704,6 @@ export const OBR_MisMensualidades_CTS = async (req, res) => {
 export const OBR_MensualidadesPendientes_CTS = async (req, res) => {
   try {
     const { page, limit, offset } = obtenerPaginacion(req.query);
-    const { sede_id } = req.query;
 
     const where = {
       estado: {
@@ -708,17 +714,7 @@ export const OBR_MensualidadesPendientes_CTS = async (req, res) => {
       }
     };
 
-    if (sede_id !== undefined) {
-      if (!esIdValido(sede_id)) {
-        return responderError(
-          res,
-          400,
-          'El filtro sede_id debe ser un ID válido.'
-        );
-      }
-
-      where.sede_id = Number(sede_id);
-    }
+    aplicarScopeSedesListadoMensualidades(where, req);
 
     const { count, rows } = await PagosMensualidadesModel.findAndCountAll({
       where,
@@ -755,7 +751,7 @@ export const OBR_MensualidadesPendientes_CTS = async (req, res) => {
 export const OBR_MensualidadesVencidas_CTS = async (req, res) => {
   try {
     const { page, limit, offset } = obtenerPaginacion(req.query);
-    const { sede_id, fecha } = req.query;
+    const { fecha } = req.query;
 
     const fechaConsulta = fecha || obtenerFechaActualDateOnly();
 
@@ -787,17 +783,7 @@ export const OBR_MensualidadesVencidas_CTS = async (req, res) => {
       ]
     };
 
-    if (sede_id !== undefined) {
-      if (!esIdValido(sede_id)) {
-        return responderError(
-          res,
-          400,
-          'El filtro sede_id debe ser un ID válido.'
-        );
-      }
-
-      where.sede_id = Number(sede_id);
-    }
+    aplicarScopeSedesListadoMensualidades(where, req);
 
     const { count, rows } = await PagosMensualidadesModel.findAndCountAll({
       where,
@@ -834,7 +820,7 @@ export const OBR_MensualidadesVencidas_CTS = async (req, res) => {
 export const OBR_AlumnosMorosos_CTS = async (req, res) => {
   try {
     const { page, limit, offset } = obtenerPaginacion(req.query);
-    const { sede_id, fecha } = req.query;
+    const { fecha } = req.query;
 
     const fechaConsulta = fecha || obtenerFechaActualDateOnly();
 
@@ -866,17 +852,7 @@ export const OBR_AlumnosMorosos_CTS = async (req, res) => {
       ]
     };
 
-    if (sede_id !== undefined) {
-      if (!esIdValido(sede_id)) {
-        return responderError(
-          res,
-          400,
-          'El filtro sede_id debe ser un ID válido.'
-        );
-      }
-
-      where.sede_id = Number(sede_id);
-    }
+    aplicarScopeSedesListadoMensualidades(where, req);
 
     const { count, rows } = await PagosMensualidadesModel.findAndCountAll({
       where,

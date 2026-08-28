@@ -8,6 +8,7 @@ import db from '../../DataBase/db.js';
 import PagosMetodosRecurrentesModel from '../../Models/Pago/MD_TB_PagosMetodosRecurrentes.js';
 import PagosMediosPagoModel from '../../Models/Pago/MD_TB_PagosMediosPago.js';
 import AlumnosModel from '../../Models/Alumno/MD_TB_Alumnos.js';
+import SedesModel from '../../Models/Sede/MD_TB_Sedes.js';
 
 const ESTADOS_METODO_RECURRENTE_VALIDOS = [
   'activo',
@@ -40,7 +41,14 @@ const ATRIBUTOS_SEGUROS_METODO_RECURRENTE = {
 const includeMetodoRecurrente = [
   {
     model: AlumnosModel,
-    as: 'alumno'
+    as: 'alumno',
+    include: [
+      {
+        model: SedesModel,
+        as: 'sede',
+        attributes: ['id', 'nombre']
+      }
+    ]
   },
   {
     model: PagosMediosPagoModel,
@@ -241,7 +249,6 @@ export const OBR_PagosMetodosRecurrentes_CTS = async (req, res) => {
     const {
       q,
       alumno_id,
-      sede_id,
       medio_pago_id,
       proveedor,
       marca_tarjeta,
@@ -255,12 +262,27 @@ export const OBR_PagosMetodosRecurrentes_CTS = async (req, res) => {
 
     const where = {};
 
-    if (!esIdValido(sede_id)) {
-      return responderError(res, 400, 'Debe indicar una sede válida.');
+    const sedeIds = Array.isArray(req.financial_sede_ids)
+      ? req.financial_sede_ids
+          .map(Number)
+          .filter((id) => Number.isInteger(id) && id > 0)
+      : [];
+
+    if (!sedeIds.length) {
+      return responderError(
+        res,
+        403,
+        'No tiene sedes habilitadas para consultar métodos recurrentes.'
+      );
     }
 
     const alumnosSede = await AlumnosModel.findAll({
-      where: { sede_id: Number(sede_id) },
+      where: {
+        sede_id:
+          sedeIds.length === 1
+            ? sedeIds[0]
+            : { [Op.in]: sedeIds }
+      },
       attributes: ['id']
     });
     where.alumno_id = {
@@ -291,7 +313,7 @@ export const OBR_PagosMetodosRecurrentes_CTS = async (req, res) => {
         return responderError(
           res,
           403,
-          'El alumno indicado no pertenece a la sede seleccionada.'
+          'El alumno indicado no pertenece al alcance de sedes seleccionado.'
         );
       }
       where.alumno_id = alumnoId;

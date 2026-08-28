@@ -819,6 +819,25 @@ const buscarIdsAlumnosPorTexto = async (search) => {
 
   return alumnos.map((alumno) => Number(alumno.id));
 };
+// Benjamin Orellana - 2026/08/28 - Aplica el scope resuelto por
+// requireFinancialListScope. Nunca deja el listado sin restricción de sede.
+const aplicarScopeSedesListadoPagos = (where, req) => {
+  const sedeIds = Array.isArray(req.financial_sede_ids)
+    ? req.financial_sede_ids
+        .map(Number)
+        .filter((id) => Number.isInteger(id) && id > 0)
+    : [];
+
+  if (!sedeIds.length) {
+    throw new Error('FINANCIAL_LIST_SCOPE_MISSING');
+  }
+
+  where.sede_id =
+    sedeIds.length === 1
+      ? sedeIds[0]
+      : { [Op.in]: sedeIds };
+};
+
 // Benjamin Orellana - 2026/05/30 - Lista pagos con filtros y paginación.
 export const OBR_Pagos_CTS = async (req, res) => {
   try {
@@ -829,7 +848,6 @@ export const OBR_Pagos_CTS = async (req, res) => {
       mensualidad_id,
       alumno_id,
       alumno_q,
-      sede_id,
       medio_pago_id,
       estado,
       fecha_desde,
@@ -839,6 +857,7 @@ export const OBR_Pagos_CTS = async (req, res) => {
     } = req.query;
 
     const where = {};
+    aplicarScopeSedesListadoPagos(where, req);
 
     const search = normalizarTextoBusqueda(q);
 
@@ -898,18 +917,6 @@ export const OBR_Pagos_CTS = async (req, res) => {
             [Op.in]: alumnoIds
           }
         : -1;
-    }
-
-    if (sede_id !== undefined) {
-      if (!esIdValido(sede_id)) {
-        return responderError(
-          res,
-          400,
-          'El filtro sede_id debe ser un ID válido.'
-        );
-      }
-
-      where.sede_id = Number(sede_id);
     }
 
     if (medio_pago_id !== undefined) {

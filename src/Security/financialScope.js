@@ -200,6 +200,94 @@ export const requireFinancialScope = ({
   };
 };
 
+
+/*
+ * Benjamin Orellana - 2026/08/28 - Scope financiero para LISTADOS.
+ *
+ * Una lectura puede consultar una sede concreta o todas las sedes autorizadas.
+ * Omitir sede_id nunca elimina la restricción geográfica.
+ */
+export const requireFinancialListScope = () => {
+  return async (req, res, next) => {
+    try {
+      if (!req.user) {
+        return responder(
+          res,
+          401,
+          'USER_NOT_AUTHENTICATED',
+          'Usuario no autenticado.'
+        );
+      }
+
+      const sedesPermitidas = Array.from(
+        new Set(
+          (Array.isArray(req.user?.sedes) ? req.user.sedes : [])
+            .filter(
+              (sede) =>
+                sede?.asignacion?.activo !== false &&
+                sede?.asignacion?.puede_operar !== false
+            )
+            .map((sede) => numeroId(sede?.id ?? sede?.sede_id))
+            .filter(Boolean)
+        )
+      );
+
+      if (!sedesPermitidas.length) {
+        return responder(
+          res,
+          403,
+          'FINANCIAL_LIST_SCOPE_EMPTY',
+          'No tiene sedes habilitadas para consultar este listado.'
+        );
+      }
+
+      const sedeSolicitadaRaw = String(req.query?.sede_id || '').trim();
+
+      if (
+        !sedeSolicitadaRaw ||
+        sedeSolicitadaRaw.toLowerCase() === 'todas'
+      ) {
+        req.financial_sede_ids = sedesPermitidas;
+        req.financial_sede_id =
+          sedesPermitidas.length === 1 ? sedesPermitidas[0] : null;
+        return next();
+      }
+
+      const sedeSolicitada = numeroId(sedeSolicitadaRaw);
+
+      if (!sedeSolicitada) {
+        return responder(
+          res,
+          400,
+          'FINANCIAL_LIST_SEDE_INVALID',
+          'El filtro sede_id debe ser una sede válida.'
+        );
+      }
+
+      if (!sedesPermitidas.includes(sedeSolicitada)) {
+        return responder(
+          res,
+          403,
+          'FINANCIAL_LIST_SEDE_DENIED',
+          'No tiene acceso financiero a la sede solicitada.'
+        );
+      }
+
+      req.financial_sede_ids = [sedeSolicitada];
+      req.financial_sede_id = sedeSolicitada;
+      return next();
+    } catch (error) {
+      console.error('Error requireFinancialListScope PREMIUM:', error);
+      return responder(
+        res,
+        500,
+        'FINANCIAL_LIST_SCOPE_ERROR',
+        'Error al validar el alcance financiero del listado.'
+      );
+    }
+  };
+};
+
 export const sourceParam = (entity, key = 'id') => ({
   entity,
   location: 'params',

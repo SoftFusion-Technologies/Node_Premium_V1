@@ -70,9 +70,85 @@ const manejarErrorCobro = (error, res, contexto) => {
     .json({ ok: false, message: 'Error interno al procesar el cobro.' });
 };
 
-const construirFiltros = (query) => {
-  const where = ['c.sede_id = :sedeId'];
-  const replacements = { sedeId: Number(query.sede_id) };
+// Benjamin Orellana - 2026/08/28 - El historial de Cobros puede consultar
+// una sede concreta o el conjunto completo de sedes autorizadas del usuario.
+// El scope SIEMPRE se construye desde req.user.sedes; omitir sede_id nunca
+// equivale a quitar la restricción geográfica.
+const resolverSedesCobrosConsulta = (req) => {
+  const sedesPermitidas = Array.from(
+    new Set(
+      (Array.isArray(req.user?.sedes) ? req.user.sedes : [])
+        .filter(
+          (sede) =>
+            sede?.asignacion?.activo !== false &&
+            sede?.asignacion?.puede_operar !== false
+        )
+        .map((sede) => Number(sede?.id ?? sede?.sede_id))
+        .filter((id) => Number.isInteger(id) && id > 0)
+    )
+  );
+
+  if (!sedesPermitidas.length) {
+    return {
+      ok: false,
+      status: 403,
+      code: 'COBROS_SEDES_SCOPE_EMPTY',
+      message: 'No tiene sedes habilitadas para consultar Cobros.'
+    };
+  }
+
+  const sedeSolicitadaTexto = String(req.query?.sede_id || '').trim();
+
+  if (
+    !sedeSolicitadaTexto ||
+    sedeSolicitadaTexto.toLowerCase() === 'todas'
+  ) {
+    return { ok: true, sedeIds: sedesPermitidas };
+  }
+
+  const sedeSolicitada = Number(sedeSolicitadaTexto);
+
+  if (!Number.isInteger(sedeSolicitada) || sedeSolicitada <= 0) {
+    return {
+      ok: false,
+      status: 400,
+      code: 'COBROS_SEDE_INVALIDA',
+      message: 'Debe indicar una sede válida.'
+    };
+  }
+
+  if (!sedesPermitidas.includes(sedeSolicitada)) {
+    return {
+      ok: false,
+      status: 403,
+      code: 'COBROS_SEDE_DENEGADA',
+      message: 'No tiene acceso a la sede indicada.'
+    };
+  }
+
+  return { ok: true, sedeIds: [sedeSolicitada] };
+};
+
+const construirFiltros = (query, sedeIds) => {
+  const where = [];
+  const replacements = {};
+  const sedes = Array.isArray(sedeIds)
+    ? sedeIds.map(Number).filter((id) => Number.isInteger(id) && id > 0)
+    : [];
+
+  if (sedes.length === 1) {
+    where.push('c.sede_id = :sedeId');
+    replacements.sedeId = sedes[0];
+  } else {
+    const placeholders = sedes.map((id, index) => {
+      const key = `sedeScope${index}`;
+      replacements[key] = id;
+      return `:${key}`;
+    });
+
+    where.push(`c.sede_id IN (${placeholders.join(', ')})`);
+  }
+
   const estado = String(query.estado || '').trim();
   const q = String(query.q || '').trim();
 
@@ -668,16 +744,28 @@ export const CR_Cobros_CTS = async (req, res) => {
 
 export const OBR_Cobros_CTS = async (req, res) => {
   try {
-    const sedeId = Number(req.query.sede_id);
+    const scopeSedes = resolverSedesCobrosConsulta(req);
+
+    if (!scopeSedes.ok) {
+      return res.status(scopeSedes.status).json({
+        ok: false,
+        code: scopeSedes.code,
+        message: scopeSedes.message
+      });
+    }
+
+    const sedeIdOperativa =
+      scopeSedes.sedeIds.length === 1 ? scopeSedes.sedeIds[0] : null;
+
     const desdeScope = validarFechaConsultaOperativa({
       user: req.user,
-      sedeId,
+      sedeId: sedeIdOperativa,
       fecha: req.query.desde,
       nombreCampo: 'Fecha desde'
     });
     const hastaScope = validarFechaConsultaOperativa({
       user: req.user,
-      sedeId,
+      sedeId: sedeIdOperativa,
       fecha: req.query.hasta,
       nombreCampo: 'Fecha hasta'
     });
@@ -690,17 +778,24 @@ export const OBR_Cobros_CTS = async (req, res) => {
       });
     }
 
-    const queryOperativa = usuarioTieneAlcanceOperativoDiario(req.user, sedeId)
+    const queryOperativa = usuarioTieneAlcanceOperativoDiario(
+      req.user,
+      sedeIdOperativa
+    )
       ? { ...req.query, desde: fechaArgentina(), hasta: fechaArgentina() }
       : req.query;
     const page = Math.max(Number(queryOperativa.page || 1), 1);
     const limit = Math.min(Math.max(Number(queryOperativa.limit || 20), 1), 100);
     const offset = (page - 1) * limit;
-    const { whereSql, replacements } = construirFiltros(queryOperativa);
+    const { whereSql, replacements } = construirFiltros(
+      queryOperativa,
+      scopeSedes.sedeIds
+    );
 
     const [rows, totalRows, resumenRows] = await Promise.all([
       db.query(
-        `SELECT c.id, c.fecha_cobro, c.cliente_tipo, c.alumno_id,
+        `SELECT c.id, c.sede_id, s.nombre AS sede_nombre,
+          c.fecha_cobro, c.cliente_tipo, c.alumno_id,
           c.cliente_usuario_id, c.importe, c.descuentos, c.impuestos,
           c.total, c.moneda, c.estado,
           CASE
@@ -739,6 +834,7 @@ export const OBR_Cobros_CTS = async (req, res) => {
           GROUP_CONCAT(DISTINCT mp.nombre ORDER BY mp.nombre SEPARATOR ', ') AS medios_pago,
           COUNT(DISTINCT cd.id) AS conceptos_cantidad
         FROM cobros_cobros c
+        INNER JOIN sedes_sedes s ON s.id = c.sede_id
         LEFT JOIN alumnos_alumnos a ON a.id = c.alumno_id
         LEFT JOIN usuarios_usuarios uc ON uc.id = c.cliente_usuario_id
         INNER JOIN usuarios_usuarios cobrador ON cobrador.id = c.cobrador_usuario_id

@@ -7,6 +7,7 @@ import db from '../../DataBase/db.js';
 import PlanesPreciosModel from '../../Models/Plan/MD_TB_PlanesPrecios.js';
 import PlanesModel from '../../Models/Plan/MD_TB_Planes.js';
 import SedesModel from '../../Models/Sede/MD_TB_Sedes.js';
+import { usuarioTieneAccesoTodasSedes } from '../../utils/usuariosAcceso.utils.js';
 
 const CAMPOS_ORDEN_VALIDOS = [
   'id',
@@ -73,6 +74,123 @@ const responderError = (res, status, message, data = null) => {
     message,
     data
   });
+};
+
+// Benjamin Orellana - 2026/08/28 - Scope de sedes para precios de planes.
+const obtenerSedesPermitidasPrecio = (req) =>
+  Array.from(
+    new Set(
+      (Array.isArray(req.user?.sedes) ? req.user.sedes : [])
+        .filter(
+          (sede) =>
+            sede?.asignacion?.activo !== false &&
+            sede?.asignacion?.puede_operar !== false
+        )
+        .map((sede) => Number(sede?.id ?? sede?.sede_id))
+        .filter((id) => Number.isInteger(id) && id > 0)
+    )
+  );
+
+const validarSedePrecioAutorizada = (req, sedeId) => {
+  const id = Number(sedeId);
+
+  if (!Number.isInteger(id) || id <= 0) {
+    return { ok: false, status: 400, message: 'La sede indicada no es válida.' };
+  }
+
+  if (!obtenerSedesPermitidasPrecio(req).includes(id)) {
+    return {
+      ok: false,
+      status: 403,
+      message: 'No tenés permiso para administrar precios de esa sede.'
+    };
+  }
+
+  return { ok: true, sedeId: id };
+};
+
+const puedeGestionarPrecioGlobal = (req) =>
+  usuarioTieneAccesoTodasSedes(req.user);
+
+const validarEscrituraPrecio = (req, sedeId) => {
+  if (sedeId === null || sedeId === undefined || sedeId === '') {
+    if (!puedeGestionarPrecioGlobal(req)) {
+      return {
+        ok: false,
+        status: 403,
+        message:
+          'Sólo un usuario con acceso a todas las sedes puede administrar el precio global.'
+      };
+    }
+    return { ok: true, sedeId: null };
+  }
+
+  return validarSedePrecioAutorizada(req, sedeId);
+};
+
+const construirScopeLecturaPrecios = (req, sedeSolicitada) => {
+  const sedesPermitidas = obtenerSedesPermitidasPrecio(req);
+
+  if (!sedesPermitidas.length) {
+    return {
+      ok: false,
+      status: 403,
+      message: 'No tenés sedes autorizadas para consultar precios.'
+    };
+  }
+
+  const raw =
+    sedeSolicitada === undefined || sedeSolicitada === null
+      ? 'todas'
+      : String(sedeSolicitada).trim().toLowerCase();
+
+  if (!raw || raw === 'todas' || raw === 'all') {
+    return {
+      ok: true,
+      whereSede: {
+        [Op.or]: [
+          { sede_id: { [Op.in]: sedesPermitidas } },
+          { sede_id: null }
+        ]
+      }
+    };
+  }
+
+  if (raw === 'null' || raw === 'global') {
+    return { ok: true, whereSede: { sede_id: null } };
+  }
+
+  const validacion = validarSedePrecioAutorizada(req, raw);
+  if (!validacion.ok) return validacion;
+
+  return { ok: true, whereSede: { sede_id: validacion.sedeId } };
+};
+
+const validarAccesoRegistroPrecio = (req, precio, escritura = false) => {
+  if (!precio) {
+    return {
+      ok: false,
+      status: 404,
+      message: 'No se encontró el precio de plan solicitado.'
+    };
+  }
+
+  if (precio.sede_id === null || precio.sede_id === undefined) {
+    if (!escritura) return { ok: true };
+
+    if (!puedeGestionarPrecioGlobal(req)) {
+      return {
+        ok: false,
+        status: 403,
+        message:
+          'No tenés alcance global para modificar este precio general.'
+      };
+    }
+
+    return { ok: true };
+  }
+
+  return validarSedePrecioAutorizada(req, precio.sede_id);
 };
 
 // Benjamin Orellana - 2026/05/29 - Include permitido según relaciones del módulo Plan.
@@ -200,21 +318,13 @@ export const OBR_PlanesPrecios_CTS = async (req, res) => {
       where.plan_id = Number(plan_id);
     }
 
-    if (sede_id !== undefined) {
-      if (sede_id === 'null' || sede_id === '') {
-        where.sede_id = null;
-      } else {
-        if (!esIdValido(sede_id)) {
-          return responderError(
-            res,
-            400,
-            'El filtro sede_id debe ser un ID válido o null.'
-          );
-        }
+    const scopeSede = construirScopeLecturaPrecios(req, sede_id);
 
-        where.sede_id = Number(sede_id);
-      }
+    if (!scopeSede.ok) {
+      return responderError(res, scopeSede.status, scopeSede.message);
     }
+
+    Object.assign(where, scopeSede.whereSede);
 
     if (activo !== undefined) {
       if (!esTinyintValido(activo)) {
@@ -294,12 +404,10 @@ export const OBR_PlanPrecioPorId_CTS = async (req, res) => {
       include: includePlanPrecio
     });
 
-    if (!precioPlan) {
-      return responderError(
-        res,
-        404,
-        'No se encontró el precio de plan solicitado.'
-      );
+    const acceso = validarAccesoRegistroPrecio(req, precioPlan, false);
+
+    if (!acceso.ok) {
+      return responderError(res, acceso.status, acceso.message);
     }
 
     return res.status(200).json({
@@ -337,21 +445,13 @@ export const OBR_PreciosPorPlan_CTS = async (req, res) => {
       plan_id: Number(plan_id)
     };
 
-    if (sede_id !== undefined) {
-      if (sede_id === 'null' || sede_id === '') {
-        where.sede_id = null;
-      } else {
-        if (!esIdValido(sede_id)) {
-          return responderError(
-            res,
-            400,
-            'El filtro sede_id debe ser un ID válido o null.'
-          );
-        }
+    const scopeSede = construirScopeLecturaPrecios(req, sede_id);
 
-        where.sede_id = Number(sede_id);
-      }
+    if (!scopeSede.ok) {
+      return responderError(res, scopeSede.status, scopeSede.message);
     }
+
+    Object.assign(where, scopeSede.whereSede);
 
     if (activo !== undefined) {
       if (!esTinyintValido(activo)) {
@@ -438,18 +538,20 @@ export const OBR_PrecioVigentePlan_CTS = async (req, res) => {
     let precioVigente = null;
 
     if (sede_id !== undefined && sede_id !== null && sede_id !== '') {
-      if (!esIdValido(sede_id)) {
+      const validacionSede = validarSedePrecioAutorizada(req, sede_id);
+
+      if (!validacionSede.ok) {
         return responderError(
           res,
-          400,
-          'El filtro sede_id debe ser un ID válido.'
+          validacionSede.status,
+          validacionSede.message
         );
       }
 
       precioVigente = await PlanesPreciosModel.findOne({
         where: {
           ...whereBase,
-          sede_id: Number(sede_id)
+          sede_id: validacionSede.sedeId
         },
         include: includePlanPrecio,
         order: [
@@ -530,10 +632,21 @@ export const CR_PlanesPrecios_CTS = async (req, res) => {
       );
     }
 
-    let sedeNormalizada = null;
+    const validacionScope = validarEscrituraPrecio(req, sede_id);
 
-    if (sede_id !== undefined && sede_id !== null && sede_id !== '') {
-      const sede = await SedesModel.findByPk(sede_id, { transaction });
+    if (!validacionScope.ok) {
+      await transaction.rollback();
+      return responderError(
+        res,
+        validacionScope.status,
+        validacionScope.message
+      );
+    }
+
+    let sedeNormalizada = validacionScope.sedeId;
+
+    if (sedeNormalizada !== null) {
+      const sede = await SedesModel.findByPk(sedeNormalizada, { transaction });
 
       if (!sede) {
         await transaction.rollback();
@@ -544,7 +657,7 @@ export const CR_PlanesPrecios_CTS = async (req, res) => {
         );
       }
 
-      sedeNormalizada = Number(sede_id);
+      sedeNormalizada = Number(sedeNormalizada);
     }
 
     const nuevoPrecioPlan = await PlanesPreciosModel.create(
@@ -705,20 +818,22 @@ export const CR_PlanesPreciosMasivoPorSedes_CTS = async (req, res) => {
         );
       }
 
-      let sedeNormalizada = null;
+      const validacionScope = validarEscrituraPrecio(req, sede_id);
 
-      if (sede_id !== undefined && sede_id !== null && sede_id !== '') {
-        if (!esIdValido(sede_id)) {
-          await transaction.rollback();
+      if (!validacionScope.ok) {
+        await transaction.rollback();
 
-          return responderError(
-            res,
-            400,
-            'Cada sede_id debe ser un ID válido o null.'
-          );
-        }
+        return responderError(
+          res,
+          validacionScope.status,
+          validacionScope.message
+        );
+      }
 
-        const sede = await SedesModel.findByPk(sede_id, { transaction });
+      let sedeNormalizada = validacionScope.sedeId;
+
+      if (sedeNormalizada !== null) {
+        const sede = await SedesModel.findByPk(sedeNormalizada, { transaction });
 
         if (!sede) {
           await transaction.rollback();
@@ -730,7 +845,7 @@ export const CR_PlanesPreciosMasivoPorSedes_CTS = async (req, res) => {
           );
         }
 
-        sedeNormalizada = Number(sede_id);
+        sedeNormalizada = Number(sedeNormalizada);
       }
 
       preciosNormalizados.push({
@@ -793,12 +908,14 @@ export const UR_PlanesPrecios_CTS = async (req, res) => {
 
     const precioPlan = await PlanesPreciosModel.findByPk(id, { transaction });
 
-    if (!precioPlan) {
+    const accesoActual = validarAccesoRegistroPrecio(req, precioPlan, true);
+
+    if (!accesoActual.ok) {
       await transaction.rollback();
       return responderError(
         res,
-        404,
-        'No se encontró el precio de plan solicitado.'
+        accesoActual.status,
+        accesoActual.message
       );
     }
 
@@ -829,10 +946,21 @@ export const UR_PlanesPrecios_CTS = async (req, res) => {
     }
 
     if (req.body.sede_id !== undefined) {
-      if (req.body.sede_id === null || req.body.sede_id === '') {
+      const validacionDestino = validarEscrituraPrecio(req, req.body.sede_id);
+
+      if (!validacionDestino.ok) {
+        await transaction.rollback();
+        return responderError(
+          res,
+          validacionDestino.status,
+          validacionDestino.message
+        );
+      }
+
+      if (validacionDestino.sedeId === null) {
         datosActualizar.sede_id = null;
       } else {
-        const sede = await SedesModel.findByPk(req.body.sede_id, {
+        const sede = await SedesModel.findByPk(validacionDestino.sedeId, {
           transaction
         });
 
@@ -845,7 +973,7 @@ export const UR_PlanesPrecios_CTS = async (req, res) => {
           );
         }
 
-        datosActualizar.sede_id = Number(req.body.sede_id);
+        datosActualizar.sede_id = validacionDestino.sedeId;
       }
     }
 
@@ -919,13 +1047,11 @@ export const UR_EstadoPlanesPrecios_CTS = async (req, res) => {
 
     const precioPlan = await PlanesPreciosModel.findByPk(id, { transaction });
 
-    if (!precioPlan) {
+    const acceso = validarAccesoRegistroPrecio(req, precioPlan, true);
+
+    if (!acceso.ok) {
       await transaction.rollback();
-      return responderError(
-        res,
-        404,
-        'No se encontró el precio de plan solicitado.'
-      );
+      return responderError(res, acceso.status, acceso.message);
     }
 
     await precioPlan.update(
@@ -972,9 +1098,11 @@ export const DR_PlanesPrecios_CTS = async (req, res) => {
 
     const precioPlan = await PlanesPreciosModel.findByPk(id, { transaction });
 
-    if (!precioPlan) {
+    const acceso = validarAccesoRegistroPrecio(req, precioPlan, true);
+
+    if (!acceso.ok) {
       await transaction.rollback();
-      return responderError(res, 404, 'No se encontró el precio de plan solicitado.');
+      return responderError(res, acceso.status, acceso.message);
     }
 
     await precioPlan.update(
@@ -1014,10 +1142,11 @@ export const ER_PlanesPrecios_CTS = async (req, res) => {
 
     const precioPlan = await PlanesPreciosModel.findByPk(id, { transaction });
 
-    if (!precioPlan) {
-      await transaction.rollback();
+    const acceso = validarAccesoRegistroPrecio(req, precioPlan, true);
 
-      return responderError(res, 404, 'No se encontró el precio de plan solicitado.');
+    if (!acceso.ok) {
+      await transaction.rollback();
+      return responderError(res, acceso.status, acceso.message);
     }
 
     await precioPlan.destroy({ transaction });

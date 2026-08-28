@@ -365,6 +365,42 @@ const aplicarScopeSedesListadoMensualidades = (where, req) => {
       : { [Op.in]: sedeIds };
 };
 
+// Benjamin Orellana - 2026/08/28 - `pagos_mensualidades` también se usa
+// históricamente como soporte de FIADO COBRO y DEUDA MANUAL. El módulo
+// "Cuotas / Mensualidades" puede pedir `solo_cuotas=1` para excluir esos
+// registros sin borrarlos ni afectar el circuito de Deudas/Cobros.
+const aplicarFiltroSoloCuotas = (where, soloCuotas) => {
+  const activo = ['1', 'true', true, 1].includes(soloCuotas);
+
+  if (!activo) return;
+
+  const condicionesExistentes = where[Op.and]
+    ? Array.isArray(where[Op.and])
+      ? where[Op.and]
+      : [where[Op.and]]
+    : [];
+
+  where[Op.and] = [
+    ...condicionesExistentes,
+    {
+      membresia_id: {
+        [Op.ne]: null
+      }
+    },
+    {
+      [Op.or]: [
+        { observaciones: null },
+        {
+          observaciones: {
+            [Op.notLike]: '[DEUDA MANUAL]%'
+          }
+        }
+      ]
+    }
+  ];
+};
+
+
 export const OBR_PagosMensualidades_CTS = async (req, res) => {
   try {
     const { page, limit, offset } = obtenerPaginacion(req.query);
@@ -382,12 +418,14 @@ export const OBR_PagosMensualidades_CTS = async (req, res) => {
       vencimiento_desde,
       vencimiento_hasta,
       con_saldo,
+      solo_cuotas,
       order_by = 'id',
       order_direction = 'DESC'
     } = req.query;
 
     const where = {};
     aplicarScopeSedesListadoMensualidades(where, req);
+    aplicarFiltroSoloCuotas(where, solo_cuotas);
 
     const search = normalizarTextoBusqueda(q);
 
@@ -704,6 +742,7 @@ export const OBR_MisMensualidades_CTS = async (req, res) => {
 export const OBR_MensualidadesPendientes_CTS = async (req, res) => {
   try {
     const { page, limit, offset } = obtenerPaginacion(req.query);
+    const { solo_cuotas } = req.query;
 
     const where = {
       estado: {
@@ -715,6 +754,7 @@ export const OBR_MensualidadesPendientes_CTS = async (req, res) => {
     };
 
     aplicarScopeSedesListadoMensualidades(where, req);
+    aplicarFiltroSoloCuotas(where, solo_cuotas);
 
     const { count, rows } = await PagosMensualidadesModel.findAndCountAll({
       where,
@@ -751,7 +791,7 @@ export const OBR_MensualidadesPendientes_CTS = async (req, res) => {
 export const OBR_MensualidadesVencidas_CTS = async (req, res) => {
   try {
     const { page, limit, offset } = obtenerPaginacion(req.query);
-    const { fecha } = req.query;
+    const { fecha, solo_cuotas } = req.query;
 
     const fechaConsulta = fecha || obtenerFechaActualDateOnly();
 
@@ -784,6 +824,7 @@ export const OBR_MensualidadesVencidas_CTS = async (req, res) => {
     };
 
     aplicarScopeSedesListadoMensualidades(where, req);
+    aplicarFiltroSoloCuotas(where, solo_cuotas);
 
     const { count, rows } = await PagosMensualidadesModel.findAndCountAll({
       where,

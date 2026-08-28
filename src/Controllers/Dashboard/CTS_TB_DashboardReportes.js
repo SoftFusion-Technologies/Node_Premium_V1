@@ -266,14 +266,22 @@ export const OBR_DashboardCortesActividad_CTS = async (req, res) => {
                 AND DAY(p2.fecha_pago) <= :diaCorteProm
               GROUP BY DATE_FORMAT(p2.fecha_pago, '%Y-%m')
             ) totales) AS facturacion_acumulada_promedio_anual,
-            (SELECT COUNT(*) FROM pagos_mensualidades pm
-              WHERE pm.sede_id = s.id
-                AND pm.estado <> 'anulada'
-                AND pm.fecha_emision BETWEEN :primerDiaMes AND :corte) AS cuotas_vendidas,
-            (SELECT COUNT(*) FROM pagos_mensualidades pm
-              WHERE pm.sede_id = s.id
-                AND pm.estado <> 'anulada'
-                AND pm.fecha_emision BETWEEN :primerDiaMesAnterior AND :corteAnterior) AS cuotas_vendidas_mes_anterior
+            (SELECT COUNT(*)
+               FROM cobros_cobros c
+               INNER JOIN cobros_detalles cd
+                 ON cd.cobro_id = c.id
+                AND cd.tipo = 'plan'
+              WHERE c.sede_id = s.id
+                AND c.estado = 'confirmado'
+                AND DATE(c.fecha_cobro) BETWEEN :primerDiaMes AND :corte) AS cuotas_vendidas,
+            (SELECT COUNT(*)
+               FROM cobros_cobros c
+               INNER JOIN cobros_detalles cd
+                 ON cd.cobro_id = c.id
+                AND cd.tipo = 'plan'
+              WHERE c.sede_id = s.id
+                AND c.estado = 'confirmado'
+                AND DATE(c.fecha_cobro) BETWEEN :primerDiaMesAnterior AND :corteAnterior) AS cuotas_vendidas_mes_anterior
           FROM sedes_sedes s
           WHERE s.activo = 1
             ${scope.sql}
@@ -424,6 +432,8 @@ export const OBR_DashboardVencimientosPorDia_CTS = async (req, res) => {
       FROM pagos_mensualidades m
       WHERE m.fecha_vencimiento BETWEEN :desde AND :hasta
         AND m.estado IN ('pendiente', 'parcial', 'vencida')
+        AND m.membresia_id IS NOT NULL
+        AND (m.observaciones IS NULL OR m.observaciones NOT LIKE '[DEUDA MANUAL]%')
         ${scopeSql}
       GROUP BY DAY(m.fecha_vencimiento)
       ORDER BY dia
@@ -473,15 +483,12 @@ export const OBR_DashboardVencimientosPorDia_CTS = async (req, res) => {
  * ventas/pagos: una venta suelta (agua, barrita, etc.) suma a la
  * facturación bruta pero NO cuenta como cuota.
  *
- * `cuotas_mensuales` y `cuotas_vendidas` usan la MISMA fuente y regla desde
- * 2026/08/24 (pedido del cliente): una mensualidad cuenta una única vez, en
- * el mes en que se generó (`pagos_mensualidades.fecha_emision`) y siempre que
- * no haya sido anulada, sin importar si se paga de una vez o en varias cuotas
- * parciales. Antes `cuotas_mensuales` contaba pagos CONFIRMADOS
- * (`pagos_pagos.fecha_pago`), lo que la hacía divergir de `cuotas_vendidas`:
- * una misma venta pagada en 3 cuotas se contaba 3 veces, y una venta del mes
- * que quedaba pendiente de cobro no se contaba ese mes. Se corrigió para que
- * ambas coincidan.
+ * Benjamin Orellana - 2026/08/28 - `pagos_mensualidades` también contiene
+ * deudas de productos fiados y ajustes manuales, por lo que no es una fuente
+ * válida para medir VENTAS de cuotas. Desde este fix `cuotas_mensuales` y
+ * `cuotas_vendidas` cuentan exclusivamente líneas `tipo='plan'` pertenecientes
+ * a cobros confirmados, usando `cobros_cobros.fecha_cobro` como fecha de venta.
+ * Así una deuda de agua/barrita no puede inflar el KPI de cuotas vendidas.
  *
  * CAC Marketing = (gastos tipo Publicidad + Agencia) / altas del mes.
  * CAC Comercial = (gastos tipo Publicidad + Agencia + Front Comercial) /
@@ -543,10 +550,14 @@ export const OBR_DashboardCierreMensual_CTS = async (req, res) => {
           WHERE a.sede_id = s.id
             AND a.fecha_inicio < :desde
             AND (a.fecha_baja IS NULL OR a.fecha_baja >= :desde)) AS alumnos_inicio_mes,
-        (SELECT COUNT(*) FROM pagos_mensualidades pm
-          WHERE pm.sede_id = s.id
-            AND pm.estado <> 'anulada'
-            AND pm.fecha_emision BETWEEN :desde AND :hasta) AS cuotas_vendidas,
+        (SELECT COUNT(*)
+           FROM cobros_cobros c
+           INNER JOIN cobros_detalles cd
+             ON cd.cobro_id = c.id
+            AND cd.tipo = 'plan'
+          WHERE c.sede_id = s.id
+            AND c.estado = 'confirmado'
+            AND DATE(c.fecha_cobro) BETWEEN :desde AND :hasta) AS cuotas_vendidas,
         (SELECT COALESCE(SUM(p.monto), 0) FROM pagos_pagos p
           WHERE p.sede_id = s.id AND p.estado = 'confirmado'
             AND DATE(p.fecha_pago) BETWEEN :desde AND :hasta) AS facturacion_bruta,
@@ -591,8 +602,8 @@ export const OBR_DashboardCierreMensual_CTS = async (req, res) => {
       const gastoFrontComercial = Number(fila.gasto_front_comercial) || 0;
       const altasMensuales = Number(fila.altas_mensuales) || 0;
       const cuotasVendidas = Number(fila.cuotas_vendidas) || 0;
-      // Misma cifra que cuotas_vendidas: una mensualidad cuenta una única vez,
-      // en el mes en que se generó, sin importar en cuántos pagos se cobre.
+      // Misma cifra que cuotas_vendidas: cada línea de plan de un cobro
+      // confirmado cuenta una sola venta, independientemente de cómo se pague.
       const cuotasMensuales = cuotasVendidas;
       const facturacionNeta = facturacionBruta - gastos;
 

@@ -1533,11 +1533,39 @@ const crearMembresiaPlan = async ({
     membresiaVigente &&
       Number(membresiaVigente.plan_id) !== Number(linea.referencia_id),
   );
-  // Una renovación iniciada desde el botón "Renovar membresía" siempre
-  // representa la compra de un ciclo nuevo: comienza hoy y reinicia créditos.
-  // Se distingue del cobro/regularización del ciclo vigente.
-  const iniciarCicloAhora =
-    renovacionExplicita || renovarAhoraPorCuposAgotados || cambiarPlanAhora;
+  // RENOVACION_FUTURA_CONTEXTO_20260831
+  // En una renovación explícita la fecha del cobro no obliga a iniciar el
+  // nuevo ciclo hoy. Una fecha manual futura conserva el período actual.
+  const fechaInicioSolicitadaRenovacion =
+    renovacionExplicita && linea.fecha_inicio
+      ? String(linea.fecha_inicio).slice(0, 10)
+      : null;
+
+  if (
+    fechaInicioSolicitadaRenovacion &&
+    !esFechaDateOnlyValida(fechaInicioSolicitadaRenovacion)
+  ) {
+    throw new CobroOperacionError(
+      "La fecha de inicio seleccionada para la renovación no es válida.",
+      400,
+      "RENOVACION_FECHA_INICIO_INVALIDA",
+    );
+  }
+
+  if (
+    fechaInicioSolicitadaRenovacion &&
+    fechaInicioSolicitadaRenovacion < hoy
+  ) {
+    throw new CobroOperacionError(
+      "La fecha de inicio de la renovación no puede ser anterior a hoy.",
+      409,
+      "RENOVACION_FECHA_INICIO_ANTERIOR",
+    );
+  }
+
+  const iniciarCicloAhora = renovacionExplicita
+    ? fechaInicioSolicitadaRenovacion === hoy
+    : renovarAhoraPorCuposAgotados || cambiarPlanAhora;
 
   // Las reservas futuras ya no bloquean el cambio de plan: se conservan y
   // reasignan automáticamente dentro de esta misma transacción.
@@ -1560,6 +1588,40 @@ const crearMembresiaPlan = async ({
     renovacionFuturaExistente &&
     (!iniciarCicloAhora || renovacionExplicita)
   ) {
+    const mensualidadFutura = await PagosMensualidadesModel.findOne({
+      where: {
+        membresia_id: Number(renovacionFuturaExistente.id),
+        alumno_id: Number(alumno.id),
+      },
+      order: [["id", "DESC"]],
+      transaction,
+      lock: transaction.LOCK.UPDATE,
+    });
+
+    const saldoFuturo = redondear(Number(mensualidadFutura?.saldo || 0));
+    const estadoMensualidadFutura = String(
+      mensualidadFutura?.estado || "",
+    ).toLowerCase();
+
+    if (
+      mensualidadFutura &&
+      (estadoMensualidadFutura === "pagada" || saldoFuturo <= 0.009)
+    ) {
+      throw new CobroOperacionError(
+        `La membresía futura #${renovacionFuturaExistente.id} (${renovacionFuturaExistente.fecha_inicio} a ${renovacionFuturaExistente.fecha_vencimiento}) ya está pagada. No se registró otro cobro.`,
+        409,
+        "RENOVACION_FUTURA_PAGADA",
+      );
+    }
+
+    if (mensualidadFutura && saldoFuturo > 0.009) {
+      throw new CobroOperacionError(
+        `La membresía futura #${renovacionFuturaExistente.id} ya existe y tiene un saldo pendiente de $${saldoFuturo.toFixed(2)}. Saldá esa deuda existente; no se creó otra membresía.`,
+        409,
+        "RENOVACION_FUTURA_CON_SALDO",
+      );
+    }
+
     throw new CobroOperacionError(
       `El alumno ya tiene una renovación futura desde ${renovacionFuturaExistente.fecha_inicio}. Debe utilizar, completar o anular ese período antes de generar otro.`,
       409,
@@ -1580,12 +1642,17 @@ const crearMembresiaPlan = async ({
     lock: transaction.LOCK.UPDATE,
   });
 
-  const fechaInicio = iniciarCicloAhora
-    ? hoy
-    : linea.fecha_inicio ||
+  const fechaInicio = renovacionExplicita
+    ? fechaInicioSolicitadaRenovacion ||
       (ultima?.fecha_vencimiento && ultima.fecha_vencimiento >= hoy
-      ? sumarDias(ultima.fecha_vencimiento, 1)
-      : hoy);
+        ? sumarDias(ultima.fecha_vencimiento, 1)
+        : hoy)
+    : iniciarCicloAhora
+      ? hoy
+      : linea.fecha_inicio ||
+        (ultima?.fecha_vencimiento && ultima.fecha_vencimiento >= hoy
+          ? sumarDias(ultima.fecha_vencimiento, 1)
+          : hoy);
   const duracion = Math.max(Number(linea.duracion_dias || 1), 1);
   // Benjamin Orellana - 2026/08/10 - Unifica altas, cambios y renovaciones:
   // el periodo comercial del plan manda sobre la cantidad fija de días.
@@ -1645,13 +1712,15 @@ const crearMembresiaPlan = async ({
         transaction,
       }),
       observaciones: renovacionExplicita
-        ? `Generada por cobro #${cobroId} | NUEVO_CICLO_RENOVACION_EXPLICITA${
-            membresiaVigente
-              ? ` desde membresía #${membresiaVigente.id} | VENCIMIENTO_ANTERIOR=${String(
-                  membresiaVigente.fecha_vencimiento || "",
-                ).slice(0, 10)}`
-              : ""
-          }`
+        ? iniciarCicloAhora
+          ? `Generada por cobro #${cobroId} | NUEVO_CICLO_RENOVACION_EXPLICITA${
+              membresiaVigente
+                ? ` desde membresía #${membresiaVigente.id} | VENCIMIENTO_ANTERIOR=${String(
+                    membresiaVigente.fecha_vencimiento || "",
+                  ).slice(0, 10)}`
+                : ""
+            }`
+          : `Generada por cobro #${cobroId} | RENOVACION_ANTICIPADA_PROGRAMADA | INICIO_PROGRAMADO=${fechaInicio}`
         : cambiarPlanAhora
           ? `Generada por cobro #${cobroId} | NUEVO_CICLO_CAMBIO_PLAN desde membresía #${membresiaVigente.id}`
           : renovarAhoraPorCuposAgotados
@@ -1692,7 +1761,9 @@ const crearMembresiaPlan = async ({
         : Number(linea.total).toFixed(2),
       estado: estadoMensualidad,
       observaciones: renovacionExplicita
-        ? `Generada por cobro #${cobroId} | Renovación explícita: nuevo ciclo desde ${fechaInicio}`
+        ? iniciarCicloAhora
+          ? `Generada por cobro #${cobroId} | Renovación explícita: nuevo ciclo desde ${fechaInicio}`
+          : `Generada por cobro #${cobroId} | Renovación anticipada programada desde ${fechaInicio}`
         : cambiarPlanAhora
           ? `Generada por cobro #${cobroId} | Cambio de plan inmediato desde membresía #${membresiaVigente.id}`
           : renovarAhoraPorCuposAgotados

@@ -4,6 +4,7 @@ import AgendaTurnosModel from '../../Models/Agenda/MD_TB_AgendaTurnos.js';
 import AlumnosAsistenciasModel from '../../Models/Alumno/MD_TB_AlumnosAsistencias.js';
 import AlumnosMembresiasModel from '../../Models/Alumno/MD_TB_AlumnosMembresias.js';
 import { validarTurnoParaMembresia } from './agendaRestricciones.service.js';
+import { membresiaPuedeReservar } from './membresiaReservable.service.js';
 
 export const RESERVAS_PENDIENTES_SERVICE_VERSION = '20260804-v2-cobro-unico-turno';
 
@@ -58,7 +59,8 @@ const resolverPendientesDuplicadas = async ({
 };
 
 export const imputarReservasPendientesMembresia = async ({ membresia, transaction }) => {
-  if (!membresia || String(membresia.estado) !== 'activa') {
+  // FIADO_RESERVABLE_PENDIENTES_20260831
+  if (!membresia || !(await membresiaPuedeReservar({ membresia, transaction }))) {
     return { imputadas: 0, reservas_ids: [] };
   }
 
@@ -69,7 +71,13 @@ export const imputarReservasPendientesMembresia = async ({ membresia, transactio
     })
     : membresia;
 
-  if (!membresiaOperativa || String(membresiaOperativa.estado) !== 'activa') {
+  if (
+    !membresiaOperativa ||
+    !(await membresiaPuedeReservar({
+      membresia: membresiaOperativa,
+      transaction
+    }))
+  ) {
     return { imputadas: 0, reservas_ids: [] };
   }
 

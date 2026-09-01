@@ -29,6 +29,7 @@ import SistemaConfiguracionModel      from '../../Models/Sistema/MD_TB_SistemaCo
 import SedesModel                     from '../../Models/Sede/MD_TB_Sedes.js';
 import db                             from '../../DataBase/db.js';
 import { normalizarCicloMembresiasAlumno } from '../../Services/Alumno/membresiaCiclo.service.js';
+import { membresiaPuedeReservar } from '../../Services/Agenda/membresiaReservable.service.js';
 import { validarTurnoParaMembresia } from '../../Services/Agenda/agendaRestricciones.service.js';
 
 // ─── Helper interno ───────────────────────────────────────────────────────────
@@ -139,7 +140,8 @@ const buscarMembresiaElegibleReserva = async ({ alumnoId, turno, transaction = n
     where: {
       alumno_id: alumnoId,
       plan_id: { [Op.ne]: null },
-      estado: 'activa',
+      // FIADO_RESERVABLE_AGENDA_20260831
+      estado: { [Op.in]: ['activa', 'pendiente_pago'] },
       fecha_inicio: { [Op.lte]: turno.fecha },
       fecha_vencimiento: { [Op.gte]: turno.fecha },
       clases_disponibles: { [Op.gt]: 0 }
@@ -150,15 +152,26 @@ const buscarMembresiaElegibleReserva = async ({ alumnoId, turno, transaction = n
   if (lock && transaction) opciones.lock = transaction.LOCK.UPDATE;
 
   const candidatas = await AlumnosMembresiasModel.findAll(opciones);
+  const candidatasOperativas = [];
+
   for (const membresia of candidatas) {
-    const validacion = await validarTurnoParaMembresia({ membresia, turno, transaction });
+    const habilitada = await membresiaPuedeReservar({ membresia, transaction });
+    if (!habilitada) continue;
+
+    candidatasOperativas.push(membresia);
+
+    const validacion = await validarTurnoParaMembresia({
+      membresia,
+      turno,
+      transaction
+    });
     if (validacion.permitido) return { membresia, validacion };
   }
 
-  if (candidatas.length) {
+  if (candidatasOperativas.length) {
     return {
       membresia: null,
-      membresiaBloqueada: candidatas[0],
+      membresiaBloqueada: candidatasOperativas[0],
       validacion: {
         permitido: false,
         motivo: 'El día u horario de esta clase no está incluido en la modalidad contratada.'

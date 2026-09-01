@@ -27,6 +27,7 @@ import UsuariosModel                from '../../Models/Usuario/MD_TB_Usuarios.js
 import AlumnosModel                 from '../../Models/Alumno/MD_TB_Alumnos.js';
 import db                           from '../../DataBase/db.js';
 import { validarTurnoParaMembresia } from '../../Services/Agenda/agendaRestricciones.service.js';
+import { membresiaPuedeReservar } from '../../Services/Agenda/membresiaReservable.service.js';
 import {
   ESTADOS_RESERVA_QUE_OCUPAN_CUPO,
   obtenerMinutosCancelacion,
@@ -1666,18 +1667,26 @@ export const OBRS_TurnosAlumno_CTS = async (req, res) => {
       }
     }
 
-    const membresias = esPruebaInicial
+    // FIADO_RESERVABLE_TURNOS_ALUMNO_20260831
+    const membresiasCandidatas = esPruebaInicial
       ? []
       : await AlumnosMembresiasModel.findAll({
           where: {
             alumno_id: alumnoId,
             plan_id: { [Op.ne]: null },
-            estado: 'activa',
+            estado: { [Op.in]: ['activa', 'pendiente_pago'] },
             fecha_vencimiento: { [Op.gte]: hoyServidor },
             clases_disponibles: { [Op.gt]: 0 }
           },
           order: [['fecha_inicio', 'ASC'], ['id', 'ASC']]
         });
+
+    const membresias = [];
+    for (const membresia of membresiasCandidatas) {
+      if (await membresiaPuedeReservar({ membresia })) {
+        membresias.push(membresia);
+      }
+    }
 
     if (!esPruebaInicial && !membresias.length) {
       return res.status(200).json({

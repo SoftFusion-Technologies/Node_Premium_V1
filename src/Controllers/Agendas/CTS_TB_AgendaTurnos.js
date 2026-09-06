@@ -694,15 +694,22 @@ export const OBRS_AsistenciasRango_CTS = async (req, res) => {
  */
 export const OBRS_HistorialCancelaciones_CTS = async (req, res) => {
   try {
-    const { sede_id, fecha, vista = 'diaria', mes } = req.query;
+    const {
+      sede_id,
+      fecha,
+      vista = 'diaria',
+      mes,
+      fecha_desde,
+      fecha_hasta
+    } = req.query;
 
     if (!sede_id) {
       return res.status(400).json({ message: 'Falta el parámetro sede_id.' });
     }
 
-    if (!['diaria', 'mensual'].includes(String(vista))) {
+    if (!['diaria', 'mensual', 'periodo'].includes(String(vista))) {
       return res.status(400).json({
-        message: 'La vista debe ser diaria o mensual.'
+        message: 'La vista debe ser diaria, mensual o periodo.'
       });
     }
 
@@ -740,42 +747,7 @@ export const OBRS_HistorialCancelaciones_CTS = async (req, res) => {
       }
     ];
 
-    if (String(vista) === 'mensual') {
-      const mesConsulta = mes || dayjs().format('YYYY-MM');
-
-      if (!/^\d{4}-\d{2}$/.test(mesConsulta)) {
-        return res.status(400).json({
-          message: 'El mes debe tener formato YYYY-MM.'
-        });
-      }
-
-      const inicioMes = dayjs(`${mesConsulta}-01`);
-
-      if (!inicioMes.isValid()) {
-        return res.status(400).json({ message: 'Mes inválido.' });
-      }
-
-      const fechaDesde = inicioMes.format('YYYY-MM-DD 00:00:00');
-      const fechaHasta = inicioMes
-        .add(1, 'month')
-        .format('YYYY-MM-DD 00:00:00');
-
-      const reservas = await AgendaTurnosReservasModel.findAll({
-        where: {
-          estado: 'cancelada',
-          fecha_cancelacion: {
-            [Op.gte]: fechaDesde,
-            [Op.lt]: fechaHasta
-          }
-        },
-        attributes: atributosReserva,
-        include: includeBase,
-        order: [
-          ['fecha_cancelacion', 'DESC'],
-          ['id', 'DESC']
-        ]
-      });
-
+    const construirRespuestaAnalitica = (reservas) => {
       const agrupadas = new Map();
 
       reservas.forEach((reservaModelo) => {
@@ -817,10 +789,8 @@ export const OBRS_HistorialCancelaciones_CTS = async (req, res) => {
         );
       });
 
-      return res.status(200).json({
-        status: 'success',
-        vista: 'mensual',
-        mes: mesConsulta,
+      return {
+        data,
         resumen: {
           total_cancelaciones: reservas.length,
           alumnos_con_cancelaciones: data.length,
@@ -828,8 +798,135 @@ export const OBRS_HistorialCancelaciones_CTS = async (req, res) => {
             (total, alumno) => total + alumno.cancelaciones_tardias,
             0
           )
+        }
+      };
+    };
+
+    if (String(vista) === 'mensual') {
+      const mesConsulta = mes || dayjs().format('YYYY-MM');
+
+      if (!/^\d{4}-\d{2}$/.test(mesConsulta)) {
+        return res.status(400).json({
+          message: 'El mes debe tener formato YYYY-MM.'
+        });
+      }
+
+      const inicioMes = dayjs(`${mesConsulta}-01`);
+
+      if (!inicioMes.isValid()) {
+        return res.status(400).json({ message: 'Mes inválido.' });
+      }
+
+      const fechaDesde = inicioMes.format('YYYY-MM-DD 00:00:00');
+      const fechaHasta = inicioMes
+        .add(1, 'month')
+        .format('YYYY-MM-DD 00:00:00');
+
+      const reservas = await AgendaTurnosReservasModel.findAll({
+        where: {
+          estado: 'cancelada',
+          fecha_cancelacion: {
+            [Op.gte]: fechaDesde,
+            [Op.lt]: fechaHasta
+          }
         },
-        data
+        attributes: atributosReserva,
+        include: includeBase,
+        order: [
+          ['fecha_cancelacion', 'DESC'],
+          ['id', 'DESC']
+        ]
+      });
+
+      const resultado = construirRespuestaAnalitica(reservas);
+
+      return res.status(200).json({
+        status: 'success',
+        vista: 'mensual',
+        mes: mesConsulta,
+        resumen: resultado.resumen,
+        data: resultado.data
+      });
+    }
+
+    if (String(vista) === 'periodo') {
+      const fechaDesdeConsulta = String(fecha_desde || '');
+      const fechaHastaSolicitada = String(fecha_hasta || '');
+      const patronFecha = /^\d{4}-\d{2}-\d{2}$/;
+
+      if (
+        !patronFecha.test(fechaDesdeConsulta) ||
+        !patronFecha.test(fechaHastaSolicitada)
+      ) {
+        return res.status(400).json({
+          message: 'fecha_desde y fecha_hasta deben tener formato YYYY-MM-DD.'
+        });
+      }
+
+      const desdeValida =
+        dayjs(fechaDesdeConsulta).isValid() &&
+        dayjs(fechaDesdeConsulta).format('YYYY-MM-DD') === fechaDesdeConsulta;
+      const hastaValida =
+        dayjs(fechaHastaSolicitada).isValid() &&
+        dayjs(fechaHastaSolicitada).format('YYYY-MM-DD') ===
+          fechaHastaSolicitada;
+
+      if (!desdeValida || !hastaValida) {
+        return res.status(400).json({ message: 'Rango de fechas inválido.' });
+      }
+
+      if (fechaDesdeConsulta > fechaHastaSolicitada) {
+        return res.status(400).json({
+          message: 'La fecha desde no puede ser posterior a la fecha hasta.'
+        });
+      }
+
+      const hoy = dayjs().format('YYYY-MM-DD');
+      const fechaHastaConsulta =
+        fechaHastaSolicitada > hoy ? hoy : fechaHastaSolicitada;
+
+      if (fechaDesdeConsulta > fechaHastaConsulta) {
+        return res.status(200).json({
+          status: 'success',
+          vista: 'periodo',
+          fecha_desde: fechaDesdeConsulta,
+          fecha_hasta: fechaHastaConsulta,
+          resumen: {
+            total_cancelaciones: 0,
+            alumnos_con_cancelaciones: 0,
+            cancelaciones_tardias: 0
+          },
+          data: []
+        });
+      }
+
+      const reservas = await AgendaTurnosReservasModel.findAll({
+        where: {
+          estado: 'cancelada',
+          fecha_cancelacion: {
+            [Op.gte]: `${fechaDesdeConsulta} 00:00:00`,
+            [Op.lt]: dayjs(fechaHastaConsulta)
+              .add(1, 'day')
+              .format('YYYY-MM-DD 00:00:00')
+          }
+        },
+        attributes: atributosReserva,
+        include: includeBase,
+        order: [
+          ['fecha_cancelacion', 'DESC'],
+          ['id', 'DESC']
+        ]
+      });
+
+      const resultado = construirRespuestaAnalitica(reservas);
+
+      return res.status(200).json({
+        status: 'success',
+        vista: 'periodo',
+        fecha_desde: fechaDesdeConsulta,
+        fecha_hasta: fechaHastaConsulta,
+        resumen: resultado.resumen,
+        data: resultado.data
       });
     }
 

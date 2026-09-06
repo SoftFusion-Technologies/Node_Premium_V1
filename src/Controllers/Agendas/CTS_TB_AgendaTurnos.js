@@ -598,10 +598,37 @@ export const OBRS_AsistenciasRango_CTS = async (req, res) => {
       });
     }
 
+    // Benjamin Orellana - 2026/09/06 - Este endpoint representa historial.
+    // Una reserva futura todavía no tiene asistencia registrada y el sistema
+    // la toma por defecto como `asistio`; por eso jamás debe entrar al rango.
+    const fechaDesde = String(fecha_desde).slice(0, 10);
+    const fechaHastaSolicitada = String(fecha_hasta).slice(0, 10);
+    const hoy = dayjs().format('YYYY-MM-DD');
+
+    if (
+      !/^\d{4}-\d{2}-\d{2}$/.test(fechaDesde) ||
+      !/^\d{4}-\d{2}-\d{2}$/.test(fechaHastaSolicitada) ||
+      !dayjs(fechaDesde).isValid() ||
+      !dayjs(fechaHastaSolicitada).isValid() ||
+      fechaDesde > fechaHastaSolicitada
+    ) {
+      return res.status(400).json({
+        message: 'El rango de fechas es inválido.'
+      });
+    }
+
+    const fechaHastaEfectiva =
+      fechaHastaSolicitada > hoy ? hoy : fechaHastaSolicitada;
+
+    // Si todo el rango solicitado es futuro, no existen asistencias históricas.
+    if (fechaDesde > fechaHastaEfectiva) {
+      return res.status(200).json({ status: 'success', data: [] });
+    }
+
     const turnos = await AgendaTurnosModel.findAll({
       where: {
         sede_id,
-        fecha: { [Op.between]: [fecha_desde, fecha_hasta] },
+        fecha: { [Op.between]: [fechaDesde, fechaHastaEfectiva] },
         estado: { [Op.ne]: 'cancelado' }
       },
       include: [

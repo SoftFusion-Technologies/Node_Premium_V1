@@ -74,6 +74,18 @@ const porcentajeValido = (valor) => {
   return Number.isFinite(numero) && numero >= 0 && numero <= 100;
 };
 
+// Benjamin Orellana - 06/09/2026 - Punto 1C del Word - El servicio acepta
+// descuento fijo o porcentual por concepto, pero nunca ambos simultáneamente.
+const importeNoNegativoValido = (valor) => {
+  const numero = Number(valor || 0);
+  return Number.isFinite(numero) && numero >= 0;
+};
+
+const descuentoValorMembresia = (linea) =>
+  Number(linea?.descuento_porcentaje || 0) > 0
+    ? 0
+    : redondear(Number(linea?.descuento_importe || 0));
+
 const fechaArgentina = () => {
   const partes = new Intl.DateTimeFormat("en-CA", {
     timeZone: "America/Argentina/Buenos_Aires",
@@ -390,10 +402,29 @@ const resolverConceptos = async ({
 
     if (
       !porcentajeValido(item.descuento_porcentaje) ||
-      !porcentajeValido(item.impuesto_porcentaje)
+      !porcentajeValido(item.impuesto_porcentaje) ||
+      !importeNoNegativoValido(item.descuento_importe)
     ) {
       throw new CobroOperacionError(
-        "Descuentos e impuestos deben estar entre 0% y 100%.",
+        "Los descuentos deben ser importes no negativos y los porcentajes deben estar entre 0% y 100%.",
+      );
+    }
+
+    const descuentoPorcentajeSolicitado = Number(
+      item.descuento_porcentaje || 0,
+    );
+    const descuentoFijoSolicitado = redondear(
+      Number(item.descuento_importe || 0),
+    );
+
+    if (
+      descuentoPorcentajeSolicitado > 0 &&
+      descuentoFijoSolicitado > 0
+    ) {
+      throw new CobroOperacionError(
+        "Seleccione descuento porcentual o descuento fijo, no ambos.",
+        400,
+        "DESCUENTO_TIPO_DUPLICADO",
       );
     }
 
@@ -411,6 +442,7 @@ const resolverConceptos = async ({
         }
         if (
           Number(item.descuento_porcentaje || 0) !== 0 ||
+          Number(item.descuento_importe || 0) !== 0 ||
           Number(item.impuesto_porcentaje || 0) !== 0
         ) {
           throw new CobroOperacionError(
@@ -562,6 +594,7 @@ const resolverConceptos = async ({
 
       if (
         Number(item.descuento_porcentaje || 0) !== 0 ||
+        Number(item.descuento_importe || 0) !== 0 ||
         Number(item.impuesto_porcentaje || 0) !== 0
       ) {
         throw new CobroOperacionError(
@@ -699,10 +732,23 @@ const resolverConceptos = async ({
       throw new CobroOperacionError("El precio manual no es válido.");
     }
 
-    const descuentoPorcentaje = Number(item.descuento_porcentaje || 0);
+    const descuentoPorcentaje = descuentoPorcentajeSolicitado;
+    const descuentoFijo = descuentoFijoSolicitado;
     const impuestoPorcentaje = Number(item.impuesto_porcentaje || 0);
     const importe = redondear(precioUnitario * cantidad);
-    const descuentoImporte = redondear(importe * (descuentoPorcentaje / 100));
+
+    if (descuentoFijo - importe > 0.009) {
+      throw new CobroOperacionError(
+        "El descuento fijo no puede superar el importe del concepto.",
+        400,
+        "DESCUENTO_FIJO_EXCEDIDO",
+      );
+    }
+
+    const descuentoImporte =
+      descuentoFijo > 0
+        ? descuentoFijo
+        : redondear(importe * (descuentoPorcentaje / 100));
     const base = redondear(importe - descuentoImporte);
     const impuestoImporte = redondear(base * (impuestoPorcentaje / 100));
     const total = redondear(base + impuestoImporte);
@@ -1362,7 +1408,7 @@ const crearMembresiaPlanMigracionCobrada = async ({
       fecha_vencimiento: configuracion.fecha_vencimiento,
       estado: confirmado ? "activa" : "pendiente_pago",
       precio_lista: Number(linea.precio_unitario).toFixed(2),
-      descuento_valor: "0.00",
+      descuento_valor: descuentoValorMembresia(linea).toFixed(2),
       descuento_porcentaje: Number(linea.descuento_porcentaje).toFixed(2),
       precio_final: basePlan.toFixed(2),
       clases_incluidas: configuracion.clases_incluidas,
@@ -1697,10 +1743,10 @@ const crearMembresiaPlan = async ({
       fecha_vencimiento: fechaVencimiento,
       estado: confirmado ? "activa" : "pendiente_pago",
       precio_lista: Number(linea.precio_unitario).toFixed(2),
-      // La membresía histórica calcula precio final restando valor y porcentaje.
-      // Como el drawer trabaja con descuento porcentual, no duplicamos el mismo
-      // descuento también en descuento_valor.
-      descuento_valor: "0.00",
+      // Benjamin Orellana - 06/09/2026 - Punto 1C del Word - La membresía
+      // conserva el tipo real del descuento para que precio_final e historial
+      // no dupliquen el beneficio.
+      descuento_valor: descuentoValorMembresia(linea).toFixed(2),
       descuento_porcentaje: Number(linea.descuento_porcentaje).toFixed(2),
       precio_final: basePlan.toFixed(2),
       clases_incluidas: clases,
@@ -5294,6 +5340,7 @@ export const editarCobroConfirmado = async ({
         cantidad: Number(item.cantidad),
         precio_unitario: Number(item.precio_unitario),
         descuento_porcentaje: Number(item.descuento_porcentaje),
+        descuento_importe: Number(item.descuento_importe),
         impuesto_porcentaje: Number(item.impuesto_porcentaje),
         total: Number(item.total),
       })),
@@ -5568,7 +5615,7 @@ export const editarCobroConfirmado = async ({
         await AlumnosMembresiasModel.update(
           {
             precio_lista: Number(planNuevo.precio_unitario).toFixed(2),
-            descuento_valor: "0.00",
+            descuento_valor: descuentoValorMembresia(planNuevo).toFixed(2),
             descuento_porcentaje: Number(
               planNuevo.descuento_porcentaje,
             ).toFixed(2),
@@ -5662,6 +5709,7 @@ export const editarCobroConfirmado = async ({
             cantidad: item.cantidad,
             precio_unitario: item.precio_unitario,
             descuento_porcentaje: item.descuento_porcentaje,
+            descuento_importe: item.descuento_importe,
             impuesto_porcentaje: item.impuesto_porcentaje,
             total: item.total,
           })),

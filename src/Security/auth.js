@@ -69,7 +69,12 @@ const PERMISOS_FINANCIEROS_OPERATIVOS = new Set([
   'caja.contar',
   'caja.cerrar',
   'gastos.ver',
-  'medios_pago.ver'
+  'medios_pago.ver',
+  // Benjamin Orellana - 06/09/2026 - Punto 0 del Word - Permisos de solo
+  // lectura sobre cuenta corriente de ALUMNOS. No habilitan deudas.ver /
+  // saldos.ver ni acciones de gestión financiera histórica.
+  'deudas.alumnos_ver',
+  'saldos.alumnos_ver'
 ]);
 
 const esPermisoFinancieroBloqueadoOperativo = (codigo) => {
@@ -737,16 +742,21 @@ export const requirePermission = (permisosRequeridos = []) => {
       });
     }
 
+    // Benjamin Orellana - 06/09/2026 - Punto 0 del Word - Conservamos en el
+    // request el permiso RBAC que efectivamente autorizó la ruta. Esto permite
+    // que un controlador distinga lectura amplia de lectura acotada sin volver
+    // a inferir privilegios por nombre de rol.
     if (usuarioTieneAccesoTodasSedes(req.user)) {
+      req.rbac_permission_granted = requeridosEvaluables[0] || null;
       return next();
     }
 
     const permisosEfectivos = req.user.permisos || [];
-    const autorizado = requeridosEvaluables.some((codigo) =>
+    const permisoAutorizado = requeridosEvaluables.find((codigo) =>
       permisosEfectivos.includes(codigo)
     );
 
-    if (!autorizado) {
+    if (!permisoAutorizado) {
       return res.status(403).json({
         ok: false,
         code: 'PERMISSION_DENIED',
@@ -755,6 +765,7 @@ export const requirePermission = (permisosRequeridos = []) => {
       });
     }
 
+    req.rbac_permission_granted = permisoAutorizado;
     return next();
   };
 };

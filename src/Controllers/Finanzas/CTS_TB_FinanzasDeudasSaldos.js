@@ -34,6 +34,19 @@ const fechaArgentina = () => {
   return `${values.year}-${values.month}-${values.day}`;
 };
 
+// Benjamin Orellana - 06/09/2026 - Punto 0 del Word - El middleware RBAC
+// informa qué permiso autorizó la ruta. Cuando fue *.alumnos_ver, el backend
+// fuerza cliente_tipo='alumno' en filas y resumen; con el permiso financiero
+// amplio conserva el consolidado alumnos + empleados.
+const aplicarScopeSoloAlumnos = ({ where, req, permisoAlumnos }) => {
+  if (req?.rbac_permission_granted === permisoAlumnos) {
+    where.push("cliente_tipo = 'alumno'");
+    return true;
+  }
+
+  return false;
+};
+
 const agregarBusquedaPersona = ({ where, replacements, q }) => {
   const texto = String(q || "").trim().replace(/\s+/g, " ");
   if (!texto) return;
@@ -231,6 +244,11 @@ export const OBR_DeudasFinanzas_CTS = async (req, res) => {
     const where = ["saldo > 0"];
     const replacements = { hoy, limite, offset };
 
+    aplicarScopeSoloAlumnos({
+      where,
+      req,
+      permisoAlumnos: "deudas.alumnos_ver",
+    });
     agregarBusquedaPersona({ where, replacements, q: req.query.q });
     construirFiltroSedesScope({ where, replacements, req });
 
@@ -513,6 +531,11 @@ export const OBR_SaldosFinanzas_CTS = async (req, res) => {
     const where = ["1 = 1"];
     const replacements = { limite, offset };
 
+    aplicarScopeSoloAlumnos({
+      where,
+      req,
+      permisoAlumnos: "saldos.alumnos_ver",
+    });
     agregarBusquedaPersona({ where, replacements, q: req.query.q });
     construirFiltroSedesScope({ where, replacements, req });
 

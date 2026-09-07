@@ -173,10 +173,13 @@ const alcanceSedeOperativo = requireFinancialScope({
 });
 
 // Benjamin Orellana - 2026/07/17 - Consolidados financieros de deuda y saldo.
+// Benjamin Orellana - 06/09/2026 - Punto 0 del Word - Los perfiles con
+// permiso específico pueden consultar únicamente cuenta corriente de alumnos;
+// deudas.ver / saldos.ver conservan el consolidado financiero amplio.
 router.get(
   "/finanzas/deudas",
   authenticateToken,
-  requirePermission("deudas.ver"),
+  requirePermission(["deudas.ver", "deudas.alumnos_ver"]),
   requireFinancialListScope(),
   OBR_DeudasFinanzas_CTS,
 );
@@ -184,7 +187,7 @@ router.get(
 router.get(
   "/finanzas/saldos",
   authenticateToken,
-  requirePermission("saldos.ver"),
+  requirePermission(["saldos.ver", "saldos.alumnos_ver"]),
   requireFinancialListScope(),
   OBR_SaldosFinanzas_CTS,
 );
@@ -1071,10 +1074,12 @@ router.post(
 );
 
 // Benjamin Orellana - 2026/07/15 - Consulta saldo y auditoría comercial del alumno.
+// Benjamin Orellana - 06/09/2026 - Punto 0 del Word - El historial de saldo
+// de un alumno se autoriza por RBAC específico, sin excepción fija por rol.
 router.get(
   "/alumnos/:alumno_id/saldo",
   authenticateToken,
-  requireOperacionFinancieraAlumno(["saldos.ver", "saldos.gestionar"]),
+  requirePermission(["saldos.ver", "saldos.gestionar", "saldos.alumnos_ver"]),
   requireFinancialScope({
     sources: [sourceParam("alumno", "alumno_id")],
     requireFinanzas: false,

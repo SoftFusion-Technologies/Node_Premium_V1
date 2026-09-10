@@ -1608,6 +1608,8 @@ export const OBR_Alumnos_CTS = async (req, res) => {
     const {
       q,
       sede_id,
+      incluir_sin_sede,
+      sin_sede,
       estado,
       origen_registro,
       sin_plan,
@@ -1634,6 +1636,28 @@ export const OBR_Alumnos_CTS = async (req, res) => {
         ok: false,
         message: scope.message
       });
+    }
+
+    // Benjamin Orellana - 10/09/2026 - Excepción exclusiva del listado de
+    // Alumnos: un SUPER_ADMIN sin acceso global puede ver su sede seleccionada
+    // más los alumnos aún no asignados. No modifica el scope compartido por
+    // Recaptaciones ni otros módulos. El filtro sin_sede permite aislarlos.
+    const esSuperAdminListado =
+      String(req.user?.rol_codigo || '').toUpperCase() === 'SUPER_ADMIN';
+    const filtrarSoloSinSede =
+      esSuperAdminListado && normalizarTinyint(sin_sede, 0) === 1;
+    const puedeIncluirSinSedeEnListado =
+      esSuperAdminListado &&
+      !usuarioEsGlobal(req.user) &&
+      Boolean(sede_id) &&
+      normalizarTinyint(incluir_sin_sede, 0) === 1;
+
+    if (filtrarSoloSinSede) {
+      where.sede_id = { [Op.is]: null };
+    } else if (puedeIncluirSinSedeEnListado) {
+      where.sede_id = {
+        [Op.or]: [{ [Op.eq]: Number(sede_id) }, { [Op.is]: null }]
+      };
     }
 
     const whereEstadisticas = { ...where };

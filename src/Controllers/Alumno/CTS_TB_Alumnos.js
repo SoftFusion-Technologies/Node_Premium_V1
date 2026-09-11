@@ -231,10 +231,25 @@ export const construirFiltroAlumnoCuotaVencida = (mesesMinimos = 0) => {
 
 /*
  * Benjamin Orellana - 2026/08/04 - Fecha de vencimiento comercial del alumno.
- * Se toma la membresía más reciente que ya fue activada o cerrada por
- * vencimiento. Las membresías pendientes de pago no regularizan al alumno
- * hasta que el cobro las convierta en activas.
+ * Las membresías pendientes de pago no regularizan al alumno hasta que el
+ * cobro las convierta en activas.
+ *
+ * Benjamin Orellana - 11/09/2026 - Ajuste filtro vencidos: si existe una
+ * membresía activa/congelada vigente hoy, se prioriza por encima de cualquier
+ * membresía histórica vencida aunque esta última tenga una fecha_inicio más
+ * reciente. Evita falsos positivos en Alumnos > Cuota vencida.
  */
+const construirOrdenReferenciaVencimientoMembresia = (aliasMembresia) => `
+  CASE
+    WHEN ${aliasMembresia}.estado IN ('activa', 'congelada')
+      AND ${aliasMembresia}.fecha_vencimiento >= CURDATE()
+    THEN 0
+    ELSE 1
+  END ASC,
+  ${aliasMembresia}.fecha_inicio DESC,
+  ${aliasMembresia}.id DESC
+`;
+
 const construirSubconsultaFechaVencimientoMembresia = () => {
   const queryGenerator = db.getQueryInterface().queryGenerator;
   const tablaMembresias = queryGenerator.quoteTable(
@@ -252,7 +267,7 @@ const construirSubconsultaFechaVencimientoMembresia = () => {
     WHERE ${aliasMembresia}.alumno_id = ${aliasPrincipal}.${columnaIdAlumno}
       AND ${aliasMembresia}.estado IN ('activa', 'vencida', 'congelada')
       AND ${aliasMembresia}.fecha_inicio <= CURDATE()
-    ORDER BY ${aliasMembresia}.fecha_inicio DESC, ${aliasMembresia}.id DESC
+    ORDER BY ${construirOrdenReferenciaVencimientoMembresia(aliasMembresia)}
     LIMIT 1
   )`;
 };
@@ -501,27 +516,26 @@ export const obtenerDiasSeguimientoPorAlumnos = async (alumnoIds) => {
 const obtenerVencimientosComercialesPorAlumnos = async (alumnoIds) => {
   if (!alumnoIds.length) return new Map();
 
+  // Benjamin Orellana - 11/09/2026 - Mantiene el mismo criterio de prioridad
+  // usado por el filtro SQL para que la fila y el filtro de vencimiento nunca
+  // tomen membresías distintas como referencia.
   const filas = await db.query(
     `
-      SELECT m.alumno_id, m.fecha_vencimiento
-      FROM alumnos_membresias m
-      WHERE m.alumno_id IN (:alumnoIds)
-        AND m.estado IN ('activa', 'vencida', 'congelada')
-        AND m.fecha_inicio <= CURDATE()
-        AND NOT EXISTS (
-          SELECT 1
-          FROM alumnos_membresias posterior
-          WHERE posterior.alumno_id = m.alumno_id
-            AND posterior.estado IN ('activa', 'vencida', 'congelada')
-            AND posterior.fecha_inicio <= CURDATE()
-            AND (
-              posterior.fecha_inicio > m.fecha_inicio
-              OR (
-                posterior.fecha_inicio = m.fecha_inicio
-                AND posterior.id > m.id
-              )
-            )
-        )
+      SELECT priorizada.alumno_id, priorizada.fecha_vencimiento
+      FROM (
+        SELECT
+          m.alumno_id,
+          m.fecha_vencimiento,
+          ROW_NUMBER() OVER (
+            PARTITION BY m.alumno_id
+            ORDER BY ${construirOrdenReferenciaVencimientoMembresia('m')}
+          ) AS rn
+        FROM alumnos_membresias m
+        WHERE m.alumno_id IN (:alumnoIds)
+          AND m.estado IN ('activa', 'vencida', 'congelada')
+          AND m.fecha_inicio <= CURDATE()
+      ) AS priorizada
+      WHERE priorizada.rn = 1
     `,
     {
       replacements: { alumnoIds },
